@@ -1,0 +1,27 @@
+appId: com.tingear.app
+productName: 听伴
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron/*'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+extraResources:
+  - from: electron/ocr
+    to: ocr
+win:
+  executableName: 听伴
+  icon: icon.ico
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  shortcutName: 听伴
+  uninstallDisplayName: 听伴
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

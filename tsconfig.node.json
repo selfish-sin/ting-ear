@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "outDir": "./out",
+    "declaration": true
+  },
+  "include": [
+    "electron",
+    "electron-vite.config.ts",
+    "src/cleanRules.ts",
+    "src/shortcuts.ts",
+    "src/utils/albumUtils.ts",
+    "src/utils/bookData.ts"
+  ]
+}

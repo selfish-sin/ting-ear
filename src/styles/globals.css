@@ -1,0 +1,154 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom scrollbar — 悬停浮现 (macOS 风格) */
+/* 默认：占位但完全透明，视觉上"看不见"滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  background: transparent;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: background-color 0.2s ease;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0);
+}
+/* 悬停到任意可滚动区域 → 滚动条浮现 + 轻微展开 (8px → 11px) */
+:hover::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+:hover::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+}
+.dark :hover::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.5);
+}
+/* 鼠标移到滚动条本身（准备拖动）→ 更实，明确可操作 */
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.7);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(203, 213, 225, 0.7);
+}
+
+/* Sentence highlight animation */
+.sentence-enter {
+  animation: sentenceFadeIn 0.3s ease-out;
+}
+@keyframes sentenceFadeIn {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}
+
+/* Pulse glow for currently playing sentence — opacity-only animation (GPU composited) */
+.sentence-active {
+  position: relative;
+}
+.sentence-active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 0.375rem;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.45);
+  pointer-events: none;
+  animation: sentenceGlow 2.5s ease-in-out infinite;
+}
+@keyframes sentenceGlow {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* Play button animation */
+.btn-bounce {
+  animation: btnBounce 0.2s ease-out;
+}
+@keyframes btnBounce {
+  0% { transform: scale(0.85); }
+  100% { transform: scale(1); }
+}
+
+/* Drag region */
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Toast animation */
+.toast-enter {
+  animation: toastSlideIn 0.3s ease-out;
+}
+.toast-exit {
+  animation: toastSlideOut 0.3s ease-in forwards;
+}
+@keyframes toastSlideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes toastSlideOut {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0; }
+}
+
+/* Player OSD (speed / volume feedback) */
+.osd-enter {
+  animation: osdPop 0.18s ease-out;
+}
+@keyframes osdPop {
+  from { transform: scale(0.85); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* Marquee for floating ball */
+.marquee {
+  animation: marquee 8s linear infinite;
+}
+@keyframes marquee {
+  0% { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+
+/* Spinner (loading indicator) */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Range slider styling */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: #e2e8f0;
+  border-radius: 2px;
+  outline: none;
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #3b82f6;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.dark input[type='range'] {
+  background: #4b5563;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+}
