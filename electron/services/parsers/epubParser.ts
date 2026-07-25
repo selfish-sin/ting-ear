@@ -3,9 +3,14 @@
 
 import AdmZip from 'adm-zip'
 import { readFileSync } from 'fs'
+import { XMLParser } from 'fast-xml-parser'
+import { v4 as uuidv4 } from 'uuid'
 import { preprocessText, splitSentences, sanitizeControlChars } from './textPreprocessor'
 import { basename, extname } from 'path'
 import { buildChapters, type Boundary } from './chapterBuilder'
+import { deriveSentences, deriveChapters } from './structureBuilder'
+import { hashSentences } from '../../../src/utils/contentHash'
+import type { Block, StructuredChapter, StructureMeta } from '../../../src/global'
 
 // EPUB 目录是出版社定的逻辑结构，粒度通常合理；归一化下限放低以尽量保留作者分章，
 // 仅合并极小片段（防技术书那种细到段落的目录把章节切得过碎）。
@@ -54,6 +59,8 @@ interface ParseResult {
   sentences: string[]
   chapters: Array<{ title: string; startIndex: number; sentenceCount: number }>
   coverDataUrl?: string
+  structure?: StructuredChapter[]
+  structureMeta?: StructureMeta
 }
 
 // Strip HTML tags and entities -> plain text
@@ -220,6 +227,209 @@ function toSentences(rawHtml: string): string[] {
   return splitSentences(text)
 }
 
+// === 结构化解析（切片 A）===
+
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  textNodeName: '#text',
+  isArray: (name) => ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'div', 'aside'].includes(name)
+})
+
+/** 递归提取节点纯文本 */
+function extractText(node: unknown): string {
+  if (node == null) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(extractText).join(' ')
+  if (typeof node === 'object') {
+    const obj = node as Record<string, unknown>
+    if ('#text' in obj) return extractText(obj['#text'])
+    return Object.values(obj)
+      .filter((v) => typeof v !== 'object' || v !== null)
+      .map(extractText)
+      .join(' ')
+  }
+  return ''
+}
+
+/** 判断节点是否为脚注类型 */
+function isFootnoteNode(node: Record<string, unknown>): boolean {
+  const epubType = String(node['@_epub:type'] || node['@_type'] || '')
+  const cls = String(node['@_class'] || '')
+  const role = String(node['@_role'] || '')
+  return (
+    epubType.includes('footnote') ||
+    epubType.includes('endnote') ||
+    cls.includes('footnote') ||
+    cls.includes('endnote') ||
+    role === 'doc-footnote' ||
+    role === 'doc-endnote'
+  )
+}
+
+/**
+ * 用 fast-xml-parser 解析 XHTML 为 Block[]。
+ * 解析失败时返回 null（调用方降级到 stripHtml）。
+ */
+export function parseXhtmlToBlocks(xhtml: string): Block[] | null {
+  try {
+    const parsed = xmlParser.parse(xhtml)
+    const blocks: Block[] = []
+
+    // 找到 body 节点
+    const html = parsed.html || parsed
+    const body = html.body || html
+
+    const processNode = (node: unknown, tag?: string): void => {
+      if (node == null) return
+
+      if (Array.isArray(node)) {
+        for (const item of node) processNode(item, tag)
+        return
+      }
+
+      if (typeof node === 'string' || typeof node === 'number') {
+        const text = String(node).trim()
+        if (text && tag !== 'script' && tag !== 'style') {
+          blocks.push({
+            blockId: uuidv4(),
+            type: 'paragraph',
+            text,
+            ttsSkip: false,
+            sentenceRange: [0, 0]
+          })
+        }
+        return
+      }
+
+      if (typeof node !== 'object') return
+      const obj = node as Record<string, unknown>
+
+      // 跳过 script/style/head
+      if (tag === 'script' || tag === 'style' || tag === 'head') return
+
+      // 标题 h1-h6
+      for (let level = 1; level <= 6; level++) {
+        const key = `h${level}`
+        if (key in obj) {
+          const headings = Array.isArray(obj[key]) ? obj[key] : [obj[key]]
+          for (const h of headings) {
+            const text = extractText(h).trim()
+            if (text) {
+              blocks.push({
+                blockId: uuidv4(),
+                type: 'heading',
+                level,
+                text,
+                ttsSkip: false,
+                sentenceRange: [0, 0]
+              })
+            }
+          }
+        }
+      }
+
+      // p 段落
+      if ('p' in obj) {
+        const paragraphs = Array.isArray(obj.p) ? obj.p : [obj.p]
+        for (const p of paragraphs) {
+          if (typeof p === 'object' && p !== null && isFootnoteNode(p as Record<string, unknown>)) {
+            const text = extractText(p).trim()
+            if (text) {
+              blocks.push({ blockId: uuidv4(), type: 'footnote', text, ttsSkip: true, sentenceRange: [0, 0] })
+            }
+          } else {
+            const text = extractText(p).trim()
+            if (text) {
+              blocks.push({ blockId: uuidv4(), type: 'paragraph', text, ttsSkip: false, sentenceRange: [0, 0] })
+            }
+          }
+        }
+      }
+
+      // aside（常为脚注容器）
+      if ('aside' in obj) {
+        const asides = Array.isArray(obj.aside) ? obj.aside : [obj.aside]
+        for (const aside of asides) {
+          const text = extractText(aside).trim()
+          if (text) {
+            blocks.push({ blockId: uuidv4(), type: 'footnote', text, ttsSkip: true, sentenceRange: [0, 0] })
+          }
+        }
+      }
+
+      // blockquote
+      if ('blockquote' in obj) {
+        const quotes = Array.isArray(obj.blockquote) ? obj.blockquote : [obj.blockquote]
+        for (const q of quotes) {
+          const text = extractText(q).trim()
+          if (text) {
+            blocks.push({ blockId: uuidv4(), type: 'quote', text, ttsSkip: false, sentenceRange: [0, 0] })
+          }
+        }
+      }
+
+      // pre / code
+      if ('pre' in obj) {
+        const pres = Array.isArray(obj.pre) ? obj.pre : [obj.pre]
+        for (const pre of pres) {
+          const text = extractText(pre).trim()
+          if (text) {
+            blocks.push({ blockId: uuidv4(), type: 'code', text, ttsSkip: true, sentenceRange: [0, 0] })
+          }
+        }
+      }
+
+      // div → 递归处理子节点
+      if ('div' in obj) {
+        const divs = Array.isArray(obj.div) ? obj.div : [obj.div]
+        for (const div of divs) {
+          if (typeof div === 'object' && div !== null) {
+            const d = div as Record<string, unknown>
+            if (isFootnoteNode(d)) {
+              const text = extractText(d).trim()
+              if (text) {
+                blocks.push({ blockId: uuidv4(), type: 'footnote', text, ttsSkip: true, sentenceRange: [0, 0] })
+              }
+            } else {
+              processNode(d)
+            }
+          }
+        }
+      }
+
+      // section → 递归
+      if ('section' in obj) {
+        const sections = Array.isArray(obj.section) ? obj.section : [obj.section]
+        for (const sec of sections) processNode(sec)
+      }
+
+      // ul/ol 列表
+      if ('ul' in obj || 'ol' in obj) {
+        const lists = [...(Array.isArray(obj.ul) ? obj.ul : obj.ul ? [obj.ul] : []),
+                       ...(Array.isArray(obj.ol) ? obj.ol : obj.ol ? [obj.ol] : [])]
+        for (const list of lists) {
+          const l = list as Record<string, unknown>
+          if ('li' in l) {
+            const items = Array.isArray(l.li) ? l.li : [l.li]
+            for (const li of items) {
+              const text = extractText(li).trim()
+              if (text) {
+                blocks.push({ blockId: uuidv4(), type: 'list', text, ttsSkip: false, sentenceRange: [0, 0] })
+              }
+            }
+          }
+        }
+      }
+    }
+
+    processNode(body)
+    return blocks.length > 0 ? blocks : null
+  } catch {
+    return null
+  }
+}
+
 /** 从 EPUB 中提取封面图片，返回 data URL；找不到返回 undefined */
 function extractCover(
   zip: AdmZip,
@@ -346,9 +556,10 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
     entriesByFile.get(fileName)!.push(entry)
   }
 
-  // 4. 遍历 spine 提取文本，并把每个目录条目记为一个「分界点」
+  // 4. 遍历 spine 提取文本 + 构建 structure
   const allSentences: string[] = []
   const boundaries: Boundary[] = []
+  const structure: StructuredChapter[] = []
   let chapterCounter = 0
 
   for (const idref of spine) {
@@ -371,24 +582,46 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
     const fileName = item.href.split('#')[0]
     const segments = splitHtmlByToc(rawHtml, entriesByFile.get(fileName) || [])
 
-    if (segments.length > 0) {
-      // 有多级目录：每个目录条目一个分界点
-      for (const seg of segments) {
-        const sentences = toSentences(seg.html)
+    const processSegment = (title: string, html: string): void => {
+      // 尝试结构化解析
+      const blocks = parseXhtmlToBlocks(html)
+      if (blocks && blocks.length > 0) {
+        const ch: StructuredChapter = { title, level: 1, blocks, sentenceRange: [0, 0] }
+        const sentences = deriveSentences([ch])
         if (sentences.length > 0) {
-          boundaries.push({ title: seg.title, sentenceIndex: allSentences.length })
+          boundaries.push({ title, sentenceIndex: allSentences.length })
           allSentences.push(...sentences)
+          structure.push(ch)
+          chapterCounter++
+        }
+      } else {
+        // fallback: stripHtml
+        const sentences = toSentences(html)
+        if (sentences.length > 0) {
+          boundaries.push({ title, sentenceIndex: allSentences.length })
+          allSentences.push(...sentences)
+          // 构建单段落 block 作为 pseudo structure
+          structure.push({
+            title,
+            level: 1,
+            blocks: [{
+              blockId: uuidv4(),
+              type: 'paragraph',
+              text: sentences.join(' '),
+              ttsSkip: false,
+              sentenceRange: [allSentences.length - sentences.length, allSentences.length]
+            }],
+            sentenceRange: [allSentences.length - sentences.length, allSentences.length]
+          })
           chapterCounter++
         }
       }
+    }
+
+    if (segments.length > 0) {
+      for (const seg of segments) processSegment(seg.title, seg.html)
     } else {
-      // 无目录命中：整文件作为一个分界点，用默认标题
-      const sentences = toSentences(rawHtml)
-      if (sentences.length > 0) {
-        boundaries.push({ title: `第${chapterCounter + 1}章`, sentenceIndex: allSentences.length })
-        allSentences.push(...sentences)
-        chapterCounter++
-      }
+      processSegment(`第${chapterCounter + 1}章`, rawHtml)
     }
   }
 
@@ -410,6 +643,12 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
       chapters.length > 0
         ? chapters
         : [{ title: '全文', startIndex: 0, sentenceCount: allSentences.length }],
-    coverDataUrl
+    coverDataUrl,
+    structure,
+    structureMeta: {
+      schemaVersion: 1,
+      contentHash: hashSentences(allSentences),
+      sourceFormat: 'epub'
+    }
   }
 }

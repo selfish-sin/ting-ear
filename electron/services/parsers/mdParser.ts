@@ -1,7 +1,10 @@
 import { readFileSync } from 'fs'
+import { v4 as uuidv4 } from 'uuid'
 import { preprocessText, splitSentences, sanitizeControlChars } from './textPreprocessor'
 import { refineChapters } from './chapterBuilder'
-import type { BookData } from '../../../src/global'
+import { deriveSentences, deriveChapters } from './structureBuilder'
+import { hashSentences } from '../../../src/utils/contentHash'
+import type { BookData, Block, StructuredChapter, StructureMeta } from '../../../src/global'
 
 // Markdown 标题（#~######）可能很密集；归一化合并极小小节，避免章节列表过碎
 const MD_MIN_SENTENCES = 50
@@ -45,89 +48,204 @@ function decodeMarkdownSafe(filePath: string): string {
   return utf8
 }
 
+/** 清洗 block 文本中的 MD 行内标记 */
+function cleanInlineMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/\[(.+?)\]\(.+?\)/g, '$1')
+}
+
+/**
+ * 逐行解析 Markdown 为结构化章节。
+ * 每个 heading 开启新章；block 按类型标注。
+ */
+export function parseMarkdownToStructure(raw: string): StructuredChapter[] {
+  const lines = raw.split(/\r?\n/)
+  const chapters: StructuredChapter[] = []
+  const ctx: { chapter: StructuredChapter | null } = { chapter: null }
+  let paragraphLines: string[] = []
+  let inCodeBlock = false
+  let codeLines: string[] = []
+
+  const flushParagraph = (): void => {
+    if (paragraphLines.length === 0 || !ctx.chapter) return
+    const text = cleanInlineMarkdown(paragraphLines.join('\n').trim())
+    if (text) {
+      ctx.chapter.blocks.push({
+        blockId: uuidv4(),
+        type: 'paragraph',
+        text,
+        ttsSkip: false,
+        sentenceRange: [0, 0]
+      })
+    }
+    paragraphLines = []
+  }
+
+  const ensureChapter = (title: string, level: number): void => {
+    flushParagraph()
+    ctx.chapter = { title, level, blocks: [], sentenceRange: [0, 0] }
+    chapters.push(ctx.chapter)
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+
+    // 代码块
+    if (trimmed.startsWith('```')) {
+      if (inCodeBlock) {
+        // 结束代码块
+        if (ctx.chapter && codeLines.length > 0) {
+          ctx.chapter.blocks.push({
+            blockId: uuidv4(),
+            type: 'code',
+            text: codeLines.join('\n'),
+            ttsSkip: true,
+            sentenceRange: [0, 0]
+          })
+        }
+        codeLines = []
+        inCodeBlock = false
+      } else {
+        flushParagraph()
+        inCodeBlock = true
+      }
+      continue
+    }
+    if (inCodeBlock) {
+      codeLines.push(line)
+      continue
+    }
+
+    // 标题
+    const headerMatch = trimmed.match(/^(#{1,6})\s+(.+)/)
+    if (headerMatch) {
+      const level = headerMatch[1].length
+      ensureChapter(headerMatch[2].trim(), level)
+      // heading 本身也作为一个 block（用于卡片渲染）
+      ctx.chapter!.blocks.push({
+        blockId: uuidv4(),
+        type: 'heading',
+        level,
+        text: headerMatch[2].trim(),
+        ttsSkip: false,
+        sentenceRange: [0, 0]
+      })
+      continue
+    }
+
+    // 脚注
+    const footnoteMatch = trimmed.match(/^\[\^(\w+)\]:?\s*(.*)/)
+    if (footnoteMatch) {
+      flushParagraph()
+      if (!ctx.chapter) ensureChapter('正文', 1)
+      ctx.chapter!.blocks.push({
+        blockId: uuidv4(),
+        type: 'footnote',
+        text: footnoteMatch[2] || '',
+        ttsSkip: true,
+        sentenceRange: [0, 0],
+        meta: { ref: footnoteMatch[1] }
+      })
+      continue
+    }
+
+    // 引用
+    if (trimmed.startsWith('> ') || trimmed === '>') {
+      flushParagraph()
+      if (!ctx.chapter) ensureChapter('正文', 1)
+      ctx.chapter!.blocks.push({
+        blockId: uuidv4(),
+        type: 'quote',
+        text: cleanInlineMarkdown(trimmed.replace(/^>\s?/, '')),
+        ttsSkip: false,
+        sentenceRange: [0, 0]
+      })
+      continue
+    }
+
+    // 列表项
+    if (/^[-*+]\s/.test(trimmed) || /^\d+\.\s/.test(trimmed)) {
+      flushParagraph()
+      if (!ctx.chapter) ensureChapter('正文', 1)
+      ctx.chapter!.blocks.push({
+        blockId: uuidv4(),
+        type: 'list',
+        text: cleanInlineMarkdown(trimmed.replace(/^[-*+]\s|^\d+\.\s/, '')),
+        ttsSkip: false,
+        sentenceRange: [0, 0]
+      })
+      continue
+    }
+
+    // 空行 → 段落分隔
+    if (!trimmed) {
+      flushParagraph()
+      continue
+    }
+
+    // 普通文本行 → 累积到段落
+    if (!ctx.chapter) ensureChapter('正文', 1)
+    paragraphLines.push(trimmed)
+  }
+
+  // 收尾
+  if (inCodeBlock && codeLines.length > 0 && ctx.chapter) {
+    ctx.chapter.blocks.push({
+      blockId: uuidv4(),
+      type: 'code',
+      text: codeLines.join('\n'),
+      ttsSkip: true,
+      sentenceRange: [0, 0]
+    })
+  }
+  flushParagraph()
+
+  // 无内容时兜底
+  if (chapters.length === 0) {
+    chapters.push({ title: '正文', level: 1, blocks: [], sentenceRange: [0, 0] })
+  }
+
+  return chapters
+}
+
 /**
  * Parse Markdown (.md) files.
- * Uses `#` headers as chapter boundaries.
+ * 产出含 structure 的 BookData；sentences/chapters 从 structure 派生。
  */
 export function parseMarkdown(filePath: string): BookData {
   let content = decodeMarkdownSafe(filePath)
   content = sanitizeControlChars(content)
 
-  const lines = content.split(/\r?\n/)
-  const chapters: { title: string; lines: string[] }[] = []
-  let currentTitle = ''
-  let currentLines: string[] = []
+  const structure = parseMarkdownToStructure(content)
+  const allSentences = deriveSentences(structure)
 
-  for (const line of lines) {
-    const trimmed = line.trim()
-    // Match markdown headers (# ## ### etc.)
-    const headerMatch = trimmed.match(/^#{1,6}\s+(.+)/)
-    if (headerMatch && currentTitle) {
-      // Save previous chapter
-      chapters.push({ title: currentTitle, lines: [...currentLines] })
-      currentTitle = headerMatch[1].trim()
-      currentLines = [trimmed.replace(/^#{1,6}\s+/, '')]
-    } else if (headerMatch && !currentTitle) {
-      // First chapter
-      currentTitle = headerMatch[1].trim()
-      currentLines = [trimmed.replace(/^#{1,6}\s+/, '')]
-    } else {
-      if (!currentTitle) currentTitle = '正文'
-      currentLines.push(trimmed)
-    }
-  }
-  // Save last chapter
-  if (currentLines.length > 0) {
-    chapters.push({ title: currentTitle || '正文', lines: [...currentLines] })
-  }
+  // 从 structure 派生章节（保留原始标题层级）
+  const rawChapters = deriveChapters(structure)
 
-  // If no chapters found, treat as single chapter
-  if (chapters.length === 0) {
-    const allText = lines
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .join('\n')
-    chapters.push({ title: '正文', lines: allText.split('\n') })
-  }
-
-  // Split lines into sentences
-  const allSentences: string[] = []
-  const chapterList: { title: string; startIndex: number; sentenceCount: number }[] = []
-
-  for (const ch of chapters) {
-    const startIdx = allSentences.length
-    const chapterText = ch.lines
-      .filter((l) => l.trim())
-      .join('\n')
-      .replace(/\*\*(.+?)\*\*/g, '$1') // Remove bold
-      .replace(/\*(.+?)\*/g, '$1') // Remove italic
-      .replace(/`(.+?)`/g, '$1') // Remove inline code
-      .replace(/\[(.+?)\]\(.+?\)/g, '$1') // Remove links
-      .replace(/^[>\s]+/gm, '') // Remove blockquotes
-
-    const cleaned = preprocessText(chapterText).text
-    const sentences = splitSentences(cleaned)
-    allSentences.push(...sentences)
-    if (sentences.length > 0) {
-      chapterList.push({ title: ch.title, startIndex: startIdx, sentenceCount: sentences.length })
-    }
-  }
-
-  // 归一化：合并极小小节、切分超长章（无句子时保持原样）
+  // 归一化：合并极小小节、切分超长章
   const finalChapters =
     allSentences.length > 0
-      ? refineChapters(allSentences.length, chapterList, {
+      ? refineChapters(allSentences.length, rawChapters, {
           minSentences: MD_MIN_SENTENCES,
           maxSentences: MD_MAX_SENTENCES
         })
-      : chapterList.length > 0
-        ? chapterList
+      : rawChapters.length > 0
+        ? rawChapters
         : [{ title: '正文', startIndex: 0, sentenceCount: 0 }]
 
-  // Extract title from filename or first h1
-  let title = chapters[0]?.title || ''
+  // Extract title from first chapter or filename
+  let title = structure[0]?.title || ''
   const fileName = filePath.split(/[\\/]/).pop()?.replace(/\.md$/i, '') || ''
   if (!title || title === '正文') title = fileName
+
+  const structureMeta: StructureMeta = {
+    schemaVersion: 1,
+    contentHash: hashSentences(allSentences),
+    sourceFormat: 'md'
+  }
 
   return {
     id: '',
@@ -142,6 +260,8 @@ export function parseMarkdown(filePath: string): BookData {
     progressPercent: 0,
     isCompleted: false,
     addedAt: new Date().toISOString(),
-    lastReadAt: new Date().toISOString()
+    lastReadAt: new Date().toISOString(),
+    structure,
+    structureMeta
   }
 }

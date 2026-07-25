@@ -134,6 +134,14 @@ export interface Api {
   // Screenshot OCR
   startScreenshotOcr: () => Promise<void>
   getScreenshotDataUrl: () => Promise<string>
+  getScreenshotMeta: () => Promise<{
+    dataUrl: string
+    cssWidth: number
+    cssHeight: number
+    imgWidth: number
+    imgHeight: number
+    scaleFactor: number
+  } | null>
   submitOcrSelection: (data: {
     dataUrl: string
     x: number
@@ -149,47 +157,12 @@ export interface Api {
   /** 监听主进程触发的自定义快捷键动作（回调参数为动作名） */
   onShortcut: (callback: (action: ShortcutAction) => void) => () => void
 
-  // Clipboard
-  // === 文本清洗（LLM） ===
-  /** 发起 LLM 清洗。返回 taskId，进度通过 onCleanProgress 回调推送 */
-  cleanTextWithLLM: (params: {
-    text: string
-    configId?: string
-  }) => Promise<{ success: boolean; taskId?: string; error?: string }>
-  /** 取消当前清洗任务 */
-  cancelClean: (taskId: string) => Promise<void>
-  /** 快速清洗（纯正则，秒出，不调 LLM）：返回清洗后文本与长度统计 */
+  // === 文本清洗（纯规则） ===
+  /** 规则清洗：应用「设置 → 清洗」中的正则 + 结构性格式优化 */
   enhancedClean: (
     text: string
-  ) => Promise<{ success: boolean; text: string; originalLength: number; cleanedLength: number }>
-  /** 清洗进度回调 */
-  onCleanProgress: (
-    callback: (p: { current: number; total: number; phase: string }) => void
-  ) => () => void
-  /** 清洗完成回调 */
-  onCleanComplete: (
-    callback: (data: {
-      taskId: string
-      cancelled: boolean
-      error?: string
-      text?: string
-      stats?: {
-        originalLength: number
-        cleanedLength: number
-        chunksUsed: number
-        anomalyChunks: number
-        regexChunks: number
-      }
-    }) => void
-  ) => () => void
-
-  // === LLM 配置管理 ===
-  getLlmConfigs: () => Promise<LLMConfig[]>
-  saveLlmConfigs: (configs: LLMConfig[]) => Promise<void>
-  getActiveLlmId: () => Promise<string>
-  setActiveLlmId: (id: string) => Promise<void>
-  testLlmConnection: (config: unknown) => Promise<{ success: boolean; error?: string }>
-  fetchModels: (config: unknown) => Promise<{ success: boolean; models: string[]; error?: string }>
+  ) => Promise<{ success: boolean; text: string; originalLength: number; cleanedLength: number; error?: string }>
+  clearCache: (type: string) => Promise<{ success: boolean; error?: string }>
 
   // Audio export
   exportAudio: (params: {
@@ -199,6 +172,7 @@ export interface Api {
     startIndex: number
     endIndex: number
     defaultName: string
+    engineId?: string
   }) => Promise<{ success: boolean; filePath?: string; error?: string }>
   onExportProgress: (callback: (data: { current: number; total: number }) => void) => () => void
   onExportComplete: (callback: (data: { filePath: string; size: number }) => void) => () => void
@@ -252,6 +226,20 @@ export interface Api {
   onSubtitlePause: (callback: () => void) => () => void
   onSubtitlePrev: (callback: () => void) => () => void
   onSubtitleNext: (callback: () => void) => () => void
+
+  // === 数据目录管理 ===
+  /** 获取当前数据目录路径 */
+  dataDirGet: () => Promise<string>
+  /** 获取默认数据目录路径 */
+  dataDirGetDefault: () => Promise<string>
+  /** 在系统文件管理器中打开文件夹 */
+  dataDirOpen: (dirPath?: string) => Promise<{ success: boolean; error?: string }>
+  /** 选择文件夹对话框 */
+  dataDirSelect: () => Promise<{ success: boolean; path?: string; error?: string }>
+  /** 验证路径有效性 */
+  dataDirValidate: (dirPath: string) => Promise<{ valid: boolean; error?: string; path: string }>
+  /** 迁移数据到新目录 */
+  dataDirMigrate: (newDir: string) => Promise<{ success: boolean; migrated?: boolean; oldPath?: string; newPath?: string; error?: string; message?: string }>
 }
 
 declare global {
@@ -272,6 +260,41 @@ export interface Sentence {
   index: number
   text: string
   chapterIndex: number
+}
+
+// === 结构化阅读（切片 A）===
+export type BlockType =
+  | 'heading'
+  | 'paragraph'
+  | 'footnote'
+  | 'endnote'
+  | 'quote'
+  | 'list'
+  | 'code'
+  | 'page_break'
+  | 'toc_entry'
+
+export interface Block {
+  blockId: string
+  type: BlockType
+  level?: number
+  text: string
+  ttsSkip: boolean
+  sentenceRange: [number, number]
+  meta?: Record<string, string>
+}
+
+export interface StructuredChapter {
+  title: string
+  level: number
+  blocks: Block[]
+  sentenceRange: [number, number]
+}
+
+export interface StructureMeta {
+  schemaVersion: 1
+  contentHash: string
+  sourceFormat: string
 }
 
 export interface BookData {
@@ -300,6 +323,9 @@ export interface BookData {
   originalSentences?: string[]
   /** 编辑记录：文本处理的历史版本 */
   editHistory?: EditRecord[]
+  /** 结构化内容（MD/EPUB 解析产出，旧书 fallback 为 pseudo） */
+  structure?: StructuredChapter[]
+  structureMeta?: StructureMeta
 }
 
 export interface AlbumItem {
@@ -411,15 +437,16 @@ export interface AppSettings {
     body: number
     title: number
   }
-  /** LLM 清洗配置 */
-  activeLlmId: string
-  llmConfigs: LLMConfig[]
-  /** 自定义清洗提示词 */
-  cleanPrompt: string
   /** 清洗格式正则规则（用户可在「设置 → 清洗」中编辑） */
   cleanRules?: CleanRule[]
   /** 全局快捷键映射（动作 -> Electron 加速器字符串；空串表示禁用该动作） */
   shortcuts?: ShortcutMap
+  /** 自定义数据目录路径（空或不设则使用默认路径） */
+  dataDir?: string
+  /** 数据目录历史路径记录（用于回滚） */
+  dataDirHistory?: string[]
+  /** 启动时自动恢复上次阅读位置 */
+  autoResume?: boolean
 }
 
 /** 全局快捷键动作 */
@@ -438,21 +465,6 @@ export type ShortcutAction =
 
 /** 快捷键映射：动作 -> 加速器字符串（可选，缺失时使用默认） */
 export type ShortcutMap = Partial<Record<ShortcutAction, string>>
-
-/** LLM 模型配置 */
-export interface LLMConfig {
-  id: string
-  provider: 'ollama' | 'openai'
-  name: string
-  baseUrl: string
-  apiKey: string
-  model: string
-  contextWindow: number
-  maxTokens: number
-  temperature: number
-  /** 用户自定义单块字符上限。留空则自动按 contextWindow + maxTokens 计算 */
-  chunkSize?: number
-}
 
 export type PlayState = 'idle' | 'playing' | 'paused' | 'stopped'
 
@@ -473,15 +485,6 @@ export interface ToastItem {
   type: 'success' | 'error' | 'warning' | 'info'
   message: string
   duration?: number
-}
-
-/** AI 审校疑点（与后端 text-reviewer.ts ReviewIssue 对齐，当前禁用LLM审校，暂保留类型定义） */
-export interface ReviewIssue {
-  paraIndex: number
-  sentence: string
-  type: 'suspect-deleted' | 'suspect-missed' | 'suspect-break' | 'other'
-  reason: string
-  suggestion?: string
 }
 
 /** 字幕样式配置 */

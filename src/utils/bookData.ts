@@ -1,11 +1,12 @@
-import type { BookData, Chapter, EditRecord } from '../global'
+import type { BookData, Chapter, EditRecord, StructuredChapter, StructureMeta } from '../global'
+import { hashSentences } from './contentHash'
 
 export const BOOK_TITLE_MAX_LENGTH = 120
 export const MIN_READABLE_SENTENCE_LENGTH = 20
 
 const HIDDEN_CONTROL_CHARS =
   // eslint-disable-next-line no-control-regex
-  /[\x80-\x9F\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF]/g
+  /[\x80-\x9F\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF\u00AD]/g
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -386,6 +387,19 @@ export function normalizeBookData(value: unknown): BookData | null {
   const progress = typeof value.progressPercent === 'number' ? value.progressPercent : 0
   const rawTimeMap = Array.isArray(value.timeMap) ? value.timeMap : null
 
+  // 结构化校验：contentHash 不匹配则丢弃（版本切换/清洗后 sentences 变了）
+  let structure: StructuredChapter[] | undefined
+  let structureMeta: StructureMeta | undefined
+  const rawStructure = (value as Record<string, unknown>).structure
+  const rawMeta = (value as Record<string, unknown>).structureMeta as StructureMeta | undefined
+  if (Array.isArray(rawStructure) && rawMeta && rawMeta.contentHash) {
+    if (rawMeta.contentHash === hashSentences(sentences)) {
+      structure = rawStructure as StructuredChapter[]
+      structureMeta = rawMeta
+    }
+    // hash 不匹配 → structure 失效，不保留
+  }
+
   return {
     ...(value as unknown as BookData),
     id: value.id.trim(),
@@ -411,7 +425,9 @@ export function normalizeBookData(value: unknown): BookData | null {
           const entry = rawTimeMap[index]
           return typeof entry === 'number' && Number.isFinite(entry) ? entry : -1
         })
-      : undefined
+      : undefined,
+    structure,
+    structureMeta
   }
 }
 

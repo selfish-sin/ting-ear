@@ -1,6 +1,6 @@
-import { ipcMain, dialog, BrowserWindow } from 'electron'
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync, unlinkSync } from 'fs'
-import { join } from 'path'
+import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync, unlinkSync, readdirSync, statSync, copyFileSync } from 'fs'
+import { join, resolve } from 'path'
 import { app } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import { parseEpub } from '../services/parsers/epubParser'
@@ -10,7 +10,11 @@ import { parseDocx } from '../services/parsers/docxParser'
 import { parseMarkdown } from '../services/parsers/mdParser'
 import { parseHtml } from '../services/parsers/htmlParser'
 import { parseMobi } from '../services/parsers/mobiParser'
-import { preprocessText, splitSentences } from '../services/parsers/textPreprocessor'
+import {
+  preprocessText,
+  splitSentences,
+  setActiveCleanRules
+} from '../services/parsers/textPreprocessor'
 import type { LogService } from '../services/log-service'
 import type { SettingsService } from '../services/settings-service'
 import type { EngineManager } from '../services/tts-engines/engine-manager'
@@ -22,9 +26,42 @@ import {
   normalizeChapters,
   normalizeSentences
 } from '../../src/utils/bookData'
+import { generatePseudoStructure, validateStructure } from '../services/parsers/structureBuilder'
+import { hashSentences } from '../../src/utils/contentHash'
+
+/** 递归复制目录 */
+function copyDirRecursive(src: string, dest: string): void {
+  if (!existsSync(dest)) {
+    mkdirSync(dest, { recursive: true })
+  }
+  const items = readdirSync(src)
+  for (const item of items) {
+    const srcPath = join(src, item)
+    const destPath = join(dest, item)
+    const stat = statSync(srcPath)
+    if (stat.isDirectory()) {
+      copyDirRecursive(srcPath, destPath)
+    } else {
+      copyFileSync(srcPath, destPath)
+    }
+  }
+}
+
+/** 自定义数据目录路径（由 settings.dataDir 设置，为空时回退到默认路径） */
+let customDataDir: string | null = null
+
+/** 设置自定义数据目录（供 SettingsService 在加载配置后调用） */
+export function setCustomDataDir(dir: string | null): void {
+  customDataDir = dir || null
+}
+
+/** 获取默认数据目录（不可变的基础路径） */
+export function getDefaultDataDir(): string {
+  return join(app.getPath('userData'), '听伴')
+}
 
 export function getDataDir(): string {
-  const dir = join(app.getPath('userData'), '听伴')
+  const dir = customDataDir || getDefaultDataDir()
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }
@@ -103,12 +140,16 @@ export function registerFileHandlers(
       }
     }
 
+    // 导入时应用用户在「设置 → 清洗」中的规则（与手动清洗同一套）
+    setActiveCleanRules(settingsService.getCleanRules())
     try {
       let title = ''
       let author = '未知作者'
       let sentences: string[] = []
       let chapters: Array<{ title: string; startIndex: number; sentenceCount: number }> = []
       let epubCoverDataUrl: string | undefined
+      let parsedStructure: import('../../src/global').StructuredChapter[] | undefined
+      let parsedStructureMeta: import('../../src/global').StructureMeta | undefined
 
       if (ext === 'epub') {
         const result = await parseEpub(filePath, getCacheDir())
@@ -116,8 +157,9 @@ export function registerFileHandlers(
         author = result.author
         sentences = result.sentences
         chapters = result.chapters
-        // 提取内嵌封面（后续保存）
         epubCoverDataUrl = result.coverDataUrl
+        parsedStructure = result.structure
+        parsedStructureMeta = result.structureMeta
       } else if (ext === 'txt') {
         const result = parseTxt(filePath)
         title = result.title
@@ -142,6 +184,8 @@ export function registerFileHandlers(
         author = result.author
         sentences = result.sentences
         chapters = result.chapters
+        parsedStructure = result.structure
+        parsedStructureMeta = result.structureMeta
       } else if (ext === 'html' || ext === 'htm') {
         const result = parseHtml(filePath)
         title = result.title
@@ -162,12 +206,28 @@ export function registerFileHandlers(
         return { success: false, error: '无法提取文本内容，请确认文件未损坏' }
       }
 
+      // === 结构化处理 ===
+      // 有解析产出的 structure（MD/EPUB）直接用；其他格式生成 pseudo
+      let finalStructure = parsedStructure
+      let finalStructureMeta = parsedStructureMeta
+      if (!finalStructure) {
+        const pseudo = generatePseudoStructure(sentences, chapters)
+        finalStructure = pseudo.structure
+        finalStructureMeta = pseudo.structureMeta
+      }
+
       // Check for existing book with same path
       const existingBooks = normalizeBookCollection(loadJsonFile<unknown>('books.json', []))
       const existingIdx = existingBooks.findIndex((b) => b.filePath === filePath)
 
       // Preserve progress if updating an existing book
       const existingBook = existingIdx >= 0 ? existingBooks[existingIdx] : null
+
+      // 正文是否实质变化：句数不同或抽样前几句不同 → 清空编辑记录与旧原文快照
+      const contentChanged =
+        !existingBook ||
+        existingBook.sentences.length !== sentences.length ||
+        existingBook.sentences.slice(0, 3).join('\n') !== sentences.slice(0, 3).join('\n')
 
       const book = normalizeBookData({
         ...existingBook,
@@ -186,8 +246,13 @@ export function registerFileHandlers(
         addedAt: existingBook?.addedAt || new Date().toISOString(),
         lastReadAt: new Date().toISOString(),
         bookmarks: existingBook?.bookmarks || [],
-        originalSentences: existingBook?.originalSentences ?? sentences,
-        editHistory: existingBook?.editHistory
+        // 重导入且正文变了：用新正文作为原文，并丢弃失效的清洗版本
+        originalSentences: contentChanged ? sentences : (existingBook?.originalSentences ?? sentences),
+        editHistory: contentChanged ? undefined : existingBook?.editHistory,
+        timeMap: contentChanged ? undefined : existingBook?.timeMap,
+        // 结构化：内容变了用新 structure，没变且旧 structure 有效则沿用
+        structure: contentChanged ? finalStructure : (existingBook?.structure ?? finalStructure),
+        structureMeta: contentChanged ? finalStructureMeta : (existingBook?.structureMeta ?? finalStructureMeta)
       })
 
       if (!book) {
@@ -206,7 +271,7 @@ export function registerFileHandlers(
       // 保存 EPUB 内嵌封面（仅新书或无自定义封面时覆盖）
       if (epubCoverDataUrl && book.coverSource !== 'custom') {
         try {
-          const coversDir = join(app.getPath('userData'), '听伴', 'covers')
+          const coversDir = join(getDataDir(), 'covers')
           if (!existsSync(coversDir)) mkdirSync(coversDir, { recursive: true })
           const base64 = epubCoverDataUrl.replace(/^data:[^;]+;base64,/, '')
           const coverPath = join(coversDir, `${book.id}.png`)
@@ -227,6 +292,8 @@ export function registerFileHandlers(
       const errMsg = error instanceof Error ? error.message : String(error)
       logService.error('Parser', `导入失败: ${errMsg}`, errMsg)
       return { success: false, error: `解析失败：${errMsg}` }
+    } finally {
+      setActiveCleanRules(null)
     }
   })
 
@@ -284,7 +351,13 @@ export function registerFileHandlers(
   // === Save settings ===
   ipcMain.handle('file:saveSettings', async (_event, settings: unknown) => {
     try {
-      await settingsService.save(settings as Record<string, unknown>)
+      const partial = settings as Record<string, unknown>
+      await settingsService.save(partial)
+      // 数据目录变更时立即生效（无需等重启再读 books 路径）
+      if (typeof partial.dataDir === 'string') {
+        setCustomDataDir(partial.dataDir || null)
+        logService.reloadFromDisk()
+      }
     } catch (error) {
       logService.error('Storage', `保存设置失败: ${String(error)}`)
     }
@@ -370,6 +443,7 @@ export function registerFileHandlers(
 
   // === Reprocess book text (re-run preprocessor on already-imported books) ===
   ipcMain.handle('book:reprocess', async (_event, bookId: string) => {
+    setActiveCleanRules(settingsService.getCleanRules())
     try {
       const books = normalizeBookCollection(loadJsonFile<unknown>('books.json', []))
       const idx = books.findIndex((b) => b.id === bookId)
@@ -379,7 +453,7 @@ export function registerFileHandlers(
       const oldSentenceCount = book.sentences.length
       // Join all sentences, preprocess, re-split
       const joined = book.sentences.join('\n')
-      const { text, stats } = preprocessText(joined)
+      const { text, stats } = preprocessText(joined, settingsService.getCleanRules())
       const newSentences = splitSentences(text)
       if (newSentences.length === 0) {
         return { success: false, error: '处理后没有可朗读文本，已保留原书内容' }
@@ -456,11 +530,16 @@ export function registerFileHandlers(
       return { success: true, book: updatedBook, stats }
     } catch (error) {
       return { success: false, error: String(error) }
+    } finally {
+      setActiveCleanRules(null)
     }
   })
-  const coversDir = join(app.getPath('userData'), '听伴', 'covers')
-  if (!existsSync(coversDir)) {
-    mkdirSync(coversDir, { recursive: true })
+  function getCoversDir(): string {
+    const coversDir = join(getDataDir(), 'covers')
+    if (!existsSync(coversDir)) {
+      mkdirSync(coversDir, { recursive: true })
+    }
+    return coversDir
   }
 
   // Save a cover image (base64 data URL or file path) for a book
@@ -468,7 +547,7 @@ export function registerFileHandlers(
     try {
       const base64Data = dataUrl.replace(/^data:image\/\w+;base64,/, '')
       const buf = Buffer.from(base64Data, 'base64')
-      const coverPath = join(coversDir, `${bookId}.png`)
+      const coverPath = join(getCoversDir(), `${bookId}.png`)
       writeFileSync(coverPath, buf)
       return { success: true, coverPath }
     } catch (error) {
@@ -492,7 +571,7 @@ export function registerFileHandlers(
         return { success: false, error: '取消选择' }
       }
       const srcPath = result.filePaths[0]
-      const coverPath = join(coversDir, `${bookId}.png`)
+      const coverPath = join(getCoversDir(), `${bookId}.png`)
       const imgBuf = readFileSync(srcPath)
       writeFileSync(coverPath, imgBuf)
       return { success: true, coverPath }
@@ -503,7 +582,7 @@ export function registerFileHandlers(
 
   // Get cover path for a book
   ipcMain.handle('cover:get', async (_event, bookId: string) => {
-    const coverPath = join(coversDir, `${bookId}.png`)
+    const coverPath = join(getCoversDir(), `${bookId}.png`)
     if (existsSync(coverPath)) {
       return coverPath
     }
@@ -513,7 +592,7 @@ export function registerFileHandlers(
   // Get cover as data URL (for renderer display, bypasses file:// restriction)
   ipcMain.handle('cover:getDataUrl', async (_event, bookId: string) => {
     try {
-      const coverPath = join(coversDir, `${bookId}.png`)
+      const coverPath = join(getCoversDir(), `${bookId}.png`)
       if (!existsSync(coverPath)) return null
       const buf = readFileSync(coverPath)
       const base64 = buf.toString('base64')
@@ -523,7 +602,7 @@ export function registerFileHandlers(
     }
   })
 
-  // === 导出音频：逐句合成 Edge TTS，拼接为一个 MP3 文件 ===
+  // === 导出音频：用当前活动引擎（或传入 engineId）逐句合成并拼接 ===
   ipcMain.handle(
     'export:audio',
     async (
@@ -535,9 +614,12 @@ export function registerFileHandlers(
         startIndex: number
         endIndex: number
         defaultName: string
+        engineId?: string
       }
     ) => {
       const { sentences, voiceId, speed, startIndex, endIndex, defaultName } = params
+      // 与播放一致：优先显式 engineId，否则用活动引擎
+      const engineId = params.engineId || engineManager.getActiveEngineId() || 'edge'
       const total = endIndex - startIndex
       if (total <= 0) return { success: false, error: '导出范围为空' }
 
@@ -558,7 +640,7 @@ export function registerFileHandlers(
       const chunks: Buffer[] = []
       let completed = 0
 
-      logService.info('Export', `开始导出音频: ${defaultName} (${total} 句)`)
+      logService.info('Export', `开始导出音频: ${defaultName} (${total} 句, 引擎=${engineId})`)
 
       try {
         for (let i = startIndex; i < endIndex; i++) {
@@ -569,7 +651,7 @@ export function registerFileHandlers(
             continue
           }
 
-          const result = await engineManager.synthesize(text, voiceId, speed, 1.0, 'edge')
+          const result = await engineManager.synthesize(text, voiceId, speed, 1.0, engineId)
           if (result.success && result.audio) {
             chunks.push(Buffer.from(result.audio, 'base64'))
           } else {
@@ -581,10 +663,10 @@ export function registerFileHandlers(
         }
 
         if (chunks.length === 0) {
-          return { success: false, error: '所有句子合成均失败，请检查 Edge TTS 是否可用' }
+          return { success: false, error: `所有句子合成均失败，请检查引擎「${engineId}」是否可用` }
         }
 
-        // Buffer.concat — Edge CBR MP3 可以直接拼接
+        // Buffer.concat — 同格式音频可直接拼接（Edge/多数 HTTP 为 CBR MP3）
         writeFileSync(outputPath, Buffer.concat(chunks))
         logService.info(
           'Export',
@@ -604,10 +686,127 @@ export function registerFileHandlers(
     }
   )
 
+  // === 数据目录管理 ===
+
+  // 获取当前数据目录的真实路径
+  ipcMain.handle('dataDir:get', async () => {
+    return getDataDir()
+  })
+
+  // 获取默认数据目录路径
+  ipcMain.handle('dataDir:getDefault', async () => {
+    return getDefaultDataDir()
+  })
+
+  // 在系统文件管理器中打开文件夹
+  ipcMain.handle('dataDir:open', async (_event, dirPath?: string) => {
+    const target = dirPath || getDataDir()
+    if (!existsSync(target)) {
+      return { success: false, error: '文件夹不存在' }
+    }
+    try {
+      await shell.openPath(target)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  // 选择文件夹对话框
+  ipcMain.handle('dataDir:select', async () => {
+    const win = BrowserWindow.getFocusedWindow()
+    if (!win) return { success: false, error: '无活动窗口' }
+    const result = await dialog.showOpenDialog(win, {
+      title: '选择数据存储位置',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, error: '取消选择' }
+    }
+    return { success: true, path: result.filePaths[0] }
+  })
+
+  // 验证路径有效性
+  ipcMain.handle('dataDir:validate', async (_event, dirPath: string) => {
+    try {
+      const resolved = resolve(dirPath)
+      // 检查路径是否存在
+      if (!existsSync(resolved)) {
+        return { valid: false, error: '路径不存在', path: resolved }
+      }
+      const stat = statSync(resolved)
+      // 检查是否是目录
+      if (!stat.isDirectory()) {
+        return { valid: false, error: '路径不是文件夹', path: resolved }
+      }
+      // 检查读写权限：尝试创建临时文件并删除
+      const testFile = join(resolved, `.tingear_write_test_${Date.now()}.tmp`)
+      try {
+        writeFileSync(testFile, 'test', 'utf-8')
+        unlinkSync(testFile)
+      } catch {
+        return { valid: false, error: '文件夹不可读写', path: resolved }
+      }
+      return { valid: true, path: resolved }
+    } catch (error) {
+      return { valid: false, error: String(error), path: dirPath }
+    }
+  })
+
+  // 迁移数据到新目录
+  ipcMain.handle('dataDir:migrate', async (_event, newDir: string) => {
+    try {
+      const resolved = resolve(newDir)
+      if (!existsSync(resolved)) {
+        mkdirSync(resolved, { recursive: true })
+      }
+      const oldDir = getDataDir()
+      if (oldDir === resolved) {
+        return { success: true, migrated: false, message: '新旧路径相同，无需迁移' }
+      }
+      // 递归复制所有文件
+      const items = readdirSync(oldDir)
+      for (const item of items) {
+        const srcPath = join(oldDir, item)
+        const destPath = join(resolved, item)
+        const stat = statSync(srcPath)
+        if (stat.isDirectory()) {
+          // 递归复制目录
+          copyDirRecursive(srcPath, destPath)
+        } else {
+          copyFileSync(srcPath, destPath)
+        }
+      }
+      logService.info('Storage', `数据迁移完成: ${oldDir} → ${resolved}`)
+      return { success: true, migrated: true, oldPath: oldDir, newPath: resolved }
+    } catch (error) {
+      logService.error('Storage', `数据迁移失败: ${String(error)}`)
+      return { success: false, error: String(error) }
+    }
+  })
+
   // === 清除缓存 ===
   ipcMain.handle('data:clearCache', async (_event, type: string) => {
     try {
-      const dir = join(app.getPath('userData'), '听伴')
+      const dir = getDataDir()
+      /** 删除目录下匹配前缀的缓存文件夹（含 cache_<engineId>） */
+      const removeAudioCaches = (): void => {
+        for (const name of ['edge_cache', 'qwen_cache']) {
+          const p = join(dir, name)
+          if (existsSync(p)) rmSync(p, { recursive: true, force: true })
+        }
+        try {
+          for (const item of readdirSync(dir)) {
+            if (item.startsWith('cache_')) {
+              const p = join(dir, item)
+              if (statSync(p).isDirectory()) rmSync(p, { recursive: true, force: true })
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+
       switch (type) {
         case 'books':
           if (existsSync(join(dir, 'books.json'))) unlinkSync(join(dir, 'books.json'))
@@ -618,22 +817,22 @@ export function registerFileHandlers(
           if (existsSync(join(dir, 'history.json'))) unlinkSync(join(dir, 'history.json'))
           break
         case 'audio':
-          if (existsSync(join(dir, 'edge_cache')))
-            rmSync(join(dir, 'edge_cache'), { recursive: true, force: true })
-          if (existsSync(join(dir, 'qwen_cache')))
-            rmSync(join(dir, 'qwen_cache'), { recursive: true, force: true })
+          removeAudioCaches()
           break
         case 'logs':
           if (existsSync(join(dir, 'logs.json'))) unlinkSync(join(dir, 'logs.json'))
+          break
+        case 'bookmarks':
           if (existsSync(join(dir, 'bookmarks.json'))) unlinkSync(join(dir, 'bookmarks.json'))
           break
         case 'all':
-          for (const f of ['books.json', 'history.json', 'logs.json', 'bookmarks.json']) {
+          for (const f of ['books.json', 'history.json', 'logs.json', 'bookmarks.json', 'albums.json']) {
             if (existsSync(join(dir, f))) unlinkSync(join(dir, f))
           }
-          for (const d of ['covers', 'edge_cache', 'qwen_cache']) {
+          for (const d of ['covers', 'cache']) {
             if (existsSync(join(dir, d))) rmSync(join(dir, d), { recursive: true, force: true })
           }
+          removeAudioCaches()
           break
       }
       return { success: true }
