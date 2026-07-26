@@ -15,7 +15,7 @@
   "branch": "codex/chapter-outline-redesign",
   "base_branch": "codex/chapter-outline-redesign",
   "worktree_path": null,
-  "commit": null,
+  "commit": "ec2591d",
   "pr_url": null,
   "subtasks": [],
   "children": [],
