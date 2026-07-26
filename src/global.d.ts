@@ -84,6 +84,63 @@ export interface Api {
   saveHistory: (
     entry: Omit<HistoryEntry, 'id'>
   ) => Promise<{ success: boolean; entry?: HistoryEntry; error?: string }>
+  // AI chat operations
+  aiChat: (
+    requestId: string,
+    payload: AiChatPayload
+  ) => Promise<{ success: boolean; error?: string }>
+  aiCancel: (requestId: string) => Promise<{ success: boolean }>
+  aiHistoryGet: (bookId: string) => Promise<AiHistoryMessage[]>
+  aiHistoryClear: (bookId?: string) => Promise<{ success: boolean; error?: string }>
+  aiConvList: (bookId: string) => Promise<Array<{ id: string; title: string; createdAt: string; messageCount: number }>>
+  aiConvLoad: (bookId: string, convId: string) => Promise<AiHistoryMessage[]>
+  aiConvCreate: (bookId: string, title?: string) => Promise<AiConversation>
+  aiConvSave: (bookId: string, convId: string, messages: AiHistoryMessage[]) => Promise<{ success: boolean }>
+  aiConvDelete: (bookId: string, convId: string) => Promise<{ success: boolean }>
+  aiNmemStatus: (force?: boolean) => Promise<AiNmemStatus>
+  aiNmemIngest: (book: BookData) => Promise<{
+    success: boolean
+    ingested?: number
+    duplicates?: number
+    skipped?: number
+    error?: string
+  }>
+  aiNmemSyncAll: () => Promise<{
+    success: boolean
+    synced?: number
+    failed?: number
+    error?: string
+  }>
+  aiListModels: (config: AiLlmSettings) => Promise<{
+    success: boolean
+    models?: string[]
+    error?: string
+  }>
+  aiTestModel: (config: AiLlmSettings) => Promise<{
+    success: boolean
+    models?: string[]
+    error?: string
+  }>
+  aiOutlineGenerate: (request: ChapterOutlineGenerateRequest) => Promise<{
+    success: boolean
+    record?: ChapterOutlineRecord
+    error?: string
+  }>
+  aiOutlineGet: (request: ChapterOutlineGenerateRequest) => Promise<{
+    success: boolean
+    record?: ChapterOutlineRecord
+    error?: string
+  }>
+  aiOutlineUpdate: (record: ChapterOutlineRecord) => Promise<{
+    success: boolean
+    record?: ChapterOutlineRecord
+    error?: string
+  }>
+  onAiChatChunk: (callback: (event: AiChatChunkEvent) => void) => () => void
+  onAiChatSources: (callback: (event: AiChatSourcesEvent) => void) => () => void
+  onAiChatDone: (callback: (event: AiChatDoneEvent) => void) => () => void
+  onAiChatError: (callback: (event: AiChatErrorEvent) => void) => () => void
+  onAiIngestError: (callback: (message: string) => void) => () => void
   // Floating ball
   showFloatingBall: () => Promise<void>
   hideFloatingBall: () => Promise<void>
@@ -252,8 +309,38 @@ declare global {
 // Data types
 export interface Chapter {
   title: string
+  originalTitle?: string
+  customTitle?: string
   startIndex: number
   sentenceCount: number
+}
+
+export type ChapterOutlineStatus = 'queued' | 'generating' | 'generated' | 'short_chapter' | 'failed'
+
+export interface ChapterOutlineSection {
+  id: string
+  originalTitle: string
+  customTitle?: string
+  point?: string
+  startOffset: number
+}
+
+export interface ChapterOutlineRecord {
+  bookId: string
+  chapterKey: string
+  chapterIndex: number
+  contentHash: string
+  status: ChapterOutlineStatus
+  minimumSections: number
+  sections: ChapterOutlineSection[]
+  generatedAt?: string
+  error?: string
+}
+
+export interface ChapterOutlineGenerateRequest {
+  bookId: string
+  chapterIndex: number
+  chapterKey: string
 }
 
 export interface Sentence {
@@ -389,6 +476,163 @@ export interface HistoryEntry {
   sentenceRange?: { start: number; end: number } | null
 }
 
+export type AiMessageRole = 'system' | 'user' | 'assistant'
+
+export interface AiPromptMessage {
+  role: AiMessageRole
+  content: string
+}
+
+export interface AiHistoryMessage extends AiPromptMessage {
+  sources?: AiSourceRef[]
+  retrievalStatus?: 'done' | 'offline' | 'error' | 'skipped'
+  retrievalError?: string
+}
+
+export interface AiConversation {
+  id: string
+  title: string
+  createdAt: string
+  messages: AiHistoryMessage[]
+}
+
+export interface AiLlmSettings {
+  baseUrl: string
+  apiKey: string
+  model: string
+  fallbackModel: string
+  temperature: number
+  timeoutMs: number
+}
+
+export type AiProvider = 'openai' | 'zhipu' | 'other'
+
+export interface AiEngine extends AiLlmSettings {
+  id: string
+  name: string
+  provider?: AiProvider
+}
+
+export interface AiNmemSettings {
+  baseUrl: string
+  autoIngest: boolean
+  healthTimeoutMs: number
+  searchTimeoutMs: number
+  ingestTimeoutMs: number
+  statusCacheMs: number
+}
+
+export interface AiSettings {
+  nmem: AiNmemSettings
+  /** @deprecated 向后兼容，优先使用 engines */
+  llm: AiLlmSettings
+  engines: AiEngine[]
+  taskAssignment: {
+    chat: string
+    outline: string
+  }
+  webSearch: {
+    enabled: boolean
+  }
+  retrieval: {
+    enabled: boolean
+    topK: number
+    maxContextChars: number
+  }
+  chat: {
+    systemPrompt: string
+    evidencePrompt: string
+    readerContextPrompt: string
+    selectionPrompt: string
+    maxHistoryMessages: number
+    greetingPatterns: string[]
+    chapterPatterns: string[]
+    bookWidePatterns: string[]
+  }
+}
+
+export interface AiChatPayload {
+  bookId: string
+  bookTitle: string
+  messages: AiHistoryMessage[]
+  autoContext?: string
+  currentChapterIndex?: number
+  quotes?: string[]
+}
+
+export type AiQuestionCategory =
+  | 'greeting'
+  | 'selection'
+  | 'current_sentence'
+  | 'chapter'
+  | 'book_wide'
+  | 'general'
+
+export interface AiSourceRef {
+  index: number
+  memoryId: string
+  content: string
+  source: string
+  score: number
+  bookId: string
+  chapterIndex: number
+  chapterTitle: string
+}
+
+export interface AiTextPart {
+  type: 'text'
+  text: string
+}
+
+export interface AiChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  parts: AiTextPart[]
+  createdAt: string
+  status: 'complete' | 'streaming' | 'error'
+  requestId?: string
+  error?: string
+  sources?: AiSourceRef[]
+  retrievalStatus?: 'searching' | 'done' | 'offline' | 'error' | 'skipped'
+  retrievalError?: string
+}
+
+export interface AiChatChunkEvent {
+  requestId: string
+  seq: number
+  text: string
+}
+
+export interface AiChatDoneEvent {
+  requestId: string
+  cancelled: boolean
+}
+
+export interface AiChatErrorEvent {
+  requestId: string
+  code: string
+  message: string
+}
+
+export interface AiChatSourcesEvent {
+  requestId: string
+  status: 'searching' | 'done' | 'offline' | 'error' | 'skipped'
+  sources: AiSourceRef[]
+  error?: string
+}
+
+export interface AiNmemStatus {
+  status: 'online' | 'offline'
+  checkedAt: string
+  error?: string
+}
+
+export interface AiHistoryRepository {
+  load: (bookId: string) => AiHistoryMessage[] | Promise<AiHistoryMessage[]>
+  save: (bookId: string, messages: AiHistoryMessage[]) => void | Promise<void>
+  clear: (bookId?: string) => void | Promise<void>
+}
+
 export interface ImportResult {
   success: boolean
   book?: BookData
@@ -447,6 +691,8 @@ export interface AppSettings {
   dataDirHistory?: string[]
   /** 启动时自动恢复上次阅读位置 */
   autoResume?: boolean
+  /** AI 阅读助手配置 */
+  ai?: AiSettings
 }
 
 /** 全局快捷键动作 */

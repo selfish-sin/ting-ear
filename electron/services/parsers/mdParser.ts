@@ -1,14 +1,9 @@
 import { readFileSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
-import { preprocessText, splitSentences, sanitizeControlChars } from './textPreprocessor'
-import { refineChapters } from './chapterBuilder'
+import { sanitizeControlChars } from './textPreprocessor'
 import { deriveSentences, deriveChapters } from './structureBuilder'
 import { hashSentences } from '../../../src/utils/contentHash'
-import type { BookData, Block, StructuredChapter, StructureMeta } from '../../../src/global'
-
-// Markdown 标题（#~######）可能很密集；归一化合并极小小节，避免章节列表过碎
-const MD_MIN_SENTENCES = 50
-const MD_MAX_SENTENCES = 900
+import type { BookData, StructuredChapter, StructureMeta } from '../../../src/global'
 
 /**
  * 智能解码 Markdown 文件：自动检测编码。
@@ -110,6 +105,7 @@ export function parseMarkdownToStructure(raw: string): StructuredChapter[] {
         inCodeBlock = false
       } else {
         flushParagraph()
+        if (!ctx.chapter) ensureChapter('\u6b63\u6587', 1)
         inCodeBlock = true
       }
       continue
@@ -123,7 +119,8 @@ export function parseMarkdownToStructure(raw: string): StructuredChapter[] {
     const headerMatch = trimmed.match(/^(#{1,6})\s+(.+)/)
     if (headerMatch) {
       const level = headerMatch[1].length
-      ensureChapter(headerMatch[2].trim(), level)
+      if (level === 1 || !ctx.chapter) ensureChapter(headerMatch[2].trim(), level)
+      else flushParagraph()
       // heading 本身也作为一个 block（用于卡片渲染）
       ctx.chapter!.blocks.push({
         blockId: uuidv4(),
@@ -223,18 +220,7 @@ export function parseMarkdown(filePath: string): BookData {
   const allSentences = deriveSentences(structure)
 
   // 从 structure 派生章节（保留原始标题层级）
-  const rawChapters = deriveChapters(structure)
-
-  // 归一化：合并极小小节、切分超长章
-  const finalChapters =
-    allSentences.length > 0
-      ? refineChapters(allSentences.length, rawChapters, {
-          minSentences: MD_MIN_SENTENCES,
-          maxSentences: MD_MAX_SENTENCES
-        })
-      : rawChapters.length > 0
-        ? rawChapters
-        : [{ title: '正文', startIndex: 0, sentenceCount: 0 }]
+  const finalChapters = deriveChapters(structure)
 
   // Extract title from first chapter or filename
   let title = structure[0]?.title || ''

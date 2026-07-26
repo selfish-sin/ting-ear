@@ -1,7 +1,8 @@
-import { v4 as uuidv4 } from 'uuid'
-import { splitReadableSentences } from '../../../src/utils/bookData'
+import { mergeSmallChapters, splitReadableSentences } from '../../../src/utils/bookData'
 import { hashSentences } from '../../../src/utils/contentHash'
-import type { Block, StructuredChapter, StructureMeta, Chapter, BookData } from '../../../src/global'
+import type { StructuredChapter, Chapter, BookData } from '../../../src/global'
+
+export { generatePseudoStructure } from '../../../src/utils/bookData'
 
 /** 遍历 structure blocks，对每个 block.text 拆句，填充 sentenceRange，返回全局 sentences */
 export function deriveSentences(structure: StructuredChapter[]): string[] {
@@ -30,6 +31,34 @@ export function deriveChapters(structure: StructuredChapter[]): Chapter[] {
   }))
 }
 
+/** Regroup fine-grained source chapters while retaining every original block. */
+export function regroupStructuredChapters(
+  structure: StructuredChapter[],
+  options?: { minSentences?: number; maxSentences?: number }
+): { structure: StructuredChapter[]; chapters: Chapter[] } {
+  const sourceChapters = deriveChapters(structure)
+  if (sourceChapters.length <= 1) return { structure, chapters: sourceChapters }
+
+  const mergedChapters = mergeSmallChapters(sourceChapters, options)
+  const regrouped = mergedChapters.map((chapter) => {
+    const start = chapter.startIndex
+    const end = start + chapter.sentenceCount
+    const blocks = structure.flatMap((source) => {
+      const [sourceStart, sourceEnd] = source.sentenceRange
+      const overlaps = sourceEnd > start && sourceStart < end
+      const isHeadingOnly = sourceStart === sourceEnd && sourceStart >= start && sourceStart < end
+      return overlaps || isHeadingOnly ? source.blocks : []
+    })
+    return {
+      title: chapter.title,
+      level: 1,
+      blocks,
+      sentenceRange: [start, end] as [number, number]
+    }
+  })
+  return { structure: regrouped, chapters: mergedChapters }
+}
+
 /** 比对 structureMeta.contentHash 与当前 sentences hash */
 export function validateStructure(book: BookData): boolean {
   if (!book.structure || !book.structureMeta) return false
@@ -40,41 +69,4 @@ export function validateStructure(book: BookData): boolean {
 export function invalidateStructure(book: BookData): void {
   delete book.structure
   delete book.structureMeta
-}
-
-/** 旧书 fallback：每章内每 5 句 → 一个 paragraph block */
-export function generatePseudoStructure(
-  sentences: string[],
-  chapters: Chapter[]
-): { structure: StructuredChapter[]; structureMeta: StructureMeta } {
-  const BLOCK_SIZE = 5
-  const structure: StructuredChapter[] = chapters.map((ch) => {
-    const blocks: Block[] = []
-    const end = ch.startIndex + ch.sentenceCount
-    for (let i = ch.startIndex; i < end; i += BLOCK_SIZE) {
-      const slice = sentences.slice(i, Math.min(i + BLOCK_SIZE, end))
-      blocks.push({
-        blockId: uuidv4(),
-        type: 'paragraph',
-        text: slice.join(' '),
-        ttsSkip: false,
-        sentenceRange: [i, Math.min(i + BLOCK_SIZE, end)]
-      })
-    }
-    return {
-      title: ch.title,
-      level: 1,
-      blocks,
-      sentenceRange: [ch.startIndex, end]
-    }
-  })
-
-  return {
-    structure,
-    structureMeta: {
-      schemaVersion: 1,
-      contentHash: hashSentences(sentences),
-      sourceFormat: 'pseudo'
-    }
-  }
 }

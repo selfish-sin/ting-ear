@@ -7,15 +7,9 @@ import { XMLParser } from 'fast-xml-parser'
 import { v4 as uuidv4 } from 'uuid'
 import { preprocessText, splitSentences, sanitizeControlChars } from './textPreprocessor'
 import { basename, extname } from 'path'
-import { buildChapters, type Boundary } from './chapterBuilder'
-import { deriveSentences, deriveChapters } from './structureBuilder'
+import { deriveChapters, deriveSentences, regroupStructuredChapters } from './structureBuilder'
 import { hashSentences } from '../../../src/utils/contentHash'
 import type { Block, StructuredChapter, StructureMeta } from '../../../src/global'
-
-// EPUB 目录是出版社定的逻辑结构，粒度通常合理；归一化下限放低以尽量保留作者分章，
-// 仅合并极小片段（防技术书那种细到段落的目录把章节切得过碎）。
-const EPUB_MIN_SENTENCES = 40
-const EPUB_MAX_SENTENCES = 1000
 
 /**
  * 从 XHTML/HTML 内容中检测编码声明。
@@ -86,13 +80,53 @@ interface TocEntry {
   href: string
 }
 
+const packageXmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  removeNSPrefix: true,
+  trimValues: true
+})
+
+function xmlRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function xmlItems(value: unknown): unknown[] {
+  if (value === undefined || value === null) return []
+  return Array.isArray(value) ? value : [value]
+}
+
+function xmlText(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim()
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = xmlText(item)
+      if (text) return text
+    }
+    return ''
+  }
+  const record = xmlRecord(value)
+  return record ? xmlText(record['#text']) : ''
+}
+
 // Parse container.xml to find the OPF file path
 function findOpfPath(zip: AdmZip): string {
   const container = zip.getEntry('META-INF/container.xml')
   if (!container) return 'OEBPS/content.opf'
-  const xml = container.getData().toString('utf-8')
-  const match = xml.match(/full-path="([^"]+)"/)
-  return match ? match[1] : 'OEBPS/content.opf'
+  try {
+    const parsed = xmlRecord(packageXmlParser.parse(container.getData().toString('utf-8')))
+    const containerNode = xmlRecord(parsed?.container)
+    const rootfiles = xmlRecord(containerNode?.rootfiles)
+    for (const rootfile of xmlItems(rootfiles?.rootfile)) {
+      const fullPath = xmlText(xmlRecord(rootfile)?.['@_full-path'])
+      if (fullPath) return fullPath
+    }
+  } catch {
+    // Keep the historical default so the caller emits the existing missing-OPF error.
+  }
+  return 'OEBPS/content.opf'
 }
 
 // Parse OPF to get spine order and metadata
@@ -103,38 +137,28 @@ function parseOpf(opfXml: string): {
   spine: string[]
 } {
   const manifest = new Map<string, { href: string; mediaType: string }>()
-  const manifestRegex =
-    /<item[^>]*id="([^"]+)"[^>]*href="([^"]+)"[^>]*media-type="([^"]+)"[^>]*\/?>/g
-  let match: RegExpExecArray | null
-  while ((match = manifestRegex.exec(opfXml)) !== null) {
-    manifest.set(match[1], { href: match[2], mediaType: match[3] })
-  }
-
-  // Also handle item where href comes before id
-  const manifestRegex2 =
-    /<item[^>]*href="([^"]+)"[^>]*id="([^"]+)"[^>]*media-type="([^"]+)"[^>]*\/?>/g
-  while ((match = manifestRegex2.exec(opfXml)) !== null) {
-    if (!manifest.has(match[2])) {
-      manifest.set(match[2], { href: match[1], mediaType: match[3] })
-    }
-  }
-
-  // Spine order
   const spine: string[] = []
-  const spineRegex = /<itemref[^>]*idref="([^"]+)"[^>]*\/?>/g
-  while ((match = spineRegex.exec(opfXml)) !== null) {
-    spine.push(match[1])
+
+  const parsed = xmlRecord(packageXmlParser.parse(opfXml))
+  const packageNode = xmlRecord(parsed?.package)
+  const metadataNode = xmlRecord(packageNode?.metadata)
+  const title = xmlText(metadataNode?.title)
+  const author = xmlText(metadataNode?.creator)
+
+  const manifestNode = xmlRecord(packageNode?.manifest)
+  for (const value of xmlItems(manifestNode?.item)) {
+    const item = xmlRecord(value)
+    const id = xmlText(item?.['@_id'])
+    const href = xmlText(item?.['@_href'])
+    const mediaType = xmlText(item?.['@_media-type'])
+    if (id && href && mediaType) manifest.set(id, { href, mediaType })
   }
 
-  // Title
-  let title = ''
-  const titleMatch = opfXml.match(/<dc:title[^>]*>([^<]+)<\/dc:title>/i)
-  if (titleMatch) title = titleMatch[1].trim()
-
-  // Author
-  let author = ''
-  const authorMatch = opfXml.match(/<dc:creator[^>]*>([^<]+)<\/dc:creator>/i)
-  if (authorMatch) author = authorMatch[1].trim()
+  const spineNode = xmlRecord(packageNode?.spine)
+  for (const value of xmlItems(spineNode?.itemref)) {
+    const idref = xmlText(xmlRecord(value)?.['@_idref'])
+    if (idref) spine.push(idref)
+  }
 
   return { title, author, manifest, spine }
 }
@@ -233,30 +257,91 @@ const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   textNodeName: '#text',
-  isArray: (name) => ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'div', 'aside'].includes(name)
+  preserveOrder: true,
+  trimValues: false
 })
 
-/** 递归提取节点纯文本 */
-function extractText(node: unknown): string {
+interface OrderedElement {
+  tag: string
+  children: unknown[]
+  attributes: Record<string, unknown>
+}
+
+const CONTAINER_TAGS = new Set([
+  'html',
+  'body',
+  'section',
+  'article',
+  'main',
+  'div',
+  'header',
+  'footer',
+  'nav',
+  'figure',
+  'figcaption',
+  'table',
+  'thead',
+  'tbody',
+  'tfoot',
+  'tr',
+  'td',
+  'th',
+  'dl',
+  'dt',
+  'dd'
+])
+
+const BLOCK_TAGS = new Set([
+  'p',
+  'aside',
+  'blockquote',
+  'pre',
+  'code',
+  'ul',
+  'ol',
+  'li',
+  ...Array.from({ length: 6 }, (_, index) => `h${index + 1}`)
+])
+
+function normalizeTag(tag: string): string {
+  return (tag.split(':').pop() || tag).toLowerCase()
+}
+
+function orderedElement(node: unknown): OrderedElement | null {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return null
+  const record = node as Record<string, unknown>
+  const entry = Object.entries(record).find(([key]) => key !== ':@' && key !== '#text')
+  if (!entry) return null
+  const attributes = record[':@']
+  return {
+    tag: normalizeTag(entry[0]),
+    children: Array.isArray(entry[1]) ? entry[1] : [],
+    attributes:
+      attributes && typeof attributes === 'object' && !Array.isArray(attributes)
+        ? (attributes as Record<string, unknown>)
+        : {}
+  }
+}
+
+/** 按 preserveOrder 节点顺序提取行内文本。 */
+function extractOrderedText(node: unknown): string {
   if (node == null) return ''
   if (typeof node === 'string' || typeof node === 'number') return String(node)
-  if (Array.isArray(node)) return node.map(extractText).join(' ')
+  if (Array.isArray(node)) return node.map(extractOrderedText).join('')
   if (typeof node === 'object') {
-    const obj = node as Record<string, unknown>
-    if ('#text' in obj) return extractText(obj['#text'])
-    return Object.values(obj)
-      .filter((v) => typeof v !== 'object' || v !== null)
-      .map(extractText)
-      .join(' ')
+    const record = node as Record<string, unknown>
+    if ('#text' in record) return extractOrderedText(record['#text'])
+    const element = orderedElement(node)
+    if (element?.tag === 'br') return '\n'
+    if (element) return extractOrderedText(element.children)
   }
   return ''
 }
 
-/** 判断节点是否为脚注类型 */
-function isFootnoteNode(node: Record<string, unknown>): boolean {
-  const epubType = String(node['@_epub:type'] || node['@_type'] || '')
-  const cls = String(node['@_class'] || '')
-  const role = String(node['@_role'] || '')
+function isFootnoteAttributes(attributes: Record<string, unknown>): boolean {
+  const epubType = String(attributes['@_epub:type'] || attributes['@_type'] || '').toLowerCase()
+  const cls = String(attributes['@_class'] || '').toLowerCase()
+  const role = String(attributes['@_role'] || '').toLowerCase()
   return (
     epubType.includes('footnote') ||
     epubType.includes('endnote') ||
@@ -267,163 +352,110 @@ function isFootnoteNode(node: Record<string, unknown>): boolean {
   )
 }
 
+function isPageBreakAttributes(attributes: Record<string, unknown>): boolean {
+  const epubType = String(attributes['@_epub:type'] || attributes['@_type'] || '').toLowerCase()
+  const role = String(attributes['@_role'] || '').toLowerCase()
+  return epubType.includes('pagebreak') || role === 'doc-pagebreak'
+}
+
+function hasStructuredDescendant(nodes: unknown[]): boolean {
+  return nodes.some((node) => {
+    const element = orderedElement(node)
+    if (!element) return false
+    return (
+      BLOCK_TAGS.has(element.tag) ||
+      CONTAINER_TAGS.has(element.tag) ||
+      hasStructuredDescendant(element.children)
+    )
+  })
+}
+
 /**
  * 用 fast-xml-parser 解析 XHTML 为 Block[]。
  * 解析失败时返回 null（调用方降级到 stripHtml）。
  */
 export function parseXhtmlToBlocks(xhtml: string): Block[] | null {
   try {
-    const parsed = xmlParser.parse(xhtml)
+    const cleaned = xhtml
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, '')
     const blocks: Block[] = []
 
-    // 找到 body 节点
-    const html = parsed.html || parsed
-    const body = html.body || html
-
-    const processNode = (node: unknown, tag?: string): void => {
-      if (node == null) return
-
-      if (Array.isArray(node)) {
-        for (const item of node) processNode(item, tag)
-        return
-      }
-
-      if (typeof node === 'string' || typeof node === 'number') {
-        const text = String(node).trim()
-        if (text && tag !== 'script' && tag !== 'style') {
-          blocks.push({
-            blockId: uuidv4(),
-            type: 'paragraph',
-            text,
-            ttsSkip: false,
-            sentenceRange: [0, 0]
-          })
-        }
-        return
-      }
-
-      if (typeof node !== 'object') return
-      const obj = node as Record<string, unknown>
-
-      // 跳过 script/style/head
-      if (tag === 'script' || tag === 'style' || tag === 'head') return
-
-      // 标题 h1-h6
-      for (let level = 1; level <= 6; level++) {
-        const key = `h${level}`
-        if (key in obj) {
-          const headings = Array.isArray(obj[key]) ? obj[key] : [obj[key]]
-          for (const h of headings) {
-            const text = extractText(h).trim()
-            if (text) {
-              blocks.push({
-                blockId: uuidv4(),
-                type: 'heading',
-                level,
-                text,
-                ttsSkip: false,
-                sentenceRange: [0, 0]
-              })
-            }
-          }
-        }
-      }
-
-      // p 段落
-      if ('p' in obj) {
-        const paragraphs = Array.isArray(obj.p) ? obj.p : [obj.p]
-        for (const p of paragraphs) {
-          if (typeof p === 'object' && p !== null && isFootnoteNode(p as Record<string, unknown>)) {
-            const text = extractText(p).trim()
-            if (text) {
-              blocks.push({ blockId: uuidv4(), type: 'footnote', text, ttsSkip: true, sentenceRange: [0, 0] })
-            }
-          } else {
-            const text = extractText(p).trim()
-            if (text) {
-              blocks.push({ blockId: uuidv4(), type: 'paragraph', text, ttsSkip: false, sentenceRange: [0, 0] })
-            }
-          }
-        }
-      }
-
-      // aside（常为脚注容器）
-      if ('aside' in obj) {
-        const asides = Array.isArray(obj.aside) ? obj.aside : [obj.aside]
-        for (const aside of asides) {
-          const text = extractText(aside).trim()
-          if (text) {
-            blocks.push({ blockId: uuidv4(), type: 'footnote', text, ttsSkip: true, sentenceRange: [0, 0] })
-          }
-        }
-      }
-
-      // blockquote
-      if ('blockquote' in obj) {
-        const quotes = Array.isArray(obj.blockquote) ? obj.blockquote : [obj.blockquote]
-        for (const q of quotes) {
-          const text = extractText(q).trim()
-          if (text) {
-            blocks.push({ blockId: uuidv4(), type: 'quote', text, ttsSkip: false, sentenceRange: [0, 0] })
-          }
-        }
-      }
-
-      // pre / code
-      if ('pre' in obj) {
-        const pres = Array.isArray(obj.pre) ? obj.pre : [obj.pre]
-        for (const pre of pres) {
-          const text = extractText(pre).trim()
-          if (text) {
-            blocks.push({ blockId: uuidv4(), type: 'code', text, ttsSkip: true, sentenceRange: [0, 0] })
-          }
-        }
-      }
-
-      // div → 递归处理子节点
-      if ('div' in obj) {
-        const divs = Array.isArray(obj.div) ? obj.div : [obj.div]
-        for (const div of divs) {
-          if (typeof div === 'object' && div !== null) {
-            const d = div as Record<string, unknown>
-            if (isFootnoteNode(d)) {
-              const text = extractText(d).trim()
-              if (text) {
-                blocks.push({ blockId: uuidv4(), type: 'footnote', text, ttsSkip: true, sentenceRange: [0, 0] })
-              }
-            } else {
-              processNode(d)
-            }
-          }
-        }
-      }
-
-      // section → 递归
-      if ('section' in obj) {
-        const sections = Array.isArray(obj.section) ? obj.section : [obj.section]
-        for (const sec of sections) processNode(sec)
-      }
-
-      // ul/ol 列表
-      if ('ul' in obj || 'ol' in obj) {
-        const lists = [...(Array.isArray(obj.ul) ? obj.ul : obj.ul ? [obj.ul] : []),
-                       ...(Array.isArray(obj.ol) ? obj.ol : obj.ol ? [obj.ol] : [])]
-        for (const list of lists) {
-          const l = list as Record<string, unknown>
-          if ('li' in l) {
-            const items = Array.isArray(l.li) ? l.li : [l.li]
-            for (const li of items) {
-              const text = extractText(li).trim()
-              if (text) {
-                blocks.push({ blockId: uuidv4(), type: 'list', text, ttsSkip: false, sentenceRange: [0, 0] })
-              }
-            }
-          }
-        }
-      }
+    const addBlock = (
+      type: Block['type'],
+      rawText: string,
+      ttsSkip: boolean,
+      level?: number
+    ): void => {
+      const text = type === 'code' ? rawText.trim() : rawText.replace(/\s+/g, ' ').trim()
+      if (!text && type !== 'page_break') return
+      blocks.push({
+        blockId: uuidv4(),
+        type,
+        ...(level ? { level } : {}),
+        text,
+        ttsSkip,
+        sentenceRange: [0, 0]
+      })
     }
 
-    processNode(body)
+    const processNodes = (nodes: unknown[], inheritedFootnote = false): void => {
+      let inlineText = ''
+      const flushInline = (): void => {
+        addBlock(inheritedFootnote ? 'footnote' : 'paragraph', inlineText, inheritedFootnote)
+        inlineText = ''
+      }
+
+      for (const node of nodes) {
+        const element = orderedElement(node)
+        if (!element) {
+          inlineText += extractOrderedText(node)
+          continue
+        }
+
+        if (element.tag === 'script' || element.tag === 'style' || element.tag === 'head') continue
+        const structured =
+          BLOCK_TAGS.has(element.tag) ||
+          CONTAINER_TAGS.has(element.tag) ||
+          hasStructuredDescendant(element.children)
+        if (!structured) {
+          inlineText += extractOrderedText(node)
+          continue
+        }
+
+        flushInline()
+        const footnote = inheritedFootnote || isFootnoteAttributes(element.attributes)
+        const heading = /^h([1-6])$/.exec(element.tag)
+        if (isPageBreakAttributes(element.attributes)) {
+          addBlock('page_break', extractOrderedText(element.children), true)
+        } else if (heading) {
+          addBlock('heading', extractOrderedText(element.children), false, Number(heading[1]))
+        } else if (element.tag === 'p') {
+          addBlock(footnote ? 'footnote' : 'paragraph', extractOrderedText(element.children), footnote)
+        } else if (element.tag === 'aside' || (element.tag === 'div' && footnote)) {
+          addBlock('footnote', extractOrderedText(element.children), true)
+        } else if (element.tag === 'blockquote') {
+          addBlock('quote', extractOrderedText(element.children), false)
+        } else if (element.tag === 'pre' || element.tag === 'code') {
+          addBlock('code', extractOrderedText(element.children), true)
+        } else if (element.tag === 'li') {
+          addBlock('list', extractOrderedText(element.children), false)
+        } else if (element.tag === 'ul' || element.tag === 'ol') {
+          for (const child of element.children) {
+            const item = orderedElement(child)
+            if (item?.tag === 'li') addBlock('list', extractOrderedText(item.children), false)
+            else if (item) processNodes([child], footnote)
+          }
+        } else {
+          processNodes(element.children, footnote)
+        }
+      }
+      flushInline()
+    }
+
+    const parsed = xmlParser.parse(cleaned) as unknown
+    processNodes(Array.isArray(parsed) ? parsed : [parsed])
     return blocks.length > 0 ? blocks : null
   } catch {
     return null
@@ -558,7 +590,6 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
 
   // 4. 遍历 spine 提取文本 + 构建 structure
   const allSentences: string[] = []
-  const boundaries: Boundary[] = []
   const structure: StructuredChapter[] = []
   let chapterCounter = 0
 
@@ -581,6 +612,7 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
     const rawHtml = decodeHtmlSafe(entry.getData())
     const fileName = item.href.split('#')[0]
     const segments = splitHtmlByToc(rawHtml, entriesByFile.get(fileName) || [])
+    const fileStructureStart = structure.length
 
     const processSegment = (title: string, html: string): void => {
       // 尝试结构化解析
@@ -589,7 +621,14 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
         const ch: StructuredChapter = { title, level: 1, blocks, sentenceRange: [0, 0] }
         const sentences = deriveSentences([ch])
         if (sentences.length > 0) {
-          boundaries.push({ title, sentenceIndex: allSentences.length })
+          const offset = allSentences.length
+          ch.sentenceRange = [ch.sentenceRange[0] + offset, ch.sentenceRange[1] + offset]
+          for (const block of ch.blocks) {
+            block.sentenceRange = [
+              block.sentenceRange[0] + offset,
+              block.sentenceRange[1] + offset
+            ]
+          }
           allSentences.push(...sentences)
           structure.push(ch)
           chapterCounter++
@@ -598,7 +637,6 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
         // fallback: stripHtml
         const sentences = toSentences(html)
         if (sentences.length > 0) {
-          boundaries.push({ title, sentenceIndex: allSentences.length })
           allSentences.push(...sentences)
           // 构建单段落 block 作为 pseudo structure
           structure.push({
@@ -623,17 +661,19 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
     } else {
       processSegment(`第${chapterCounter + 1}章`, rawHtml)
     }
+
+    const fileStructure = structure.slice(fileStructureStart)
+    if (fileStructure.length > 1) {
+      const regroupedFile = regroupStructuredChapters(fileStructure)
+      structure.splice(fileStructureStart, fileStructure.length, ...regroupedFile.structure)
+    }
   }
 
   if (allSentences.length === 0) {
     throw new Error('无法从 EPUB 中提取文本内容。文件可能已损坏或使用了不支持的格式。')
   }
 
-  // 统一归一化：保留作者分章，仅合并极小片段、切分超长章
-  const chapters = buildChapters(allSentences.length, boundaries, {
-    minSentences: EPUB_MIN_SENTENCES,
-    maxSentences: EPUB_MAX_SENTENCES
-  })
+  const chapters = deriveChapters(structure)
 
   return {
     title,

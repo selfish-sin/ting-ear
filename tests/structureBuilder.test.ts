@@ -3,6 +3,15 @@ import { deriveSentences, deriveChapters, validateStructure, generatePseudoStruc
 import { hashSentences } from '../src/utils/contentHash'
 import type { StructuredChapter, BookData } from '../src/global'
 
+// === hashSentences ===
+{
+  assert.equal(hashSentences([]), 'e3b0c44298fc1c14')
+  assert.equal(hashSentences(['hello']), '2cf24dba5fb0a30e')
+  assert.equal(hashSentences(['句子一。', '句子二。']), '7144f2060a53f43d')
+  assert.equal(hashSentences(['a'.repeat(1000)]), '41edece42d63e8d9')
+  console.log('✓ hashSentences: SHA-256 前 16 位且 UTF-8 稳定')
+}
+
 // === deriveSentences ===
 {
   const structure: StructuredChapter[] = [
@@ -90,9 +99,14 @@ import type { StructuredChapter, BookData } from '../src/global'
   assert.equal(structure[1].sentenceRange[1], 12)
   assert.equal(structureMeta.sourceFormat, 'pseudo')
   assert.equal(structureMeta.contentHash, hashSentences(sentences))
-  // 每 5 句一个 block
-  assert.equal(structure[0].blocks.length, 2) // 7 sentences → 5+2
-  assert.equal(structure[1].blocks.length, 1) // 5 sentences → 5
+  // 章节标题单独生成零长度 heading，正文仍按每 5 句一个 paragraph block。
+  assert.equal(structure[0].blocks.length, 3) // heading + 7 sentences -> 5+2
+  assert.equal(structure[1].blocks.length, 2) // heading + 5 sentences -> 5
+  assert.equal(structure[0].blocks[0].type, 'heading')
+  assert.deepEqual(structure[0].blocks[0].sentenceRange, [0, 0])
+  assert.equal(structure[0].blocks[1].type, 'paragraph')
+  assert.deepEqual(structure[0].blocks[1].sentenceRange, [0, 5])
+  assert.deepEqual(structure[0].blocks[2].sentenceRange, [5, 7])
   console.log('✓ generatePseudoStructure: 合理分块')
 }
 

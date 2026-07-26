@@ -1,7 +1,7 @@
 {
   "name": "ting-ear",
   "version": "1.0.0",
-  "description": "听伴 - Windows 桌面 TTS 朗读伴侣",
+  "description": "听伴 - Windows 桌面 AI 阅读与 TTS 听书伴侣",
   "main": "./out/main/index.js",
   "author": "TingEar",
   "license": "MIT",
@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint electron/ src/",
     "format": "prettier --write \"electron/**/*.ts\" \"src/**/*.{ts,tsx,css}\"",
-    "test": "tsx tests/textPreprocessor.test.ts && tsx tests/bookData.test.ts && tsx tests/parserCompatibility.test.ts && tsx tests/engineImport.test.ts && tsx tests/albumUtils.test.ts",
+    "test": "tsx tests/textPreprocessor.test.ts && tsx tests/bookData.test.ts && tsx tests/bookStore.test.ts && tsx tests/readerComponents.test.ts && tsx tests/llmCaller.test.ts && tsx tests/settingsDeepMerge.test.ts && tsx tests/ipcStreaming.test.ts && tsx tests/aiHistory.test.ts && tsx tests/aiStore.test.ts && tsx tests/aiComponents.test.ts && tsx tests/selectionQuoteComponents.test.ts && tsx tests/contextMenuComponents.test.ts && tsx tests/aiSettingsPanel.test.ts && tsx tests/nmemBridge.test.ts && tsx tests/nmemContract.test.ts && tsx tests/spoilerFilter.test.ts && tsx tests/ragOrchestration.test.ts && tsx tests/ragComponents.test.ts && tsx tests/parserCompatibility.test.ts && tsx tests/epubParserStructure.test.ts && tsx tests/engineImport.test.ts && tsx tests/albumUtils.test.ts && tsx tests/structureBuilder.test.ts && tsx tests/mdParserStructure.test.ts && tsx tests/structureVersionMismatch.test.ts && tsx tests/ttsSkip.test.ts && tsx tests/ttsSession.test.ts && tsx tests/modeSwitchPlayback.test.ts && tsx tests/outlineGenerator.test.ts && tsx tests/outlineRepository.test.ts && tsx tests/outlineQueue.test.ts && tsx tests/chapterTitleEditing.test.ts && tsx tests/outlineIntegration.test.ts && tsx tests/outlineIpc.test.ts",
     "postinstall": "electron-builder install-app-deps",
     "package": "electron-vite build && electron-builder --win",
     "package:dir": "electron-vite build && electron-builder --win --dir"
@@ -25,6 +25,7 @@
     "@types/react-dom": "^18.3.7",
     "adm-zip": "^0.5.18",
     "axios": "^1.7.0",
+    "clsx": "^2.1.1",
     "fast-xml-parser": "^4.5.7",
     "iconv-lite": "^0.6.3",
     "jschardet": "^3.0.0",
@@ -35,6 +36,9 @@
     "pdf2json": "^4.0.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^2.6.1",
     "uuid": "^11.0.0",
     "ws": "^8.21.0",
     "zustand": "^5.0.0"

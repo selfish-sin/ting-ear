@@ -1,4 +1,5 @@
-import type { BookData, Chapter, EditRecord, StructuredChapter, StructureMeta } from '../global'
+import { v4 as uuidv4 } from 'uuid'
+import type { Block, BookData, Chapter, EditRecord, StructuredChapter, StructureMeta } from '../global'
 import { hashSentences } from './contentHash'
 
 export const BOOK_TITLE_MAX_LENGTH = 120
@@ -150,6 +151,7 @@ export function normalizeChapters(value: unknown, sentenceCount: number): Chapte
   if (sentenceCount <= 0) return []
 
   const starts = new Map<number, string>()
+  const titleMetadata = new Map<number, { originalTitle: string; customTitle?: string }>()
   if (Array.isArray(value)) {
     for (const item of value) {
       if (!isRecord(item)) continue
@@ -159,17 +161,41 @@ export function normalizeChapters(value: unknown, sentenceCount: number): Chapte
         typeof item.title === 'string' && item.title.trim()
           ? sanitizeReadableText(item.title).trim()
           : `第${starts.size + 1}部分`
-      starts.set(startIndex, title)
+      const originalTitle =
+        typeof item.originalTitle === 'string' && item.originalTitle.trim()
+          ? sanitizeReadableText(item.originalTitle).trim()
+          : title
+      const customTitle =
+        typeof item.customTitle === 'string' && item.customTitle.trim()
+          ? sanitizeReadableText(item.customTitle).trim()
+          : undefined
+      starts.set(startIndex, customTitle || title)
+      if (typeof item.originalTitle === 'string' || typeof item.customTitle === 'string') {
+        titleMetadata.set(startIndex, { originalTitle, customTitle })
+      }
     }
   }
 
   if (!starts.has(0)) starts.set(0, starts.size === 0 ? '全文' : '正文')
   const ordered = [...starts.entries()].sort(([a], [b]) => a - b)
-  return ordered.map(([startIndex, title], index) => ({
-    title,
-    startIndex,
-    sentenceCount: (ordered[index + 1]?.[0] ?? sentenceCount) - startIndex
-  }))
+  return ordered.map(([startIndex, title], index) => {
+    const metadata = titleMetadata.get(startIndex)
+    return {
+      title,
+      startIndex,
+      sentenceCount: (ordered[index + 1]?.[0] ?? sentenceCount) - startIndex,
+      ...(metadata?.originalTitle ? { originalTitle: metadata.originalTitle } : {}),
+      ...(metadata?.customTitle ? { customTitle: metadata.customTitle } : {})
+    }
+  })
+}
+
+export function chapterDisplayTitle(chapter: Chapter, fallback = '正文'): string {
+  return chapter.customTitle?.trim() || chapter.title?.trim() || chapter.originalTitle?.trim() || fallback
+}
+
+export function chapterKey(chapter: Chapter, index: number): string {
+  return `${index}:${chapter.startIndex}:${chapter.sentenceCount}`
 }
 
 export function buildPseudoChapters(sentences: string[], chunkSize = 400): Chapter[] {
@@ -187,9 +213,12 @@ export function buildPseudoChapters(sentences: string[], chunkSize = 400): Chapt
 }
 
 /** 把相邻小章节合并为 200~500 句的组（预选页「合并」开关与自动恢复选择共用） */
-export function mergeSmallChapters(chapters: Chapter[]): Chapter[] {
-  const MIN = 200
-  const MAX = 500
+export function mergeSmallChapters(
+  chapters: Chapter[],
+  options?: { minSentences?: number; maxSentences?: number }
+): Chapter[] {
+  const MIN = Math.max(1, options?.minSentences ?? 200)
+  const MAX = Math.max(MIN, options?.maxSentences ?? 500)
   const merged: Chapter[] = []
   let gs = 0
   let ge = 0
@@ -373,6 +402,146 @@ function normalizeEditHistory(value: unknown): EditRecord[] | undefined {
   return records.length > 0 ? records.slice(-20) : undefined
 }
 
+/** 旧书或失效结构 fallback：每章标题 + 每 5 句一个正文块。 */
+export function generatePseudoStructure(
+  sentences: string[],
+  chapters: Chapter[]
+): { structure: StructuredChapter[]; structureMeta: StructureMeta } {
+  const blockSize = 5
+  const structure: StructuredChapter[] = chapters.map((chapter) => {
+    const end = chapter.startIndex + chapter.sentenceCount
+    const blocks: Block[] = [
+      {
+        blockId: uuidv4(),
+        type: 'heading',
+        level: 1,
+        text: chapter.title,
+        ttsSkip: false,
+        sentenceRange: [chapter.startIndex, chapter.startIndex]
+      }
+    ]
+    for (let index = chapter.startIndex; index < end; index += blockSize) {
+      const blockEnd = Math.min(index + blockSize, end)
+      blocks.push({
+        blockId: uuidv4(),
+        type: 'paragraph',
+        text: sentences.slice(index, blockEnd).join(' '),
+        ttsSkip: false,
+        sentenceRange: [index, blockEnd]
+      })
+    }
+    return {
+      title: chapter.title,
+      level: 1,
+      blocks,
+      sentenceRange: [chapter.startIndex, end]
+    }
+  })
+
+  return {
+    structure,
+    structureMeta: {
+      schemaVersion: 1,
+      contentHash: hashSentences(sentences),
+      sourceFormat: 'pseudo'
+    }
+  }
+}
+
+const STRUCTURED_BLOCK_TYPES = new Set<Block['type']>([
+  'heading',
+  'paragraph',
+  'footnote',
+  'endnote',
+  'quote',
+  'list',
+  'code',
+  'page_break',
+  'toc_entry'
+])
+
+function isIntegerRange(value: unknown): value is [number, number] {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    Number.isInteger(value[0]) &&
+    Number.isInteger(value[1])
+  )
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((item) => typeof item === 'string')
+}
+
+function isValidStructureMeta(value: unknown, contentHash: string): value is StructureMeta {
+  if (!isRecord(value)) return false
+  return (
+    value.schemaVersion === 1 &&
+    value.contentHash === contentHash &&
+    typeof value.sourceFormat === 'string' &&
+    value.sourceFormat.trim().length > 0
+  )
+}
+
+function isValidStructure(value: unknown, sentenceCount: number): value is StructuredChapter[] {
+  if (!Array.isArray(value)) return false
+
+  const blockIds = new Set<string>()
+  let chapterCursor = 0
+  for (const chapter of value) {
+    if (
+      !isRecord(chapter) ||
+      typeof chapter.title !== 'string' ||
+      !chapter.title.trim() ||
+      !Number.isInteger(chapter.level) ||
+      (chapter.level as number) < 1 ||
+      !Array.isArray(chapter.blocks) ||
+      !isIntegerRange(chapter.sentenceRange)
+    ) {
+      return false
+    }
+
+    const [chapterStart, chapterEnd] = chapter.sentenceRange
+    if (
+      chapterStart !== chapterCursor ||
+      chapterEnd < chapterStart ||
+      chapterEnd > sentenceCount
+    ) {
+      return false
+    }
+
+    let blockCursor = chapterStart
+    for (const block of chapter.blocks) {
+      if (
+        !isRecord(block) ||
+        typeof block.blockId !== 'string' ||
+        !block.blockId.trim() ||
+        blockIds.has(block.blockId) ||
+        typeof block.type !== 'string' ||
+        !STRUCTURED_BLOCK_TYPES.has(block.type as Block['type']) ||
+        typeof block.text !== 'string' ||
+        typeof block.ttsSkip !== 'boolean' ||
+        !isIntegerRange(block.sentenceRange) ||
+        (block.level !== undefined &&
+          (!Number.isInteger(block.level) || (block.level as number) < 1 || (block.level as number) > 6)) ||
+        (block.meta !== undefined && !isStringRecord(block.meta))
+      ) {
+        return false
+      }
+
+      const [blockStart, blockEnd] = block.sentenceRange
+      if (blockStart !== blockCursor || blockEnd < blockStart || blockEnd > chapterEnd) return false
+      blockIds.add(block.blockId)
+      blockCursor = blockEnd
+    }
+
+    if (blockCursor !== chapterEnd) return false
+    chapterCursor = chapterEnd
+  }
+
+  return chapterCursor === sentenceCount
+}
+
 export function normalizeBookData(value: unknown): BookData | null {
   if (!isRecord(value) || typeof value.id !== 'string' || !value.id.trim()) return null
   const sentences = normalizeSentences(value.sentences)
@@ -381,23 +550,39 @@ export function normalizeBookData(value: unknown): BookData | null {
   const rawTitle = typeof value.title === 'string' ? sanitizeReadableText(value.title).trim() : ''
   const title = rawTitle.slice(0, BOOK_TITLE_MAX_LENGTH) || '未命名文章'
   const currentSentenceIndex = clampSentenceIndex(value.currentSentenceIndex, sentences.length)
-  const chapters = normalizeChapters(value.chapters, sentences.length)
+  let chapters = normalizeChapters(value.chapters, sentences.length)
   const originalSentences = normalizeSentences(value.originalSentences)
   const editHistory = normalizeEditHistory(value.editHistory)
   const progress = typeof value.progressPercent === 'number' ? value.progressPercent : 0
   const rawTimeMap = Array.isArray(value.timeMap) ? value.timeMap : null
 
-  // 结构化校验：contentHash 不匹配则丢弃（版本切换/清洗后 sentences 变了）
+  // 结构数据只在版本、形状、ID、range 与当前正文全部一致时保留。
   let structure: StructuredChapter[] | undefined
   let structureMeta: StructureMeta | undefined
   const rawStructure = (value as Record<string, unknown>).structure
-  const rawMeta = (value as Record<string, unknown>).structureMeta as StructureMeta | undefined
-  if (Array.isArray(rawStructure) && rawMeta && rawMeta.contentHash) {
-    if (rawMeta.contentHash === hashSentences(sentences)) {
-      structure = rawStructure as StructuredChapter[]
-      structureMeta = rawMeta
-    }
-    // hash 不匹配 → structure 失效，不保留
+  const rawMeta = (value as Record<string, unknown>).structureMeta
+  const contentHash = hashSentences(sentences)
+  const hasStructureData = rawStructure !== undefined || rawMeta !== undefined
+  if (isValidStructure(rawStructure, sentences.length) && isValidStructureMeta(rawMeta, contentHash)) {
+    structure = rawStructure.map((chapter, index) => ({
+      ...chapter,
+      title: chapters[index]?.customTitle || chapter.title
+    }))
+    structureMeta = rawMeta
+    chapters = structure.map((chapter, index) => {
+      const metadata = chapters[index]
+      return {
+        title: metadata?.customTitle || chapter.title,
+        startIndex: chapter.sentenceRange[0],
+        sentenceCount: chapter.sentenceRange[1] - chapter.sentenceRange[0],
+        ...(metadata?.originalTitle ? { originalTitle: metadata.originalTitle } : {}),
+        ...(metadata?.customTitle ? { customTitle: metadata.customTitle } : {})
+      }
+    })
+  } else if (hasStructureData) {
+    const pseudo = generatePseudoStructure(sentences, chapters)
+    structure = pseudo.structure
+    structureMeta = pseudo.structureMeta
   }
 
   return {

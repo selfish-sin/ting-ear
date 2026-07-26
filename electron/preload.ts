@@ -64,6 +64,50 @@ const api = {
   clearHistory: () => ipcRenderer.invoke('history:clear'),
   saveHistory: (entry: unknown) => ipcRenderer.invoke('history:save', entry),
 
+  // === AI chat operations ===
+  aiChat: (requestId: string, payload: unknown) => ipcRenderer.invoke('ai:chat', requestId, payload),
+  aiCancel: (requestId: string) => ipcRenderer.invoke('ai:cancel', requestId),
+  aiHistoryGet: (bookId: string) => ipcRenderer.invoke('ai:history:get', bookId),
+  aiHistoryClear: (bookId?: string) => ipcRenderer.invoke('ai:history:clear', bookId),
+  aiConvList: (bookId: string) => ipcRenderer.invoke('ai:conv:list', bookId),
+  aiConvLoad: (bookId: string, convId: string) => ipcRenderer.invoke('ai:conv:load', bookId, convId),
+  aiConvCreate: (bookId: string, title?: string) => ipcRenderer.invoke('ai:conv:create', bookId, title),
+  aiConvSave: (bookId: string, convId: string, messages: unknown[]) => ipcRenderer.invoke('ai:conv:save', bookId, convId, messages),
+  aiConvDelete: (bookId: string, convId: string) => ipcRenderer.invoke('ai:conv:delete', bookId, convId),
+  aiNmemStatus: (force = false) => ipcRenderer.invoke('ai:nmem:status', force),
+  aiNmemIngest: (book: unknown) => ipcRenderer.invoke('ai:nmem:ingest', book),
+  aiNmemSyncAll: () => ipcRenderer.invoke('ai:nmem:sync-all'),
+  aiListModels: (config: unknown) => ipcRenderer.invoke('ai:models:list', config),
+  aiTestModel: (config: unknown) => ipcRenderer.invoke('ai:model:test', config),
+  aiOutlineGenerate: (request: unknown) => ipcRenderer.invoke('ai:outline:generate', request),
+  aiOutlineGet: (request: unknown) => ipcRenderer.invoke('ai:outline:get', request),
+  aiOutlineUpdate: (record: unknown) => ipcRenderer.invoke('ai:outline:update', record),
+  onAiChatChunk: (callback: (event: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
+    ipcRenderer.on('ai:chat:chunk', handler)
+    return () => ipcRenderer.removeListener('ai:chat:chunk', handler)
+  },
+  onAiChatSources: (callback: (event: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
+    ipcRenderer.on('ai:chat:sources', handler)
+    return () => ipcRenderer.removeListener('ai:chat:sources', handler)
+  },
+  onAiChatDone: (callback: (event: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
+    ipcRenderer.on('ai:chat:done', handler)
+    return () => ipcRenderer.removeListener('ai:chat:done', handler)
+  },
+  onAiChatError: (callback: (event: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
+    ipcRenderer.on('ai:chat:error', handler)
+    return () => ipcRenderer.removeListener('ai:chat:error', handler)
+  },
+  onAiIngestError: (callback: (message: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, message: string) => callback(message)
+    ipcRenderer.on('ai:ingest:error', handler)
+    return () => ipcRenderer.removeListener('ai:ingest:error', handler)
+  },
+
   // === Window operations ===
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowMaximize: () => ipcRenderer.invoke('window:maximize'),
@@ -100,11 +144,20 @@ const api = {
     }
   },
 
-  // === Screenshot OCR (in addition to floating ball right-click) ===
+  // === Screenshot OCR ===
   startScreenshotOcr: () => ipcRenderer.invoke('ocr:startScreenshot'),
 
-  // === Screenshot selection window renderer helpers ===
+  // === Screenshot selection window helpers ===
   getScreenshotDataUrl: () => ipcRenderer.invoke('ocr:getScreenshotDataUrl'),
+  getScreenshotMeta: () =>
+    ipcRenderer.invoke('ocr:getScreenshotMeta') as Promise<{
+      dataUrl: string
+      cssWidth: number
+      cssHeight: number
+      imgWidth: number
+      imgHeight: number
+      scaleFactor: number
+    } | null>,
   submitOcrSelection: (data: { dataUrl: string; x: number; y: number; w: number; h: number }) =>
     ipcRenderer.invoke('ocr:selectionComplete', data),
   cancelOcrSelection: () => ipcRenderer.invoke('ocr:cancel'),
@@ -238,6 +291,7 @@ const api = {
     startIndex: number
     endIndex: number
     defaultName: string
+    engineId?: string
   }) => ipcRenderer.invoke('export:audio', params),
 
   // === Export events ===
@@ -315,52 +369,32 @@ const api = {
     return () => { ipcRenderer.removeListener('subtitle:next', handler) }
   },
 
-  // === Text cleaning (LLM) ===
-  cleanTextWithLLM: (params: { text: string; configId?: string }) =>
-    ipcRenderer.invoke('text:cleanWithLLM', params),
-  cancelClean: (taskId: string) => ipcRenderer.invoke('text:cancelClean', taskId),
-  /** 快速清洗（纯正则，秒出，不调 LLM） */
+  // === 文本清洗（纯规则） ===
   enhancedClean: (text: string) =>
     ipcRenderer.invoke('text:enhancedClean', { text }) as Promise<{
       success: boolean
       text: string
       originalLength: number
       cleanedLength: number
+      error?: string
     }>,
-  onCleanProgress: (callback: (p: { current: number; total: number; phase: string }) => void) => {
-    const handler = (
-      _e: Electron.IpcRendererEvent,
-      p: { current: number; total: number; phase: string }
-    ) => callback(p)
-    ipcRenderer.on('text:cleanProgress', handler)
-    return () => {
-      ipcRenderer.removeListener('text:cleanProgress', handler)
-    }
-  },
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  onCleanComplete: (callback: (data: any) => void) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const handler = (_e: Electron.IpcRendererEvent, data: any) => callback(data)
-    ipcRenderer.on('text:cleanComplete', handler)
-    return () => {
-      ipcRenderer.removeListener('text:cleanComplete', handler)
-    }
-  },
+  clearCache: (type: string) => ipcRenderer.invoke('data:clearCache', type),
 
-  // === AI 审校（已禁用）===
-  reviewWithLLM: null as unknown as any,
-  cancelReview: null as unknown as any,
-  onReviewProgress: null as unknown as any,
-  onReviewComplete: null as unknown as any,
-
-  // === LLM 配置管理 ===
-  getLlmConfigs: () => ipcRenderer.invoke('llm:getConfigs'),
-  saveLlmConfigs: (configs: unknown) => ipcRenderer.invoke('llm:saveConfigs', configs),
-  getActiveLlmId: () => ipcRenderer.invoke('llm:getActiveId'),
-  setActiveLlmId: (id: string) => ipcRenderer.invoke('llm:setActiveId', id),
-  testLlmConnection: (configId: string) => ipcRenderer.invoke('llm:testConnection', configId),
-  fetchModels: (config: unknown) => ipcRenderer.invoke('llm:fetchModels', config),
-  clearCache: (type: string) => ipcRenderer.invoke('data:clearCache', type)
+  // === 数据目录管理 ===
+  /** 获取当前数据目录路径 */
+  dataDirGet: () => ipcRenderer.invoke('dataDir:get'),
+  /** 获取默认数据目录路径 */
+  dataDirGetDefault: () => ipcRenderer.invoke('dataDir:getDefault'),
+  /** 在系统文件管理器中打开文件夹 */
+  dataDirOpen: (dirPath?: string) => ipcRenderer.invoke('dataDir:open', dirPath),
+  /** 选择文件夹对话框 */
+  dataDirSelect: () => ipcRenderer.invoke('dataDir:select'),
+  /** 验证路径有效性 */
+  dataDirValidate: (dirPath: string) =>
+    ipcRenderer.invoke('dataDir:validate', dirPath) as Promise<{ valid: boolean; error?: string; path: string }>,
+  /** 迁移数据到新目录 */
+  dataDirMigrate: (newDir: string) =>
+    ipcRenderer.invoke('dataDir:migrate', newDir) as Promise<{ success: boolean; migrated?: boolean; oldPath?: string; newPath?: string; error?: string; message?: string }>
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to renderer

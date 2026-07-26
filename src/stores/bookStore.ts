@@ -23,6 +23,8 @@ interface BookState {
   sentenceRange: { start: number; end: number } | null
   // null = persisted base text; non-null = transient original/edit-history version
   currentVersionId: string | null
+  // 阅读器模式：ai-reading=结构化卡片, listening=传统句子列表
+  readerMode: 'ai-reading' | 'listening'
 
   // UI state
   currentView: 'shelf' | 'player' | 'bookmarks' | 'history' | 'logs' | 'quicktext' | 'textclean'
@@ -42,12 +44,15 @@ interface BookState {
     >
   ) => void
   renameBook: (bookId: string, title: string) => Promise<boolean>
+  renameChapter: (bookId: string, chapterIndex: number, title: string) => Promise<boolean>
+  restoreChapterTitle: (bookId: string, chapterIndex: number) => Promise<boolean>
   removeBook: (bookId: string) => void
   setCurrentBook: (book: BookData | null) => void
   setSentences: (sentences: string[]) => void
   setChapters: (chapters: Chapter[]) => void
   setSentenceRange: (range: { start: number; end: number } | null) => void
   setCurrentVersionId: (versionId: string | null) => void
+  setReaderMode: (mode: 'ai-reading' | 'listening') => void
   updateCurrentTimeMap: (timeMap: number[]) => void
   setCurrentView: (view: BookState['currentView']) => void
   setLoading: (loading: boolean, message?: string) => void
@@ -64,6 +69,7 @@ export const useBookStore = create<BookState>((set, get) => ({
   chapters: [],
   sentenceRange: null,
   currentVersionId: null,
+  readerMode: 'ai-reading',
   currentView: 'shelf',
   isLoading: false,
   loadingMessage: '',
@@ -102,12 +108,30 @@ export const useBookStore = create<BookState>((set, get) => ({
   },
 
   updateBookProgress: (bookId, progress) => {
+    // 编辑记录版本（非 null、非「原始」）：句数/索引与主书 books.json 可能完全不同，
+    // 只更新当前会话焦点，避免把清洗版进度写坏主书。
+    // null / '__original__' 仍写回主书（主流程打开书时常用 '__original__'）。
+    const versionId = get().currentVersionId
+    if (versionId && versionId !== '__original__') {
+      set((state) => ({
+        currentBook:
+          state.currentBook?.id === bookId
+            ? { ...state.currentBook, ...progress }
+            : state.currentBook
+      }))
+      return
+    }
     set((state) => ({
       books: state.books.map((book) => {
         if (book.id !== bookId) return book
+        // 读原始版本时，用当前展示句数与主本取较小侧 clamp，防止越界
+        const lengthForClamp =
+          versionId === '__original__' && state.currentBook?.id === bookId
+            ? Math.min(book.sentences.length, state.currentBook.sentences.length || book.sentences.length)
+            : book.sentences.length
         const currentSentenceIndex = clampSentenceIndex(
           progress.currentSentenceIndex,
-          book.sentences.length
+          lengthForClamp
         )
         return {
           ...book,
@@ -145,6 +169,35 @@ export const useBookStore = create<BookState>((set, get) => ({
     return false
   },
 
+  renameChapter: async (bookId, chapterIndex, value) => {
+    const title = normalizeBookTitle(value)
+    const previous = get().books.find((book) => book.id === bookId)
+    const chapter = previous?.chapters[chapterIndex]
+    if (!title || !previous || !chapter) return false
+    const originalTitle = chapter.originalTitle || chapter.title
+    const chapters = previous.chapters.map((item, index) =>
+      index === chapterIndex ? { ...item, title, originalTitle, customTitle: title === originalTitle ? undefined : title } : item
+    )
+    const structure = previous.structure?.map((item, index) =>
+      index === chapterIndex ? { ...item, title } : item
+    )
+    return get().updateBookAndPersist({ ...previous, chapters, structure })
+  },
+
+  restoreChapterTitle: async (bookId, chapterIndex) => {
+    const previous = get().books.find((book) => book.id === bookId)
+    const chapter = previous?.chapters[chapterIndex]
+    if (!previous || !chapter) return false
+    const title = chapter.originalTitle || chapter.title
+    const chapters = previous.chapters.map((item, index) =>
+      index === chapterIndex ? { ...item, title, originalTitle: title, customTitle: undefined } : item
+    )
+    const structure = previous.structure?.map((item, index) =>
+      index === chapterIndex ? { ...item, title } : item
+    )
+    return get().updateBookAndPersist({ ...previous, chapters, structure })
+  },
+
   removeBook: (bookId) => {
     set((s) => ({
       books: s.books.filter((b) => b.id !== bookId),
@@ -165,7 +218,8 @@ export const useBookStore = create<BookState>((set, get) => ({
       chapters: normalized?.chapters || [],
       // 重置范围：跨书泄漏是最隐蔽的 bug 来源
       sentenceRange: null,
-      currentVersionId: null
+      currentVersionId: null,
+      readerMode: 'ai-reading'
     })
   },
 
@@ -173,6 +227,7 @@ export const useBookStore = create<BookState>((set, get) => ({
   setChapters: (chapters) =>
     set((state) => ({ chapters: normalizeChapters(chapters, state.sentences.length) })),
   setCurrentVersionId: (currentVersionId) => set({ currentVersionId }),
+  setReaderMode: (readerMode) => set({ readerMode }),
   updateCurrentTimeMap: (timeMap) => {
     set((state) => ({
       currentBook: state.currentBook ? { ...state.currentBook, timeMap } : null,

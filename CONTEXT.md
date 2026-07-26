@@ -1,461 +1,246 @@
-# 听伴 (TingEar) — 项目上下文
+# 听伴 (TingEar) CONTEXT
 
-> 更新日期: 2026-07-22 | 功能集: v3.7 | ~90 源码文件
->
-> 开发者向文档：文件索引 + 数据流 + 设计速查 + 坑点 + 修改指南。所有行号/函数均经实际代码核对。
-> 用户向说明见 `README.md`。原 `DESIGN.md` / `OPTIMIZATION_SUMMARY.md` / `TEST_CHECKLIST.md` 已合并进本文并删除。
+> 最近核对：2026-07-26 | AI 阅读一期切片 A-F 已实现；书架与正文共享右键菜单、连续阅读排版、章节标题去重和全局键盘焦点已接入
 
 ## 一分钟速览
 
-Electron 28 桌面应用，Windows TTS 听书伴侣。左边书架管理 EPUB/TXT/PDF/DOCX/MD/HTML，右边播放器逐句朗读。支持 Edge（免费）、千问（阿里云 API）、系统离线三种 TTS 引擎。截图 OCR 带放大镜和确认工具栏。文本清洗（纯正则规则）+ 手动逐句编辑 + 编辑记录版本管理。LLM 清洗 / AI 审校功能后端代码保留，但 v3.3 起**前端入口已关闭、相关 IPC 未注册**（见"已禁用功能"）。
+Windows Electron AI 阅读器：导入 EPUB/TXT/PDF/DOCX/MD/HTML，默认显示结构化正文卡片并提供带来源的书内 AI 问答，也可切换到逐句 TTS 听书；另有进度/书签/历史持久化、文本清理、OCR、浮动球和独立字幕窗口。渲染层是 React + TypeScript + Zustand + Tailwind，主进程负责 IPC、文件、RAG 编排和 TTS 引擎。
 
-```
-React 18 + TypeScript + Tailwind + Zustand (前端)
-Electron 28 + electron-vite 2 (桌面壳)
-msedge-tts / 千问 API / Web Speech API (TTS)
-mammoth / adm-zip / pdf-parse v1 / iconv-lite (文档解析)
-RapidOCR Python 子进程 (OCR)
-```
+## 文件索引
 
----
+| 文件 | 核心内容 | 何时读 |
+|---|---|---|
+| `src/App.tsx` | 视图路由、按 `readerMode` 切换 AI 阅读/听书、沉浸状态、`fixed` 沉浸悬浮按钮、底栏显隐 | 改全局布局/阅读模式入口/沉浸开关 |
+| `src/components/PlayerView.tsx` | 听书模式的选章、句子列表、模式切换和顶栏工具；沉浸时顶栏上移 | 改传统听书正文 UI |
+| `src/components/BookShelf.tsx` | 书架网格/列表、书籍更多操作入口、共享右键菜单命令分组、专辑与批量操作 | 改书架布局、书籍菜单或专辑操作 |
+| `src/components/ui/ContextMenu.tsx` | Portal 右键菜单；视口钳制、长菜单滚动、分组语义、键盘导航、关闭与焦点恢复 | 新增/修改右键菜单或溢出菜单时先读 |
+| `src/components/reader/AiReaderView.tsx` | AI 阅读页容器；章节大纲、连续正文、真实 AI 助手三栏布局；沉浸时稳定挂载并隐藏助手；旧书结构 fallback | 改 AI 阅读页布局、沉浸生命周期或旧书显示 |
+| `src/components/reader/ContentCards.tsx` / `ContentCard.tsx` | 章节标题去重、正文右键动作、当前块自动滚动、连续段落与特殊 block 样式、当前句/raw 朗读高亮 | 改正文排版、标题、右键动作、高亮、滚动或朗读 |
+| `src/components/reader/ChapterOutline.tsx` / `ModeSwitch.tsx` | 可折叠章节导航；`AI 阅读` / `听书` 分段切换 | 改章节导航或模式切换控件 |
+| `src/components/ai/AiChatPanel.tsx` / `ChatMessages.tsx` / `ChatInput.tsx` | AI 侧栏、Markdown 消息、流式光标、来源标注、引用卡片、持久 focus request、输入/发送/停止和清空历史 | 改 AI 对话交互、聚焦或消息渲染 |
+| `src/components/ai/SelectionPopup.tsx` / `QuoteChips.tsx` | 阅读/听书共用的选区浮动条；最多 5 条可移除的组合引用；问 AI 请求展开并聚焦侧栏 | 改选中文本操作或引用附件 UI |
+| `src/components/ai/NmemBanner.tsx` / `RetrievalCard.tsx` / `CitationPopover.tsx` | 知识库离线提示、检索状态、来源原文弹层和正文定位 | 改 RAG 状态或引用交互 |
+| `src/components/settings/AiSettingsPanel.tsx` / `src/aiSettings.ts` | 模型、nmem、检索与对话配置表单；AI 默认值、四类证据/安全 prompt、路由正则和深合并 | 改 AI 配置项、prompt、问题路由或默认值 |
+| `src/components/ControlBar.tsx` | 底栏：左倍速/音量、中播放、右音色/在线离线 | 改播放控制布局 |
+| `src/components/TitleBar.tsx` | 无边框窗控 + 主题；沉浸时仅窗控（无沉浸按钮） | 改系统顶栏 |
+| `src/hooks/useTTS.ts` | 书籍播放、ttsSkip 导航/预取过滤、唯一 Audio/TTS 引擎、`speakRaw`/`stopRaw`、system TTS 兜底 | 改书籍或片段/回答朗读生命周期 |
+| `src/utils/audioOutput.ts` | Web Audio GainNode（latencyHint:'playback'）、复用Audio元素、音量>100% | 改音量增益/音频管线 |
+| `src/utils/ttsSkip.ts` / `ttsSession.ts` | ttsSkip 查找/前后导航/预取过滤；书籍与 raw 朗读互斥状态、取消结算和恢复点 | 改跳过规则或 raw TTS 状态机 |
+| `src/utils/contentHash.ts` | 同步、跨 Node/浏览器的 SHA-256；句子按换行拼接后取前 16 位 | 改结构一致性哈希 |
+| `src/stores/playerStore.ts` / `settingsStore.ts` / `bookStore.ts` | 引擎选择、播放状态、设置、书籍持久化和 `readerMode` | 改状态或默认值 |
+| `src/stores/aiStore.ts` | 按书历史、流式回答、来源、nmem 在线状态、停止、错误状态和持久侧栏聚焦请求 | 改 AI 前端状态机 |
+| `src/utils/bookData.ts`、`src/shortcuts.ts` | 分句/章节、structure schema/shape/ID/range 校验、接受 structure 后重派生 chapters、pseudo 重建、播放恢复和快捷键 | 改文本数据、结构一致性或快捷键 |
+| `src/utils/coverGenerator.ts` | 无封面时生成浅色调封面（`COVER_STYLE_VERSION=v2-light`） | 改默认封面风格 |
+| `src/utils/cn.ts` | `clsx` + `tailwind-merge` 的 Tailwind class 合并助手 | 新组件需要条件 class 时读 |
+| `src/cleanRules.ts` | 默认清洗正则规则 | 改清洗规则 |
+| `electron/main.ts` / `preload.ts` | Electron 启动、`window.api` 和 IPC 注册 | 改主进程或跨层接口 |
+| `electron/ipc/aiHandlers.ts` | `ai:chat/cancel/history:*`、`ai:nmem:*` 注册与 sources/chunk 事件桥接 | 改 AI IPC |
+| `electron/services/ai/llm-caller.ts` / `ai-service.ts` | OpenAI SSE、200 error envelope/空正文校验、可配置 prompt、问题路由、RAG 编排、来源过滤、备用模型和定向取消 | 改 AI 请求、prompt、路由、检索或流式行为 |
+| `electron/services/ai/nmem-bridge.ts` / `ingest-service.ts` | nmem health/search/ingest HTTP 契约、状态缓存和按章导入 | 改知识库连接或书籍灌入 |
+| `electron/services/ai/ai-history.ts` / `ai-config.ts` | `ai-history.json` 原子持久化、可选检索字段与嵌套来源严格校验；主进程 AI 配置入口 | 改 AI 历史或主进程配置 |
+| `electron/ipc/ttsHandlers.ts` | `tts:synthesize`、引擎 CRUD、测试、发现和导入导出 | 改 TTS IPC |
+| `electron/services/tts-engines/engine-manager.ts` | `EngineManager.init/synthesize` 和适配器选择 | 改引擎调度或错误传播 |
+| `electron/services/tts-engines/edge-adapter.ts` / `qwen-adapter.ts` / `http-adapter.ts` | Edge、千问和 OpenAI/通用 HTTP 合成 | 改具体在线引擎 |
+| `electron/services/parsers/textPreprocessor.ts` | `enhancedClean` / `preprocessText` 纯规则清洗 | 改导入/清洗流水线 |
+| `electron/services/parsers/epubParser.ts` / `mdParser.ts` / `structureBuilder.ts` | EPUB package XML 结构解析与 preserve-order XHTML 遍历、MD 围栏/结构解析、全局 sentences/chapters/range 派生 | 改结构化导入或 block 判定 |
+| `electron/services/log-service.ts` / `electron/ipc/logHandlers.ts` | `%APPDATA%/ting-ear/听伴/logs.json` 日志 | 排查 TTS、IPC 和启动问题 |
+| `electron/services/parsers/`、`electron/ipc/fileHandlers.ts` | 文档解析、导入、可选 nmem 自动灌入、进度、封面和数据目录 | 改导入/持久化 |
+| `electron/ipc/ocrHandlers.ts`、`src/components/ScreenshotOverlay.tsx` | RapidOCR 截图选区（DPI、拖拽） | 改 OCR |
 
-## 文件索引表
+## TTS 调用链与故障含义
 
-> 行号基于 2026-07-11 实际代码。`.bak-*` 备份文件与 `.workbuddy/` 不计入。
-
-### 前端组件（渲染进程 src/）
-
-| 文件 | 核心函数+行号 | 何时读 |
-|------|-------------|--------|
-| `src/App.tsx` | `handleOpenBook()` L640（先 `validatePlayPref(loadPlayPref(id))` 校验本书 PlayPref 缓存，有效→跳过预选页直接进播放器；`forceSelector` 强制走预选页）, `handleChapterConfirm()` L596 支持 recordId/activeChapters/range, `activateReadingBook()` L134, `startReadingText()` L195 剪贴板朗读；`onShortcut` 分发全部全局快捷键动作（含 speedUp/Down、volumeUp/Down、resetDefaults，调 `playerStore` + `osdStore.show()`）；L808 渲染 `<SubtitleWindow />`（hash=#/subtitle）+ `<PlayerOSD />` | 改导入流程、书架交互、版本切换、预选页跳过逻辑、全局快捷键分发 |
-| `src/components/BookShelf.tsx` | 封面点击换封面, 信息区点击开预选页, 右键菜单(清洗格式) | 改书架交互、右键菜单 |
-| `src/components/RangeSelector.tsx` | 两步流程: page 0 编辑记录列表, page 1 章节选择；`mergeSmallChapters` 现从 `utils/bookData` 导入；PlayPref 完整缓存（`loadPlayPref` L43 / `validatePlayPref` L57,L105 / `chaptersInRange` L108 恢复勾选 / `savePlayPref` L136 在 `handleConfirm` L124 写入），按书 id 持久化「合并/版本/范围/句数快照」，下次打开自动沿用 | 改预选页、编辑记录集成、合并/版本/范围偏好记忆 |
-| `src/components/TextCleanerView.tsx` | `handleQuickClean()` L123, `handleApply()` L153, `handleUndo()` L243, `handleToggleManual()` L256 初始化句子数组, `handleSentenceEdit()` L275 单句修改, `handleManualSave()` L317 持久化到 editHistory；分句改用 `utils/bookData#splitReadableSentences` | 改清洗流程、手动编辑、撤销、编辑历史 |
-| `src/components/EditHistoryDialog.tsx` | 编辑记录翻页浏览器, 三种徽章 L52-59：`ai-clean`(紫)/`manual`(蓝)/`trim-spaces`(绿) | 改编辑记录 UI |
-| `src/components/ScreenshotOverlay.tsx` | 镂空选区+放大镜+8点把手+确认工具栏 | **改截图 OCR 交互** |
-| `src/components/PlayerView.tsx` | 章节下拉 L361-385（`chapters.map`，越界章节禁用）；**「重选章节」按钮 L390-400**（v3.7：调 `onReselectRange` 重新打开预选页修改范围/版本，下次打开自动沿用）；版本下拉 L402-450（原始/各编辑记录切换，调 `onSelectVersion`）；**书签图标（v3.5）**：未加书签点击→弹出备注输入框（Enter 确定），已加书签点击→`toggleBookmark` L593 直接取消（toast「书签已取消」） | 改播放器版本选择、章节范围重选、书签切换 |
-| `src/components/SubtitleWindow.tsx` | `SubtitleWindow()` L13 桌面字幕条（hash=#/subtitle 独立窗口）：上方书名·章节+当前句子，下方播放/暂停/上下句/打开主窗口/关闭，可拖拽拉伸；样式由 `subtitle:setStyle` 控制 | 改桌面字幕窗口 |
-| `src/components/SettingsModal.tsx` | 常规/TTS/外观/清洗/**快捷键**/关于 六个 tab（LLM tab 已删, v3.3）；快捷键 tab 遍历 `SHORTCUT_ACTION_LIST` 渲染，键位用 `acceleratorToKeys()` 拆成 kbd chip 展示（v3.4）；点击条目进入捕获态：捕获期间先 `applyShortcuts({})` 停用全部全局键避免误触，结束再恢复。**捕获顺滑交互（v3.5）**：按住修饰键时实时预览（`previewAcc` + `acceleratorPreview`），再次点击正在捕获的条目或 Esc 取消，双击已设置条目清空；捕获态按钮加 `animate-capture` 柔和脉冲动画 + hover 微缩放。**新增引擎 v3.6**：URL 自动检测(`🔍 检测`按钮调用 `tts:probeEngineUrl` 自动推断名称+类型)、音色自动发现(`🔍 自动发现`按钮调用 `tts:discoverVoicesForConfig` 用未保存表单配置探测，不再临时写入 engines.json)、自适应表单(OpenAI兼容/通用HTTP)、一键部署(curl/Python/JSON) | 改设置面板、快捷键捕获、引擎管理 |
-| `src/components/CleanRulesSettings.tsx` | 清洗格式正则规则编辑：列表 + 增/删/改 + 校验 + 实时预览 + 诊断（**可编辑测试文本 / 单条匹配次数+未匹配警告 / 「试跑全部规则」逐条追踪：停用·匹配数·改没改**）+ **「从 AI 导入」**（粘贴 AI 返回的 CleanRule JSON，设置页「清洗」tab）| 改清洗规则 UI |
-| `prompts/clean-rule-import.md` | 自然语言→规则 JSON 的提示词模板（含 I/O 规范、示例、导入步骤）| 改/扩展 AI 生成规则提示词 |
-| `src/cleanRulePrompt.ts` | 内嵌同一份提示词文本，供「从 AI 导入」窗口的「复制提示词」按钮一键复制到剪贴板（与上面 md 保持一致）| 改提示词内容（需同步 md 与常量） |
-| `src/components/SideNav.tsx` | 「清洗格式」导航项 | 改导航 |
-| `src/components/ControlBar.tsx` | `handleTogglePlay()`；布局=左播放控制(章/句/播放/停止)+弹性留白+右调节区(倍速stepper±0.25/音量stepper±10%/音色/工具)；无书名(桌面字幕已覆盖)；与ProgressBar统一底色`bg-white dark:bg-dark-surface` | 改控制栏 UI、倍速/音量交互 |
-| `src/components/ProgressBar.tsx` | `xToTime()` L89, `timeToSentence()` L100 | 改进度跳转 |
-| `src/components/VoiceSelector.tsx` | 音色选择 / 试听 | 改音色选择 |
-| `src/components/QuickTextPanel.tsx` | 快速文本（OCR 结果落此处） | 改快速文本 |
-| `src/components/ErrorBoundary.tsx` | `ErrorBoundary` class | React 错误边界 |
-| `src/components/BookmarksView.tsx` | 书签管理 | 改书签 |
-| `src/components/HistoryView.tsx` | `fmtTime()` (HH:MM:SS), `handleContinue()` | 改历史恢复、时间格式 |
-| `src/components/LogsView.tsx` | 日志展示 | 改日志面板 |
-| `src/components/FloatingBall.tsx` | 悬浮球窗口（独立 transparent 窗口） | 改悬浮球 |
-| `src/components/TitleBar.tsx` | 自定义标题栏 | 改窗口标题栏 |
-| `src/components/Toast.tsx` | Toast 通知 | 改通知样式 |
-| `src/components/PlayerOSD.tsx` | 全局快捷键调节倍速/音量时的居中 OSD 反馈（图标+数值+进度条，`osd-enter` 动画，挂在 `App.tsx`）；受 `osdStore` 控制显隐 | 改倍速/音量 OSD 反馈 |
-
-### 前端工具 / 入口
-
-| 文件 | 核心函数+行号 | 何时读 |
-|------|-------------|--------|
-| `src/utils/timeFormat.ts` | `formatFullTime()` → `YYYY-MM-DD HH:MM:SS`, `formatHMS()` → `HH:MM:SS` | 任何需要显示完整时间的组件 |
-| `src/utils/bookData.ts` | **核心数据规范化 + PlayPref 缓存**：`splitReadableSentences()` L130（基于 Intl.Segmenter 的中英文分句）, `normalizeChapters()` L148, `buildPseudoChapters()` L174, `mergeSmallChapters()` L189（200~500 句合并）, **PlayPref 缓存（v3.7）**：`PlayPref` 接口 L247（merged/recordId/range/ver）, `loadPlayPref`/`savePlayPref` L260/L270（localStorage 键 `ting-ear-playpref-<bookId>`）, `versionSentenceCount()` L280, `validatePlayPref()` L295（句数变化→作废）, `chaptersInRange()` L308（range 反查章节勾选）, `normalizeSentenceRange()` L316, `clampSentenceIndex()` L327, `findChapterIndex()` L339, `normalizeBookData()` L375（导入书籍规范化入口）, `normalizeBookCollection()` L418 | 改书籍规范化、分句、章节合并、预选页偏好缓存、进度恢复 |
-| `src/utils/albumUtils.ts` | `validateAlbums()` L9, `normalizeAlbumTitle()`, `ALBUM_TITLE_MAX_LENGTH=40` | 改专辑数据校验 |
-| `src/cleanRules.ts` | `CleanRule` 类型 + `DEFAULT_CLEAN_RULES`（12 条默认规则：去页码 + 半角转全角）| 改清洗规则默认值/类型 |
-| `src/shortcuts.ts` | `SHORTCUT_ACTION_LIST` L4（11 动作：播放/停止/上下句/上下章 + 倍速±/音量±/恢复默认）, `DEFAULT_SHORTCUTS` L23（均带 Ctrl+Alt 前缀）, `keyToAccelerator()` L59 捕获转加速器, `acceleratorPreview()` L98 修饰键单独按下时返回已按组合（供实时预览）, `acceleratorToKeys()` L132 加速器→简短键帽文案（Ctrl/Win/←→↑↓/␣ 等，供设置页 kbd chip 展示）| 改快捷键动作/默认键位/键帽展示/捕获预览 |
-| `src/utils/coverGenerator.ts` | `generateCoverDataUrl()` 自动生成封面占位图（被 App.tsx 引用） | 改封面占位样式 |
-| `src/main.tsx` | React 18 入口 | 改挂载/Provider |
-
-### 前端 Hooks + Store
-
-| 文件 | 核心函数+行号 | 何时读 |
-|------|-------------|--------|
-| `src/hooks/useTTS.ts` | `playSentence()` L163, 预缓存并发池 `PREFETCH_CONCURRENCY=1` L79-89, `playWithSystemTTS()` L334（Web Speech API）, `TTSError` 枚举 | 改 TTS 播放流程、预缓存 |
-| `src/hooks/useKeyboard.ts` | `useKeyboard()` 应用内快捷键（窗口聚焦且非输入框时 **仅** Space 播放/暂停 + Esc 停止；**方向键已移除**，`v3.5` 起「上一句/下一句」改由全局快捷键统一接管，避免一次按键同时触发内部与全局两份逻辑）；`useClipboardHotkey()` 仅保留 Ctrl+V 粘贴检测 | 改快捷键 |
-| `src/stores/playerStore.ts` | `ttsEngine: 'edge'` 默认 L60, `timeMap` 真实时长缓存 L30/L94 `updateTimeMapEntry`；导出 `SPEED_MIN=0.5` L113 /`SPEED_MAX=3.0`/`SPEED_STEP=0.1`(v3.5 由 0.25 调细)、`VOLUME_STEP=0.05` L117、`DEFAULT_SPEED/VOLUME` 常量；`setVolume` 音量归 0 自动静音、回升取消静音，并即时写到正在播放的 audio | 改播放器状态、倍速/音量范围 |
-| `src/stores/albumStore.ts` | `useAlbumStore` 自定义专辑 CRUD：`loadAlbums`/`createAlbum`/`renameAlbum`/`deleteAlbum`/`addItem`/`removeItem`/`moveItem`/`persistAlbums`，走 `album:load`/`album:save` IPC | 改专辑（自定义合集） |
-| `src/stores/bookStore.ts` | `setCurrentView` L208（含 `'textclean'`）, `updateBook()` L80 auto-persist, `updateBookAndPersist()` L90, `persistBooks()` L55 | 改书籍管理 |
-| `src/stores/settingsStore.ts` | `llmConfigs` 预设, `cleanPrompt`, `setSettings()` 自动 `saveSettings()` L115 | 改设置持久化 |
-| `src/stores/textCleanStore.ts` | `openBookAfterApply` 应用后自动开预选页 | 改清洗流程 |
-| `src/stores/quickTextStore.ts` | 快速文本 | 改剪贴板文本 |
-| `src/stores/bookmarkStore.ts` | 书签 CRUD；`toggleBookmark()`（v3.5 新增）按 bookId+sentenceIndex 定位，有则删、无则加，供播放器书签图标「再点取消」 | 改书签 |
-| `src/stores/historyStore.ts` | 收听历史 | 改历史 |
-| `src/stores/logStore.ts` | 日志管理 | 改日志 |
-| `src/stores/floatingBallStore.ts` | 悬浮球状态 | 改悬浮球 |
-| `src/stores/osdStore.ts` | `show(kind: 'speed'\|'volume'\|'reset')` 触发居中 OSD，1.2s 自动隐藏（`PlayerOSD` 消费）| 改倍速/音量 OSD 显隐 |
-| `src/global.d.ts` | `EditRecord.type` = `'trim-spaces' \| 'ai-clean' \| 'manual'`, `LLMConfig`, `BookData.editHistory`, `AppSettings.llmConfigs/cleanPrompt` | 查类型、加新 API |
-
-### Electron 主进程
-
-| 文件 | 核心函数+行号 | 何时读 |
-|------|-------------|--------|
-| `electron/main.ts` | `registerTextCleanHandlers()` 调用 L214（统一注册各 ipc handler，含 window/bookmark/log/history/floatingBall/subtitle）；`registerCustomShortcuts()` L157 / `registerGlobalHotkeys()` L180 现只注册播放器自定义全局快捷键，`shortcuts:update` IPC 运行时改键；Ctrl+Shift+R 选中朗读全局热键 + `clipboard:read` 已于 v3.4 移除 | 改启动流程、加 IPC、全局快捷键 |
-| `electron/preload.ts` | 所有 `on*` listener 均返回 cleanup 函数；审校 API（`reviewWithLLM` 等）已置 `null`（L351-354）；`onReadSelected`/`readClipboardText` 已于 v3.4 移除；v3.6 新增 `ttsDiscoverVoices`/`ttsProbeEngineUrl` 桥接；`loadAlbums`/`saveAlbums` 专辑桥接 | 加新 IPC API |
-
-### IPC Handlers（`electron/ipc/`）
-
-| 文件 | 注册的核心 channel | 何时读 |
-|------|------|--------|
-| `fileHandlers.ts` | `file:import` L95, `album:save` L234 / `album:load` L245（自定义专辑持久化）, `book:reprocess` L342, `export:audio` L498, `saveJsonFile`/`loadJsonFile` | 改导入/导出、专辑存储 |
-| `ttsHandlers.ts` | `tts:synthesize` L11, `tts:previewVoice` L51, `tts:discoverVoices` L120 / `tts:discoverVoicesForConfig` L125 / `tts:probeEngineUrl` L130（v3.6）, `tts:importEngine` L135；`tts:synthesize`/`tts:previewVoice` 都会写应用日志（成功/失败/异常，含 engineId/voice/audioFormat），便于排查“连接成功但合成失败”；`tts:importEngine` 捕获异常并返回业务错误，避免前端只显示“部署请求失败” | 改 TTS IPC |
-| `subtitleHandlers.ts` | `registerSubtitleHandlers()` L261；`subtitle:show`/`hide`/`toggle` L263-265, `subtitle:getStyle`/`setStyle` L275-276, `subtitle:showContextMenu` L279, `subtitle:play/pause/prev/next` L284+ 转发到主窗口 | 改桌面字幕窗口 IPC |
-| `textCleanHandlers.ts` | `text:cleanWithLLM` L23（后端保留但 UI 不调用）, `text:enhancedClean` L97（纯正则清洗） | 改文本清洗 IPC |
-| `ocrHandlers.ts` | `show:false` L91 + `ready-to-show` L99 消除黑屏, `ScreenshotOverlay` | 改截图 OCR |
-| `floatingBallHandlers.ts` | `createFloatingBallWindow()` | 改悬浮球 |
-| `windowHandlers.ts` | 窗口控制 | 改窗口 |
-| `bookmarkHandlers.ts` | 书签读写 | 改书签 |
-| `logHandlers.ts` | 日志读写 | 改日志 |
-| `historyHandlers.ts` | 历史读写 | 改历史 |
-
-> 注：旧文档提到的 `llm:testConnection` **当前不存在**（主进程未注册，仅 `.bak` 备份里有）。`text:cleanProgress` / `text:cleanComplete` 事件仍在 `text:cleanWithLLM` 流程中使用。
-
-### 服务（`electron/services/`）
-
-| 文件 | 核心函数+行号 | 何时读 |
-|------|-------------|--------|
-| `settings-service.ts` | LLM 默认配置, `mergeLlmConfigs()`, `getCleanPrompt()` | 改默认配置 |
-| `text-cleaner.ts` | `cleanTextWithLLM()` L220（已退化为只跑 `enhancedClean` 正则，不真正调 LLM）, `DEFAULT_CLEAN_PROMPT` L17 | 改文本清洗核心（后端保留） |
-| `text-reviewer.ts` | `reviewTextWithLLM()` L121, `DEFAULT_REVIEW_PROMPT` L50, `ReviewIssue` 类型 L18 — **AI 审校服务，当前未接入任何 IPC（已禁用）** | 改审校逻辑（如需恢复） |
-| `log-service.ts` | `LogService` 类 | 改日志 |
-| `llm/adapter.ts` | `ILLMAdapter`, `LLMConfig`, `LLM_PRESETS`(3预设) | 改 LLM 接口（后端保留） |
-| `llm/ollama-adapter.ts` | Ollama `POST /api/chat` | 改 Ollama 适配（后端保留） |
-| `llm/openai-adapter.ts` | OpenAI 兼容 `POST /v1/chat/completions` | 改云端适配（后端保留） |
-| `llm/adapter-factory.ts` | `createAdapter()` | 改适配器工厂（后端保留） |
-
-### TTS 引擎（`electron/services/tts-engines/`）
-
-| 文件 | 核心函数+行号 | 何时读 |
-|------|-------------|--------|
-| `engine-manager.ts` | `synthesize()` L109（不回退）, `init()` L60 为自定义引擎注册 `HttpAdapter`, `addCustomEngine()`/`deleteCustomEngine()` 同步维护适配器, `discoverVoices()` L224 / `discoverVoicesForConfig()` L258 / `probeEngineUrl()` L690 自动发现音色和探测引擎类型；`importEngine()` L306 支持 curl/Python/JSON，一键部署会校验 URL、保留 response/voices 字段、把常见示例 body 归一为 `{text}`/`{voice}` 模板，并返回业务错误而不是抛出 IPC 异常；支持 `/v1/chat/completions` + `audio.voice` 形态，自动生成下拉音色并推断 `choices.0.message.audio.data`；识别 `xiaomimimo.com` / `mimo-*` 模型时自动合并 MiMo 预置音色，老配置无需重导入 | 改引擎调度、新增自定义引擎、一键部署 |
-| `http-adapter.ts` | **v3.6 新增** 通用 HTTP TTS 适配器；支持 OpenAI 兼容(`POST /v1/audio/speech`)和通用 HTTP(可配置 `requestTemplate`/`responseAudioField`/`responseFormat`); 合成时递归替换 `{text}`/`{voice}`/`{speed}` 模板; 自动从 requestTemplate 推断 `audio.format`（mp3/wav）并返回正确 `audioFormat`，小米 MiMo `audio.format: "wav"` 不再被误标成 mp3；HTTP 错误会带状态码和响应片段; `discoverVoices()` 自动探测 Kokoro/OpenAI 等已知音色端点，按输入 URL 推导 origin/v1/api/v1 候选路径；厂商预置音色统一走 `provider-voices.ts` | 改自定义引擎合成、音色自动发现、日志 |
-| `provider-voices.ts` | 厂商音色预置注册表：`PROVIDER_VOICE_PRESETS` 按 `apiUrl` / `requestTemplate.model` / `type` 匹配，当前内置 OpenAI 与小米 MiMo；导出 `getProviderVoices()` + `mergeVoices()` 供 import/discover/getEngines 统一自动合并。未来新增厂商只加 preset，不改业务链路 | 改厂商音色预置、自动注入 |
-| `adapter.ts` | `TTSEngineConfig`/`TTSVoice` 类型定义 | 改 TTS 类型 |
-| `edge-adapter.ts` | voice 白名单校验 `EDGE_VOICES.some` L110（无效回退 XiaoxiaoNeural）, 超时 8s + 重试 L133/L147 | 改 Edge TTS |
-| `qwen-adapter.ts` | voice 白名单校验 `QWEN_VOICES.some` L74（无效回退 Cherry）, `synthesize()` | 改千问 TTS |
-
-### 文档解析器（`electron/services/parsers/`）
-
-| 文件 | 导出函数+行号 | 何时读 |
-|------|---------|--------|
-| `txtParser.ts` | `parseTxt()` L66 | 改 TXT 解析 |
-| `epubParser.ts` | `parseEpub()` L151, `extractCover()` 4级策略提取内嵌封面(meta[name=cover]→properties=cover-image→id/href含cover→常见文件名) | 改 EPUB 解析、封面提取 |
-| `pdfParser.ts` | `parsePdf()` L18 | 改 PDF 解析 |
-| `docxParser.ts` | `parseDocx()` L13 | 改 DOCX 解析 |
-| `mdParser.ts` | `parseMarkdown()` L47 | 改 MD 解析 |
-| `htmlParser.ts` | `parseHtml()` L22 | 改 HTML 解析 |
-| `textPreprocessor.ts` | `applyRegexRules()` L300 + `enhancedClean(raw, rules?)` L330（应用用户规则，结构性清洗仍始终执行）, `preprocessText()` L207, `splitSentences()` L354 | 改预处理、清洗正则 |
-
-> `electron/types/` 目录**存在但为空**（0 文件）；全局类型集中在 `src/global.d.ts`。
-> `electron/ocr/rapidocr_runner.py`：`main()` 入口，RapidOCR 子进程。
-
----
-
-## 数据库 Schema
-
-无数据库。JSON 文件存储在 `%APPDATA%/ting-ear/听伴/`：
-
-| 文件 | 内容 | 关键字段 |
-|------|------|-------------|
-| `books.json` | `BookData[]` | `editHistory: EditRecord[]`（manual/trim-spaces/ai-clean）、`timeMap: number[]` 真实音频时长缓存 |
-| `settings.json` | `AppSettings` | `activeLlmId, llmConfigs[], cleanPrompt`（LLM 配置保留，UI 不可见）；`ttsEngine: string` v3.6 起支持自定义引擎 ID |
-| `engines.json` | `TTSEngineConfig[]` | **v3.6** 自定义引擎配置（id/name/type/apiUrl/apiKey/voices/requestTemplate/responseAudioField/responseFormat 等） |
-| `logs.json` | 平台日志 | 最多 5000 条，超出自动裁剪 |
-
----
-
-## 核心数据流
-
-### 预选页两步流程（v3.7 加 PlayPref 缓存）
-
-```
-点击书 → App.handleOpenBook(L640):
-  validatePlayPref(loadPlayPref(bookId))
-   ├─ 缓存有效（版本句数未变 + 范围合法）→ 跳过预选页，
-   │   按缓存的 merged/recordId/range 直接 handleChapterConfirm 进播放器
-   └─ 缓存无效 / forceSelector → RangeSelector:
-       ┌─ 缓存仍部分有效 → 自动恢复版本(L57)/合并(L97)/勾选(chaptersInRange L108)
-       └─ 完全无缓存 → 默认最新编辑记录 + 不合并
-
-RangeSelector step 0:
-  ┌─ 编辑记录列表（radio 单选）
-  │   原始版本 · 清洗 · 手动编辑
-  │   [取消]  [下一页 →]
-  └─ 点下一页 → step 1:
-  ┌─ 章节选择（选处理版本→自动生成伪章节）
-  │   [合并章节]  [全选]
-  │   [← 上一页]  [开始阅读]
-  └─ → handleConfirm(L124): savePlayPref 写入 {merged,recordId,range,ver}
-       → onConfirm(range, chapters, recordId) → handleChapterConfirm
-       → 用 record.sentences 替换 book.sentences → 进播放器
-
-播放器「重选章节」按钮(PlayerView L390) → onReselectRange → 重新打开预选页
-```
-注：PlayPref 缓存按书 id 持久化（`localStorage` 键 `ting-ear-playpref-<bookId>`），记录「合并/版本/范围/句数快照(ver)」；只要所选版本句数变了（如刚清洗完）`validatePlayPref` 就作废缓存，重新走预选页。
-
-### 文本清洗流程（v3.3 现状）
-
-```
-书架右键 → 清洗格式 → TextCleanerView
-  左栏: 原始文本（只读）
-  右栏: 清洗结果（逐句编号卡片）
-  工具栏: [快速清洗] [手动编辑] [撤销(Ctrl+Z)] [应用(A→book.editHistory)]
-
-快速清洗(handleQuickClean L93):
-  enhancedClean (textPreprocessor L262) → regex 去页码/页眉/空格/合断行 → setCleanedText
-  （对应 IPC text:enhancedClean，纯正则秒出，不调 LLM）
-
-手动编辑(handleToggleManual L214):
-  进入: splitSentences → manualSentences[] → 每句卡片变 textarea
-  工具栏: [保存] [编辑历史]
-  单句改: handleSentenceEdit(index, val) → 实时更新 manualSentences
-  保存: handleManualSave() → join → setCleanedText → 写 book.editHistory(type='manual')
-  编辑历史: 过滤 book.editHistory 中的 manual 记录 → EditHistoryDialog
-
-应用(handleApply L120): saveProgress → editHistory 追加 → 自动返回书架预选页
-撤销(Ctrl+Z L201): undoStack pop → setCleanedText
+```text
+useTTS.playSentence
+ -> 内存预取缓存命中? → 直接取 base64（跳过 IPC）
+ -> 未命中 → window.api.ttsSynthesize(text, voice, speed, volume=1.0, engineId)
+    -> ttsHandlers -> EngineManager.synthesize
+    -> EdgeAdapter / QwenAdapter / HttpAdapter
+ -> base64 → Blob → 复用 Audio 元素（getReusableAudio）+ GainNode
 ```
 
-### 截图 OCR 流程
+合成侧固定 `volume=1.0`（满电平），响度只在渲染层 GainNode 控制。这样：
 
-```
-点击截图 → desktopCapturer 截屏 → 缓存 globalThis
-  → new BrowserWindow(show:false, bg:#000) → loadURL
-  → ready-to-show(L99) → show() ← 无白屏
-  → ScreenshotOverlay: 镂空选区(4块蒙版) + 放大镜(3x) + 十字准星
-  → 拖拽框选 → 松手 → 确认模式: 8点把手 + ✓✗工具栏
-  → ✓ → submitOcrSelection → RapidOCR → ocr:result → 快速文本
-```
+- 可超过 100%（`VOLUME_MAX=2.0`）
+- 磁盘缓存不因用户调音量而失效
 
-### TTS 预缓存流程
+**播放性能优化（2026-07-25）：**
 
-```
-playSentence → 播放当前句 → prefetchQueue 预取后续5句
-  → 并发池=1 (PREFETCH_CONCURRENCY=1, 避免 Edge TTS WebSocket 雪崩超时)
-  → edge-adapter: voice白名单校验 + 8s 超时重试(1次)
-  → 缓存 MD5 磁盘(10天) → 切句命中秒出
-```
+- `AudioContext({ latencyHint: 'playback' })`：增大内部 buffer，消除 underrun 导致的颤音/电子音
+- `getReusableAudio()`：整个生命周期只创建一次 MediaElementSource，后续只换 `src`，避免频繁创建/销毁音频节点
+- 内存预取缓存（`prefetchCache: Map<idx, {audio, format}>`）：预取结果存内存，播放时直接取用跳过 IPC 往返，句间间隙接近 0
+- `PREFETCH_CONCURRENCY=2`，预取失败只影响预取项
+- base64 解码分块 8KB 处理，减少主线程阻塞尖峰
 
-### 全局快捷键流程（v3.4）
+在线合成/解码失败时，`useTTS` 对当前句调用 `playWithSystemTTS()` 临时兜底，不修改 `settings.ttsEngine`，也不把全局 `useSystemTTS` 锁成 true；下一句继续尝试用户选中的在线引擎。只有用户主动选择系统引擎才进入持久的系统 TTS 模式。系统 TTS 音量钳到 0~1（Web Speech 不支持 >100%）。
 
-```
-启动 main.ts registerGlobalHotkeys()
-  → registerCustomShortcuts(已持久化 settings.shortcuts)
-  → 触发 → webContents.send → App.tsx onShortcut(action)
+`EngineManager` 不在 Edge、千问、自定义 HTTP 之间自动换引擎；适配器原始错误会进入 IPC/日志。排查「莫名跳离线 TTS」时先看 `logs.json` 中 `source=TTS` 的时间、`context.engineId`、voice 和 details，再核对 `settings.json` 的 `ttsEngine/voiceId` 与 `engines.json`。`engineUsed: system` 只表示当前句兜底，不表示设置被改写。
 
-onShortcut 分发（App.tsx）:
-  toggle/stop/prev*·next* → 播放控制
-  speedUp/Down  → playerStore.setSpeed(±0.25，钳 0.5~3.0x) + osdStore.show('speed')
-  volumeUp/Down → playerStore.setVolume(±0.05，钳 0~1；0 自动静音) + osd.show('volume')
-  resetDefaults → setSpeed(1.0)+setVolume(0.8) + osd.show('reset')
+## 文本清洗流水线
 
-设置页改键: 捕获前 applyShortcuts({}) 停用全部 → 捕获 keyToAccelerator → 保存
-  → shortcuts:update IPC → 主进程重注册；捕获结束按当前设置恢复
-顺滑捕获交互(v3.5): 按住修饰键即实时预览已按组合(acceleratorPreview)；再次点击 / Esc 取消；
-  双击已设置条目清空；捕获态按钮 animate-capture 脉冲 + hover 微缩放
-反馈: PlayerOSD 居中浮层显示 1.25x / 75%，进度条按比例，1.2s 自动隐藏
-```
-注：倍速在合成时烘焙进音频，改倍速对下一句生效（store/OSD 即时更新）；音量即时生效（直接写正在播放的 audio.volume）。
+已移除内置 LLM 模块（无 `electron/services/llm`、无清洗 AI 评审）。
 
-### timeMap 持久化（进度条时间估算）
-
-```
-播放音频 → audio.onended 记录真实时长
-  ↓
-playerStore.updateTimeMapEntry(index, durationMs)  (L84)
-  ↓
-异步触发 bookStore.updateBook({ ...book, timeMap })  (L54)
-  ↓
-持久化到 %APPDATA%/ting-ear/听伴/books.json
-```
-时间估算公式：`(中文字数 × 250ms + 标点 × 150ms + 其他 × 100ms) / 语速`，进度条精度约 ±15%。已播放段落显示 "● 实时" 标记。
-
----
-
-## 设计系统速查（源自 DESIGN.md，设计令牌以 `tailwind.config.js` 为准）
-
-- **主色** `#3B82F6`（按钮/链接/高亮/进度条），hover `rgba(59,130,246,0.9)`。
-- **亮色**：canvas `#FFFFFF`、surface `#F9FAFB`、border `#E5E7EB`、text `#1F2937`/`#6B7280`、句子高亮 `#FFF3CD`。
-- **深色**：canvas `#1F2937`、surface `#374151`、text `#F3F4F6`/`#D1D5DB`、高亮 `rgba(253,224,71,0.15)`。
-- **语义色**：success `#10B981`、warning `#F59E0B`、error `#EF4444`、info `#3B82F6`。
-- **字体**：`"Microsoft YaHei", "PingFang SC", sans-serif`。
-- **字号**：title 20/600、body 16/400（行高1.8）、body-sm 14、caption 12、micro 10。
-- **圆角**：button 8 / card 12 / input 8 / pill 9999。
-- **固定尺寸**：控制栏 64px(`h-16`)、侧导航 64px(`w-16`)、播放键 48px、悬浮球 260×56 / mini 320×140。
-- **Tailwind 约定**：所有颜色用 `dark:` 变体；自定义色 `dark-bg`/`dark-surface`/`dark-border`（在 tailwind.config.js 定义）；勿硬编码颜色（悬浮球、截图选区除外，它们用内联 style + 独立透明窗口）。`tailwind.config.js` 另含 `animate-capture`（capture-pulse 柔和脉冲，蓝环扩散，1.4s，用于快捷键捕获态按钮）。
-
----
-
-## 已禁用功能（v3.3 起）
-
-LLM 清洗 UI 与 AI 审校在 v3.3 关闭入口，相关代码**保留但未接线**：
-
-- 前端：`SettingsModal` 已删除 LLM tab；`TextCleanerView` 未暴露审校/AI 按钮。
-- IPC：仅 `text:cleanWithLLM`（保留）与 `text:enhancedClean`（纯正则）注册；无 `llm:testConnection`、无 `*review*` channel。
-- 后端：`text-cleaner.ts#cleanTextWithLLM` 已退化为只跑 `enhancedClean`；`text-reviewer.ts#reviewTextWithLLM` 存在但**无调用方**；`preload.ts` 审校 API 全部置 `null`（L234-238）。
-- `settings.json` 仍保留 `llmConfigs` / `cleanPrompt`，供将来恢复使用。
-
----
-
-## 当前状态（2026-07-22）
-
-- **已完成（v3.7）**：PlayPref 预选页偏好缓存（按书记忆合并/版本/范围，句数变化自动作废）+ 缓存有效时跳过预选页直达播放器；播放器「重选章节」按钮；桌面字幕窗口（SubtitleWindow + subtitleHandlers）；自定义专辑（albumStore + album:load/save IPC）；桌面启动器 `启动听伴.vbs`（隐藏黑窗）。
-- **已完成（v3.6）**：自定义 TTS 引擎（HttpAdapter：OpenAI 兼容 + 通用 HTTP）、一键部署（curl/Python/JSON）、URL 类型探测、音色自动发现、厂商音色预置（OpenAI/MiMo）。
-- **正在做**：无活跃任务（功能稳定期）。
-- **近期调整**：ControlBar 排版优化（去书名、slider→stepper、统一底色、弹性布局）；EPUB 导入自动提取内嵌封面（优先于生成封面）。
-- **下一步候选**：恢复 LLM 清洗 / AI 审校前端入口（后端已就绪，见「常见修改指南 §3」）。
-
----
-
-## 所有坑点
-
-| # | 严重度 | 位置 | 表现 | 根因 |
-|---|--------|------|------|------|
-| **25** | **已修** | `edge-adapter.ts` | Edge TTS 被喂千问音色名 Cherry→msedge-tts 报错 | 默认配置 voiceId/ttsEngine 跨引擎不匹配。已加白名单校验 |
-| **26** | **已修** | `edge-adapter.ts` | 并发请求导致超时雪崩 | 预取并发池=1 + 超时重试 |
-| **27** | **已修** | `preload.ts` 全部 listener | MaxListenersExceeded 警告 | onXxx 不返回 cleanup，React re-render 叠加监听器 |
-| **28** | **已修** | `settingsStore.ts` | setSettings 改完不存盘 | setSettings 只改 Zustand 不写磁盘。已加 auto saveSettings |
-| **29** | **已修** | `RangeSelector.tsx` | 点取消却跳播放器 | onCancel 错误调用 handleChapterConfirm |
-| **30** | **已修** | `ocrHandlers.ts` | 截图黑屏闪烁 | BrowserWindow show:true 先于页面就绪。改 show:false+ready-to-show |
-| **31** | **已修** | `ScreenshotOverlay.tsx` | 全屏半透明蒙版看不清选区 | 改为4块镂空蒙版+放大镜+8点把手+✓✗工具栏 |
-| **32** | **已修** | `ScreenshotOverlay.tsx` | 点 ✓✗ 按钮选区消失 | 工具栏按钮无 stopPropagation |
-| **33** | **已修** | `preload.ts` | 构建报错 "Expected '{' but found '=>'" | 审校 API stub 后有孤立 `return () => {...}` 残留。已删 (2026-07-07) |
-| **34** | **已修** | `SettingsModal.tsx` | 改快捷键刚按下 Ctrl 就触发暂停/播放 | 捕获期间已注册的全局键仍生效。进入捕获先 `applyShortcuts({})` 停用、结束再恢复 (v3.4) |
-| **35** | **已修** | `useKeyboard.ts` | 单独方向键就跳句；按 Ctrl+方向键一次跳两句 | 内部方向键导航未清，且与全局快捷键（Ctrl+方向键）叠加触发。v3.5 起内部仅保留 Space/Esc，方向键导航统一交给全局快捷键 |
-| **36** | **已修** | `SettingsModal.tsx` + `engine-manager.ts` | 新增自定义引擎无法合成音频 | `addCustomEngine()` 只存 JSON 不注册适配器; `VoiceSelector` 硬编码 safeEngineId 只认 edge/qwen/system。v3.6 新增 `HttpAdapter` 通用适配器(OpenAI兼容+HTTP)，`EngineManager.init()` 启动时为自定义引擎注册适配器，`addCustomEngine`/`deleteCustomEngine` 同步维护 |
-| **37** | **已修** | `SettingsModal.tsx` + `ttsHandlers.ts` + `engine-manager.ts` | 一键部署常显示“部署请求失败”，或导入成功后通用 HTTP 配置不完整 | IPC 未兜底异常；成功提示里 `fmt` 自引用导致 typecheck 失败；curl `-d 'JSON'` 正则会被 JSON 内部双引号截断；JSON 导入忽略 `responseFormat`/`responseAudioField`/`voices`。已补异常边界、URL/类型校验、字段保留、curl body 提取、模板归一和 `tests/engineImport.test.ts` |
-| **38** | **已修** | `engine-manager.ts` + `VoiceSelector.tsx` | 导入 `/v1/chat/completions` TTS curl 后，音色下拉里找不到 `Chloe` | `VoiceSelector` 只展示 `voices.length > 0` 的引擎；导入器只识别顶层 voice，未从嵌套 `audio.voice` 生成音色。已从原始 body 提取嵌套 voice，保留风格提示词，只把 assistant 示例文本归一为 `{text}`，并为 chat-completions 推断 base64 响应字段 |
-| **39** | **已修** | `SettingsModal.tsx` + `ttsHandlers.ts` + `http-adapter.ts` | 手动新增引擎里点“自动发现”经常失败，失败时还可能留下临时引擎 | 前端为探测音色先写入临时引擎再删除；后端只按已保存 engineId 探测；完整 endpoint 会拼出错误 voices URL；OpenAI 兼容类型未回退内置音色。已新增 `tts:discoverVoicesForConfig`，直接用未保存表单配置探测，扩展 URL 候选路径并保留发现到的音色元数据 |
-| **40** | **已修** | `http-adapter.ts` + `VoiceSelector.tsx` + `ttsHandlers.ts` | 小米 MiMo TTS 前台有音色但试听/合成不成功，日志里看不到失败历史 | MiMo 非流式 TTS 返回 `choices[0].message.audio.data` 的 base64 `wav`，但通用 HTTP 适配器固定返回 `audioFormat: 'mp3'`，试听组件也固定用 `audio/mp3`；试听 IPC 没写 LogService。已按 requestTemplate/音频头推断 wav/mp3，试听使用动态 MIME，合成/试听失败写应用日志 |
-| **41** | **已修** | `provider-voices.ts` + `engine-manager.ts` + `http-adapter.ts` | 厂商音色要靠人工手动补，换机器/重导入不可自动化 | 缺少厂商音色预置/自动合并层。已加通用 `PROVIDER_VOICE_PRESETS` 注册表，在导入、获取引擎配置、自动发现音色时统一合并；当前内置 OpenAI 与小米 MiMo，未来新增厂商只加 preset |
-
----
-
-## 常见修改指南
-
-### 1. 修改清洗规则（正则）
-
-- 用户可在「设置 → 清洗」(`CleanRulesSettings.tsx`) 可视化增/删/改正则规则，含合法性校验与实时预览；保存即写入 `settings.json` 的 `cleanRules`，前端无感、即时生效。
-- 规则模型：`CleanRule { id, name, pattern, replacement, flags, enabled }`，默认值在 `src/cleanRules.ts#DEFAULT_CLEAN_RULES`（复刻原去页码/半角转全角行为）。
-- 后端执行：`electron/services/parsers/textPreprocessor.ts#enhancedClean(raw, rules?)` 按序应用规则；合并硬断行、CJK 空格清理、空行压缩、重复页眉等结构性清洗始终开启，不由用户规则控制。改完走 `text:enhancedClean` IPC。
-- 自然语言→规则（轻量方案，无内置解析引擎）：用户把大白话丢给外部大模型，配合 `prompts/clean-rule-import.md` 的提示词得到 CleanRule JSON，再在「清洗」tab 点「从 AI 导入」粘贴 JSON 即可。`CleanRulesSettings.tsx#parseImportedRules()` 负责解析/校验（接受单对象 / 数组 / `{rules:[...]}`，逐条校验正则合法性并兜底缺省字段），非法会提示具体第几条。
-
-### 2. 修改编辑记录的时间显示
-
-- 时间格式：`src/utils/timeFormat.ts` → `formatFullTime()`。
-- 编辑记录 label：`TextCleanerView.tsx` `handleApply()` L120 / `handleManualSave()` L275。
-- 播放器版本下拉：`PlayerView.tsx` L318-365。
-- 收听历史秒数：`HistoryView.tsx` `fmtTime()`。
-
-### 3. 恢复 LLM 清洗 / AI 审校
-
-- 后端已基本就绪，无需大改：
-  - `text-cleaner.ts#cleanTextWithLLM` 恢复真正调用 LLM（当前仅跑正则）；或在 `textCleanHandlers.ts` 注册 `text:cleanWithLLM` 的进度回调。
-  - 审校：`text-reviewer.ts#reviewTextWithLLM` 存在，需在 `textCleanHandlers.ts` 注册 `review*` IPC 并解除 `preload.ts` L234-238 的 `null` 桩。
-- 前端：`SettingsModal` 加回 LLM tab + 配置表单；`TextCleanerView` 加回审查按钮/进度条/疑点展示。
-
-### 4. 修改手动编辑的分句逻辑
-
-- `TextCleanerView.tsx` L10 `splitSentences()`（按中英文句末标点分句，与 `textPreprocessor.ts` L278 同名函数共用思路）。左右栏展示与应用共用。
-
-### 5. 修改编辑记录徽章颜色/文案
-
-- `EditHistoryDialog.tsx` L52-59：`ai-clean`(紫)/`manual`(蓝)/`trim-spaces`(绿)。
-
-### 6. 加新的编辑记录类型
-
-- `src/global.d.ts` `EditRecord.type` 联合加新值 → `EditHistoryDialog.tsx` 分支加颜色 → `TextCleanerView.tsx` 对应标记。
-
-### 7. 修改进度条时间估算
-
-- 估算在 `ProgressBar.tsx` / `useTTS.ts`；真实时长由 `playerStore.timeMap` 持久化（`bookStore.updateBook` L54 落盘）。
-
-### 8. 新增/修改全局快捷键动作
-
-- 加动作：`src/global.d.ts` `ShortcutAction` 联合加值 → `src/shortcuts.ts` 的 `SHORTCUT_ACTION_LIST`（label/description）+ `DEFAULT_SHORTCUTS`（默认键位，建议带 Ctrl+Alt 前缀避免系统冲突）→ `App.tsx onShortcut` 加 case。主进程 `registerCustomShortcuts` 遍历列表自动注册，设置页自动列出，无需额外改。
-- 改倍速/音量步长范围：`playerStore.ts` 的 `SPEED_MIN/MAX/STEP`、`VOLUME_STEP`、`DEFAULT_*` 常量。
-- 改键位展示（键帽文案）：`shortcuts.ts#acceleratorToKeys` 的 `KEY_LABEL_MAP`。
-- 改 OSD 反馈样式：`components/PlayerOSD.tsx`（外观/图标/进度条）、`stores/osdStore.ts`（显示时长 `OSD_DURATION`）、`styles/globals.css` 的 `.osd-enter` 动画。
-
-### 9. 修改自定义引擎（v3.6）
-
-- 新增引擎类型：`SettingsModal.tsx` → TTS tab → 引擎管理 → 新增引擎。表单支持自动检测 URL 类型和名称、自动发现音色列表。
-- 引擎适配器：`http-adapter.ts` 是通用 HTTP 适配器，支持两种模式：
-  - **OpenAI 兼容** (`type: 'openai'`)：`POST /v1/audio/speech` 标准格式，含 13 个内置英文音色
-  - **通用 HTTP** (`type: 'http'`)：通过 `requestTemplate`/`responseAudioField`/`responseFormat` 配置
-- 一键部署：`engine-manager.ts#importEngine()` 支持粘贴 curl / Python requests / JSON；导入时会归一化常见示例字段为 `{text}`/`{voice}`/`{speed}` 模板，并通过 `ttsHandlers.ts` 返回业务错误，避免 IPC 异常冒泡到前端。对 `/v1/chat/completions` + `audio: { voice }` 的 TTS curl，会从原始 body 自动生成音色列表（例如 `Chloe`），保留 user 风格提示词，把 assistant 示例正文替换为 `{text}`。
-- 手动新增引擎的“自动发现”走 `tts:discoverVoicesForConfig`：不写临时引擎、不污染 `engines.json`；`HttpAdapter.buildVoiceEndpoints()` 会从完整 URL 推导 `/v1/voices`、`/v1/audio/voices`、`/api/v1/audio/voices` 等候选。
-- 音色自动注入优先级：
-  1. 远端 voices 端点：`HttpAdapter.buildVoiceEndpoints()` 尝试 `/v1/voices`、`/v1/audio/voices`、`/api/v1/audio/voices` 等；
-  2. 部署配置抽取：`engine-manager.ts#extractVoicesFromTemplate()` 从 curl/JSON/Python body 的 `voice`/`voice_id`/`speaker` 字段抽取；
-  3. 厂商预置注册表：`provider-voices.ts#PROVIDER_VOICE_PRESETS` 按 URL/model/type 匹配并合并音色。新增厂商时只扩展这个注册表。
-- 音色发现：`discoverVoices()` 自动探测 Kokoro (`/api/v1/audio/voices`)、OpenAI (`/v1/voices`) 等已知端点格式
-- 引擎配置持久化：`%APPDATA%/听伴/engines.json`
-- 加新引擎入口：`engine-manager.ts#addCustomEngine()` → 同时注册 `HttpAdapter` 实例 → 保存 JSON
-- 引擎类型扩展：`adapter.ts#TTSEngineConfig.type` 联合 `'qwen' | 'system' | 'edge' | 'openai' | 'http' | 'local' | 'indextts'`
-
----
-
-## CLI/API 参考
-
-### 桌面启动器
-
-```
-启动听伴.vbs   # 用户日常入口：用 WScript.Shell 以隐藏窗口模式跑 start.bat（无黑窗），
-               # 应用退出时控制台自动关闭；要调试日志就直接跑 start.bat
-start.bat      # 开发/调试入口：可见控制台，能看到主进程日志
+```text
+导入 / 手动清洗
+ -> enhancedClean / preprocessText（同一套规则）
+ -> removeCJKSpaceGaps → mergeBrokenLines → collapseBlankLines
+ → normalizePunctuation → 页码/页眉/竖排清理
+ -> splitSentences（最短可读长度约 20 字）
 ```
 
-### npm scripts
+设置里若仍有历史 `llmConfigs` / `cleanPrompt` 字段，`settings-service` 读取时丢弃且写回时不保留。规则可视化编辑仍在设置 / 清洗页；AI 生成规则仅支持「粘贴导入」，应用内不再调 LLM。
 
+## 播放器 UI 约定
+
+| 区域 | 内容 |
+|---|---|
+| TitleBar | 拖拽区 + 主题切换 + 最小化/最大化/关闭；**无 Logo**；沉浸时透明细条仅窗控 |
+| 播放器顶栏 | 章节/版本/搜索/字幕等；**不含**沉浸按钮，也不为沉浸预留右侧空位 |
+| 沉浸开关 | **仅**在 `App.tsx`：`fixed top-24 right-4 z-[60]` 悬浮胶囊。压在正文区右上（低于 TitleBar ≈32px + 播放器顶栏 ≈40px），不挡顶栏与窗控；进出沉浸同一视口坐标，不随布局上移 |
+| ControlBar 左 | 倍速 ±0.1、音量 ±5%（可到 200% 增益显示琥珀色） |
+| ControlBar 中 | 上章/上句/**播放**/下句/下章/停止，播放键居中包绕 |
+| ControlBar 右 | 音色选择 + 在线/离线切换 |
+| 窄屏 | 部分标题隐藏；控件保持可点 |
+
+### 沉浸模式行为
+
+```text
+进入：侧栏收起 + 播放器顶栏上移隐藏 + 底栏（进度/控制）下移隐藏
+退出：恢复上述 chrome
+开关：始终 fixed 悬浮，不嵌 TitleBar / PlayerView 顶栏
+离开播放器视图：自动退出沉浸（App useEffect）
+快捷键：沉浸中仍可控制播放
 ```
-npm run dev           # 开发模式（热重载，renderer 固定端口 5191）
-npm run build         # 构建
-npm run typecheck     # TypeScript 类型检查
-npm run lint          # ESLint
-npm run format        # Prettier 格式化
-npm run package       # 打包 NSIS 安装程序（package:dir 仅目录）
-npm test              # 单元测试（textPreprocessor + engineImport，依赖 tsx）
+
+改开关位置时只改 `App.tsx` 的 `fixed top-* right-*`，勿再塞回顶栏。
+
+## AI 阅读页（切片 B、F）
+
+打开一本书时，`bookStore.setCurrentBook` 会把 `readerMode` 重置为 `ai-reading`；模式切换只改阅读器视图，不重置 `playerStore` 的播放状态或当前句索引。`App.tsx` 根据该状态渲染 `AiReaderView` 或原有 `PlayerView`，底部进度与播放控制继续共用。
+
+AI 阅读页在大屏显示三栏：左侧可折叠章节大纲、中间结构化正文、右侧 AI 助手；`md` 宽度起显示 AI 面板，面板宽度按视口钳制并支持拖拽/折叠。普通段落和列表采用无外框的连续阅读排版，当前块只显示浅色底与左侧标记；引用、代码、脚注和尾注保留独立语义表面。当前播放块与当前句分别高亮，并在句子变化时自动滚动到当前块。沉浸模式隐藏大纲、页头和 AI 面板，只保留正文；AI 面板保留稳定挂载，切换沉浸不会取消正在生成的回答。
+
+`ContentCards` 在首个有内容的 block 不是与 `chapter.title` 等价的 heading 时渲染章节标题；比较前会去首尾空白、合并连续空白并忽略大小写。首个有效 heading 已等于章节标题时不再重复渲染。
+
+书架书卡/列表行与 AI 正文共用 `ContextMenu`。菜单必须保持 8px 视口边距，超高时内部滚动，并支持 `Escape`、方向键、`Home`、`End`、`Shift+F10`、外部点击/滚动关闭和焦点恢复。书架网格与列表都保留可见的“更多书籍操作”按钮；正文右键会在打开时快照选区或当前 block 文本，提供从此处播放、朗读本段、复制、引用和问 AI，其中“问 AI”继续走 `queueSelectionForAi`，不要另建请求通道。
+
+旧书若没有 `BookData.structure`，`AiReaderView` 会按现有章节在前端临时生成伪结构：章节标题生成 heading，每 5 句组成一个 paragraph；该 fallback 不写回书籍数据。非 `ttsSkip` 卡片右上角可朗读本段，raw 朗读句在卡片内单独高亮，读完只恢复触发前正在播放的书籍。
+
+已有 structure 只有在 `schemaVersion=1`、meta 形状、block 类型、全局唯一 blockId，以及 chapter/block ranges 连续且位于当前 sentences 边界内全部成立时才会保留；接受后 `BookData.chapters` 必须从 structure ranges 重派生，避免导航、检索与防剧透使用不同章节分区。hash 或任一结构不变量失配时，`normalizeBookData` 用共享的 `generatePseudoStructure` 重建并返回新 structure/meta。生成器定义在 `src/utils/bookData.ts`，Electron 的 `structureBuilder.ts` 重导出它以兼容导入流程。
+
+## AI 对话、书内检索、选中引用与回答朗读（切片 C-F）
+
+右侧 `AiChatPanel` 已接入 OpenAI 兼容的 `/chat/completions` 流式接口和 nmem 书内检索，Nowledge Mem 本机默认地址为 `http://127.0.0.1:14242`。设置页「AI」可管理模型、知识库、检索、防剧透、总 system prompt、证据/阅读上下文/防剧透/选区四类 prompt、历史条数，以及问候/当前章/全书三组路由正则；路由数组显式保存 `[]` 时不会恢复默认值。消息支持 Markdown/GFM；发送后先显示检索状态，再按 `requestId + seq` 追加分片，可单独停止当前请求。
+
+```text
+aiStore.sendMessage
+ -> window.api.aiChat(requestId, payload)
+ -> aiHandlers -> AiService.chat
+ -> classifyQuestion(selection/greeting/book_wide/chapter/current_sentence/general)
+ -> nmem.search -> 按 bookId、路由与 currentChapterIndex 硬过滤
+ -> ai:chat:sources(searching/done/offline/skipped) -> 限长并注入编号来源
+ -> streamChat(fetch + SSE) -> ai:chat:chunk(seq)
+ -> ai:chat:done / ai:chat:error
+ -> aiStore 更新同 requestId 的 assistant message
 ```
 
-### 文本清洗 IPC（后端保留）
+HTTP 401/403、429、5xx、网络失败、超时和取消分别归类；HTTP 200 流中的 OpenAI error envelope 或直到结束仍无有效正文也会报错，不保存为空成功回答。主要模型遇到模型服务错误时可尝试一次备用模型。路由优先级是 `selection → greeting → book_wide → chapter → current_sentence → general`：问候跳过阅读上下文和检索，chapter 始终只保留当前章来源，book-wide 在关闭防剧透时允许全书、开启时仍限制到当前阅读章。nmem 断线/超时只把当前请求降级为纯 LLM，对话不中断；面板显示离线横幅并按 `statusCacheMs` 轮询，成功检索会立即清除离线缓存。检索正文按 `retrieval.maxContextChars` 截断，以 user 证据块传入；system 规则明确证据不可信且不得执行其中指令。来源 `[N]` 可展开原文，定位时先按摘录匹配结构化 block；旧书按每 5 句的临时 block 规则匹配，无法匹配才回退到章节首块。
 
+自动灌入在文件保存成功后后台执行，不阻塞书籍导入；`IngestService` 按章发送 `/sources/ingest/content`，名称固定为 `[bookId=<id>][ch=<0-based>] <title>`。防剧透开启时，主进程先排除其他书、无法核验元数据和 `ch > currentChapterIndex` 的结果，再把来源发送给渲染层与模型。发送时的自动阅读上下文快照由切片 E 接入。
+
+AI 阅读卡片和听书句子列表共用 `SelectionPopup`：选中去空白后超过 2 个字符时显示固定浮动条，支持复制、引用和问 AI，并在 Escape、外部点击或滚动时关闭。“问 AI”通过 `aiStore` 的持久请求切回 AI 阅读、展开折叠侧栏并在输入框挂载后聚焦，不使用定时 DOM 查询。引用由 `aiStore` 去重并限制为 5 条，发送成功后只清除本次请求快照中的引用；请求未接受时保留。发送时同步快照当前书名、章节和句子。主进程将非空引用路由为 `selection`，引用作为主要且不可信的上下文，nmem 检索、防剧透过滤、来源隔离和历史保存流程保持不变。
+
+完成的对话按书写入数据目录的 `ai-history.json`，正文、来源与检索状态一并保存，最多保留每书 200 条；旧的 `{role, content}` 历史仍兼容，面板清空只删除当前书历史。文件不存在时返回空历史；已存在但 JSON、根对象、任一书籍数组、任一消息形状、可选检索字段或嵌套来源对象损坏时 repository 整体抛中文错误，禁止静默过滤后覆盖原文件。配置存放于默认目录的 `settings.json.ai`，读取时对 `nmem/llm/retrieval/chat` 四段做深合并，兼容旧设置。
+
+## Raw TTS 生命周期（切片 F）
+
+`speakRaw` 用于卡片和 AI 回答朗读，复用书籍播放的唯一 Audio 元素与当前 TTS 引擎，但不写入 `currentSentenceIndex`、`timeMap`、书籍历史或字幕进度。`playerStore.rawSpeechActive` 让历史与字幕 effect 在 raw 期间保持书籍会话不变。
+
+- raw 开始时只记录“此前正在播放”的书籍恢复点；从暂停或空闲触发时，raw 完成后不启动书籍。
+- 用户播放、暂停、停止、seek、切书或卸载会取消 raw；前后句/seek 在原书此前播放时从新位置继续。
+- 取消通过 cancel race 让挂起的合成 Promise 立即结算；异步 `AudioContext.resume()` 后重新校验 generation，旧 continuation 不能覆盖新书或新 raw。
+- 连续朗读另一张卡片/回答时继承最初书籍恢复点；UI 的“停止朗读”默认按该恢复点恢复。
+
+## 音量增益注意点
+
+- `playerStore.setVolume`：`v===0` 自动静音，`v>0` 自动取消静音
+- 静音时 `volume` 仍保留记忆值；步进请用记忆音量，**不要**用 `displayVolume`（静音时为 0）再 `toggleMute`，否则会冲掉音量或立刻重新静音
+- 全局复用单一 Audio 元素（`getReusableAudio()`），MediaElementSource 只创建一次；`attachBoostPipeline` 用 WeakMap 幂等，兼容旧路径
+
+## 启动与数据
+
+```powershell
+.\start.bat          # 可见控制台开发入口
+npm run dev          # renderer 开发端口由 Vite 配置决定
+npm run build
+npm run typecheck
+npm run lint
+npm test
 ```
-text:cleanWithLLM({ text, configId })
-  → 返回 { success, taskId }
-  → 进度事件: text:cleanProgress { taskId, current, total, phase }
-  → 完成事件: text:cleanComplete { taskId, cancelled, text, stats }
 
-text:enhancedClean({ text })   # 纯正则清洗，秒出，不调 LLM
-  → 返回 { success, text, originalLength, cleanedLength }
-```
+默认数据目录是 `%APPDATA%/ting-ear/听伴/`，包含 `books.json`、`ai-history.json`、`settings.json`、`engines.json`、`logs.json`、`covers/` 和缓存目录；这些是运行时数据，不入库。路径统一经 `getDataDir()`，不要硬编码拆分目录。`electron/main.ts` 在启动时把活动引擎同步为设置中的 `ttsEngine`。
 
-### 内置 LLM 预设（settings.json 保留，UI 不可见）
+## 当前状态与边界
 
-| 预设 | 适配器 | 上下文 | 费用 |
-|------|--------|--------|------|
-| qwen3.5-4b | Ollama | 32K | 免费 |
-| deepseek-v4-flash | OpenAI | 1M | 按量 |
-| glm-4.5-air | OpenAI | 128K | 按量 |
+- 已实现在线 Edge/千问/HTTP 引擎、系统 Web Speech 临时兜底、引擎管理、导入解析、阅读进度、书签/历史、OCR、浮动球和字幕窗口。
+- 文本清洗为纯规则（`enhancedClean` / `cleanRules`），已移除内置 LLM 模块；导入与手动清洗共用同一流水线。
+- 音量支持 0~200%（Web Audio GainNode）；沉浸开关为正文区右上 `fixed` 悬浮（`top-24 right-4`），不挡顶栏、不跟布局移位。
+- 封面生成 `COVER_STYLE_VERSION=v2-light`。
+- 断点恢复三层机制（见下节）。
+- AI 阅读页切片 B 已完成：默认结构化卡片、大纲导航、当前句高亮、模式切换和旧书 fallback。
+- AI 对话切片 C 已完成：OpenAI 兼容流式直聊、Markdown、取消、备用模型、设置页和按书历史。
+- AI 检索切片 D 已完成：nmem health/search/按章 ingest、检索状态、来源引用与定位、离线降级和按当前章节硬防剧透。
+- AI 选中引用切片 E 已完成：阅读/听书统一浮动条、最多 5 条引用卡片、组合提问、发送时自动上下文快照和 selection 优先提示词。
+- AI 朗读切片 F 已完成：ttsSkip 导航/预取过滤和灰显、卡片/回答 raw 朗读、逐句高亮、书籍优先取消与严格恢复生命周期。
+- 阅读交互基础已完成：共享可访问右键菜单、书架双视图更多入口、正文段落/选区动作、章节标题去重、连续阅读排版、全局 `focus-visible` 与 reduced-motion。
+- `structureMeta.contentHash` 使用句子以换行拼接后的 UTF-8 SHA-256 前 16 位；不要替换为 FNV 等非规格算法。
+- 不要把用户书籍、API key、cookies、日志或缓存写入 Git。
 
----
+## 断点恢复（autoResume）
 
-## 配置 / 环境变量
+三层恢复机制，确保刷新/重启后快速回到阅读位置：
 
-- 数据目录：`%APPDATA%/ting-ear/听伴/`
-- 日志目录：同数据目录 `logs.json`（≤5000 条）
-- TTS 缓存：`edge_cache/`(MP3)、`qwen_cache/`(WAV)
-- 封面图片：`covers/`(PNG)
-- Python 环境：需 `python` 在 PATH 中，含 RapidOCR 依赖（仅截图 OCR 需要）
+1. **启动自动恢复**（`App.tsx` auto-resume effect）：`books` 加载后找 `lastReadAt` 最近且 `!isCompleted && progressPercent > 0` 的书，调 `handleOpenBook` 直接进播放器。`autoResumedRef` 保证只触发一次。
+2. **书架「继续阅读」卡片**（`BookShelf.tsx` `lastReadBook` useMemo）：书架顶部显示上次读到的书（封面+章节+进度条），点击即恢复。仅在「全部书籍」视图且无专辑筛选时显示。
+3. **历史一键跳转**（`HistoryView.tsx` `handleContinue`）：历史记录带 `contentPreview`，点播放按钮跳到 `endSentenceIndex`。
 
----
+设置项：`AppSettings.autoResume?: boolean`（默认 `true`，`undefined` 视为开启）。开关在 SettingsModal「窗口行为」区。判断统一用 `=== false` 关闭，避免旧配置缺字段时误判。
 
-## 手动验证清单（要点，源自 TEST_CHECKLIST.md）
+## 章节大纲重构增量索引
 
-- **编译**：`npm run build` 无错；`npm run typecheck` 通过。
-- **进度条**：播放 10+ 句，时间显示合理；调语速(0.5x→3.0x)估算同步；已播放段显示 "● 实时"。
-- **timeMap 持久化**：播 20 句→关闭→重开同书→已播放段时间精确。
-- **拖拽**：播放中拖拽→暂停→松手恢复；暂停时拖拽→松手仍暂停。
-- **章节边界**：无章节区域（如序言）显示"全文"而非错误章节名。
-- **加载状态**：点击句子/拖拽出现 "加载音频中..." 提示，~500ms 自动消失。
-- **错误降级**：错误/缺失 API Key → 清晰提示且自动降级系统离线 TTS。
-- **回归**：悬浮球上下章、书签增删、封面自动生成、点击句子自动播放。
-- **控制台**：`Ctrl+Shift+I` 无 React / TS / IPC 报错。
+| 文件 | 核心内容 | 何时读 |
+|---|---|---|
+| `src/components/reader/ChapterOutlinePanel.tsx` | 当前章专属大纲面板、生成/重试、章节名与小节名编辑恢复 | 修改大纲面板或标题编辑 |
+| `electron/services/ai/outline-repository.ts` | 版本 3 的按书/章键/内容哈希缓存，临时文件原子替换 | 修改大纲持久化、迁移或清理 |
+| `electron/services/ai/outline-input.ts` | 从 books.json 重新加载当前章节并校验稳定章键，防止 IPC 信任 renderer 文本 | 修改大纲 IPC 请求、章节身份或数据目录 |
+| `electron/services/ai/outline-queue.ts` | 进程级 FIFO 单飞行生成队列 | 修改并发、排队或后台任务 |
+| `electron/services/ai/outline-generator.ts` | <=10 短章策略、比例最低节数、偏移和数量校验 | 修改模型提示或大纲生成规则 |
+| `electron/ipc/aiHandlers.ts` / `electron/preload.ts` | 当前章文本请求、读取/生成/更新 IPC | 修改大纲跨进程接口 |
+
+## 测试
+
+- `tests/textPreprocessor.test.ts` — 清洗流水线 23 项
+- `tests/bookData.test.ts` — 分句/章节/进度规范化
+- `tests/parserCompatibility.test.ts` — 解析器兼容
+- `tests/engineImport.test.ts` — 引擎 JSON/curl 导入
+- `tests/albumUtils.test.ts` — 专辑工具
+- `tests/bookStore.test.ts` — 阅读模式切换、打开新书默认 AI 阅读且保留播放状态/位置
+- `tests/readerComponents.test.ts` — 模式控件、章节标题契约、连续段落/特殊 block、当前句状态、窄 store 订阅和旧书 fallback 服务端渲染
+- `tests/llmCaller.test.ts` / `ipcStreaming.test.ts` — SSE、错误分类、备用模型、上下文路由、流序号和定向取消
+- `tests/settingsDeepMerge.test.ts` / `aiHistory.test.ts` — AI 配置/路由正则深合并、带来源的按书 JSON 历史与损坏文件错误传播
+- `tests/aiStore.test.ts` / `aiComponents.test.ts` / `aiSettingsPanel.test.ts` — 前端流状态、历史引用恢复、离线转在线、Markdown 对话和设置表单
+- `tests/nmemBridge.test.ts` / `nmemContract.test.ts` — nmem 请求格式、响应校验、断线、超时与成功检索后的在线恢复
+- `tests/spoilerFilter.test.ts` / `ragOrchestration.test.ts` / `ragComponents.test.ts` — 来源硬过滤、chapter/book-wide 路由、取消终态、提示词安全与限长、离线降级和精确引用定位
+- `tests/selectionQuoteComponents.test.ts` — 选区阈值、视口钳制、引用卡片和输入框静态集成
+- `tests/contextMenuComponents.test.ts` — 右键菜单视口钳制/语义，以及书架与正文菜单接线
+- `tests/mdParserStructure.test.ts` / `epubParserStructure.test.ts` / `structureVersionMismatch.test.ts` — MD 首段/未闭合围栏、EPUB package 属性变体与文档顺序、跨章全局 range、失效结构 pseudo 重建和章节重派生
+- `tests/ttsSkip.test.ts` / `ttsSession.test.ts` / `modeSwitchPlayback.test.ts` — 跳过导航/预取、raw 互斥状态与取消恢复、模式切换和字幕/历史隔离
+
+修改清洗规则或分句逻辑后务必跑 `npm test`；改 IPC 签名后跑 `npm run typecheck`。
+
+## 当前状态补充
+
+- 章节大纲已切换为按当前阅读章生成：切章只读取对应记录，不自动触发 AI；请求只携带当前章句子。
+- EPUB 同一 XHTML 文件内的密集 TOC 锚点会按 200~500 句归并，保留 heading block 和全局范围；不同 spine 文件仍保持章节边界。
+- 大纲缓存使用版本 3，按 `bookId + chapterKey + sentenceContentHash` 隔离；旧版本缓存自动失效。生成队列为进程级 FIFO 单飞行。
+- `ChapterOutlinePanel` 是唯一挂载的大纲 UI；`SectionNav` 和 `ChapterOutline` 仅保留兼容类型引用，后续不要重新接回旧实现。
+- 已知边界：Markdown 低层标题的旧结构测试仍保持原语义；若要将 Markdown 的 `##/###` 统一视为章内 heading，需要单独迁移测试和正文导航数据。

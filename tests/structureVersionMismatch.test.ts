@@ -43,16 +43,20 @@ assert(normalized!.structureMeta !== undefined, 'StructureMeta should be preserv
 assert.equal(normalized!.structureMeta!.contentHash, hash)
 console.log('✓ hash 匹配时 structure 保留')
 
-// 2. sentences 变了（模拟清洗/版本切换）：hash 不匹配，structure 失效
+// 2. sentences 变了（模拟清洗/版本切换）：hash 不匹配，重建 pseudo structure
 const modifiedBook = {
   ...bookWithStructure,
   sentences: ['完全不同的句子。', '另一句。']
 }
 const normalizedModified = normalizeBookData(modifiedBook)
 assert(normalizedModified !== null)
-assert.equal(normalizedModified!.structure, undefined, 'Structure should be invalidated when hash mismatches')
-assert.equal(normalizedModified!.structureMeta, undefined, 'StructureMeta should be invalidated')
-console.log('✓ hash 不匹配时 structure 自动失效')
+assert.equal(normalizedModified!.structure?.length, 1, 'Structure should be rebuilt when hash mismatches')
+assert.equal(normalizedModified!.structure?.[0].blocks[0].type, 'heading')
+assert.equal(normalizedModified!.structure?.[0].blocks[1].type, 'paragraph')
+assert.deepEqual(normalizedModified!.structure?.[0].sentenceRange, [0, 2])
+assert.equal(normalizedModified!.structureMeta?.sourceFormat, 'pseudo')
+assert.equal(normalizedModified!.structureMeta?.contentHash, hashSentences(modifiedBook.sentences))
+console.log('✓ hash 不匹配时 structure 自动重建为 pseudo')
 
 // 3. 无 structure 的旧书：normalize 后仍然无 structure（不报错）
 const oldBook = {
@@ -74,5 +78,135 @@ const normalizedOld = normalizeBookData(oldBook)
 assert(normalizedOld !== null)
 assert.equal(normalizedOld!.structure, undefined, 'Old book without structure stays without')
 console.log('✓ 旧书无 structure 不报错')
+
+function assertRebuiltPseudo(candidate: unknown, label: string): void {
+  const result = normalizeBookData(candidate)
+  assert(result !== null, `${label}: book should still normalize`)
+  assert.equal(result.structureMeta?.sourceFormat, 'pseudo', `${label}: should rebuild pseudo`)
+  assert.equal(result.structureMeta?.contentHash, hash)
+}
+
+const originalBlock = bookWithStructure.structure[0].blocks[0]
+
+assertRebuiltPseudo(
+  {
+    ...bookWithStructure,
+    structureMeta: { ...bookWithStructure.structureMeta, schemaVersion: 2 }
+  },
+  'future schema version'
+)
+
+assertRebuiltPseudo(
+  {
+    ...bookWithStructure,
+    structure: [
+      {
+        ...bookWithStructure.structure[0],
+        blocks: [{ ...originalBlock, type: 'unsupported' }]
+      }
+    ]
+  },
+  'unsupported block type'
+)
+
+assertRebuiltPseudo(
+  {
+    ...bookWithStructure,
+    structure: [
+      {
+        ...bookWithStructure.structure[0],
+        blocks: [{ ...originalBlock, text: 42 }]
+      }
+    ]
+  },
+  'malformed block'
+)
+
+assertRebuiltPseudo(
+  {
+    ...bookWithStructure,
+    structure: [
+      {
+        ...bookWithStructure.structure[0],
+        blocks: [
+          { ...originalBlock, sentenceRange: [0, 1] },
+          { ...originalBlock, text: '第二句话。 第三句话。', sentenceRange: [1, 3] }
+        ]
+      }
+    ]
+  },
+  'duplicate block id'
+)
+
+assertRebuiltPseudo(
+  {
+    ...bookWithStructure,
+    structure: [
+      {
+        ...bookWithStructure.structure[0],
+        blocks: [
+          { ...originalBlock, blockId: 'b1', sentenceRange: [0, 2] },
+          { ...originalBlock, blockId: 'b2', sentenceRange: [1, 3] }
+        ]
+      }
+    ]
+  },
+  'overlapping block ranges'
+)
+
+assertRebuiltPseudo(
+  {
+    ...bookWithStructure,
+    structure: [
+      {
+        ...bookWithStructure.structure[0],
+        blocks: [{ ...originalBlock, sentenceRange: [0, 4] }]
+      }
+    ]
+  },
+  'out-of-bounds block range'
+)
+console.log('✓ schema、block shape、ID 与 range 无效时重建 pseudo')
+
+const normalizedChapterMismatch = normalizeBookData({
+  ...bookWithStructure,
+  currentSentenceIndex: 2,
+  chapters: [{ title: 'Stale chapter', startIndex: 0, sentenceCount: 3 }],
+  structure: [
+    {
+      title: 'First chapter',
+      level: 1,
+      blocks: [
+        {
+          ...originalBlock,
+          blockId: 'first-block',
+          text: originalSentences[0],
+          sentenceRange: [0, 1]
+        }
+      ],
+      sentenceRange: [0, 1]
+    },
+    {
+      title: 'Second chapter',
+      level: 1,
+      blocks: [
+        {
+          ...originalBlock,
+          blockId: 'second-block',
+          text: originalSentences.slice(1).join(' '),
+          sentenceRange: [1, 3]
+        }
+      ],
+      sentenceRange: [1, 3]
+    }
+  ]
+})
+assert(normalizedChapterMismatch !== null)
+assert.deepEqual(normalizedChapterMismatch.chapters, [
+  { title: 'First chapter', startIndex: 0, sentenceCount: 1 },
+  { title: 'Second chapter', startIndex: 1, sentenceCount: 2 }
+])
+assert.equal(normalizedChapterMismatch.currentChapterIndex, 1)
+console.log('✓ accepted structure remains the source of truth for chapter partitions')
 
 console.log('\n✅ structureVersionMismatch 全部测试通过')
