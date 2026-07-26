@@ -35,7 +35,7 @@ Windows Electron AI 阅读器：导入 EPUB/TXT/PDF/DOCX/MD/HTML，默认显示�
 | `src/cleanRules.ts` | 默认清洗正则规则 | 改清洗规则 |
 | `electron/main.ts` / `preload.ts` | Electron 启动、`window.api` 和 IPC 注册 | 改主进程或跨层接口 |
 | `electron/ipc/aiHandlers.ts` | `ai:chat/cancel/history:*`、`ai:nmem:*` 注册与 sources/chunk 事件桥接 | 改 AI IPC |
-| `electron/services/ai/llm-caller.ts` / `ai-service.ts` | OpenAI SSE、200 error envelope/空正文校验、可配置 prompt、问题路由、RAG 编排、来源过滤、备用模型和定向取消 | 改 AI 请求、prompt、路由、检索或流式行为 |
+| `electron/services/ai/llm-caller.ts` / `ai-service.ts` | OpenAI SSE、200 error envelope/空正文校验、可配置 prompt、问题路由、RAG 编排、来源过滤、备用模型、定向取消；Electron 代理环境下模型请求走 axios | 改 AI 请求、代理、prompt、路由、检索或流式行为 |
 | `electron/services/ai/nmem-bridge.ts` / `ingest-service.ts` | nmem health/search/ingest HTTP 契约、状态缓存和按章导入 | 改知识库连接或书籍灌入 |
 | `electron/services/ai/ai-history.ts` / `ai-config.ts` | `ai-history.json` 原子持久化、可选检索字段与嵌套来源严格校验；主进程 AI 配置入口 | 改 AI 历史或主进程配置 |
 | `electron/ipc/ttsHandlers.ts` | `tts:synthesize`、引擎 CRUD、测试、发现和导入导出 | 改 TTS IPC |
@@ -243,4 +243,5 @@ npm test
 - EPUB 同一 XHTML 文件内的密集 TOC 锚点会按 200~500 句归并，保留 heading block 和全局范围；不同 spine 文件仍保持章节边界。
 - 大纲缓存使用版本 3，按 `bookId + chapterKey + sentenceContentHash` 隔离；旧版本缓存自动失效。生成队列为进程级 FIFO 单飞行。
 - `ChapterOutlinePanel` 是唯一挂载的大纲 UI；`SectionNav` 和 `ChapterOutline` 仅保留兼容类型引用，后续不要重新接回旧实现。
+- Electron 主进程的 Node `fetch` 不读取 HTTP(S) 代理环境变量；模型列表和流式请求在检测到代理时通过 axios 发送，否则保留原 fetch 路径。代理配置或模型请求异常时优先检查 `electron/services/ai/llm-caller.ts`。
 - 已知边界：Markdown 低层标题的旧结构测试仍保持原语义；若要将 Markdown 的 `##/###` 统一视为章内 heading，需要单独迁移测试和正文导航数据。
