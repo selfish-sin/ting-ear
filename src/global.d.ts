@@ -105,10 +105,11 @@ export interface Api {
     skipped?: number
     error?: string
   }>
-  aiNmemSyncAll: () => Promise<{
+  aiNmemSyncAll: (force?: boolean) => Promise<{
     success: boolean
     synced?: number
     failed?: number
+    skipped?: number
     error?: string
   }>
   aiListModels: (config: AiLlmSettings) => Promise<{
@@ -341,6 +342,8 @@ export interface ChapterOutlineGenerateRequest {
   bookId: string
   chapterIndex: number
   chapterKey: string
+  /** true = 忽略已有缓存，强制重新生成 */
+  force?: boolean
 }
 
 export interface Sentence {
@@ -505,7 +508,7 @@ export interface AiLlmSettings {
   timeoutMs: number
 }
 
-export type AiProvider = 'openai' | 'zhipu' | 'other'
+export type AiProvider = 'openai' | 'zhipu' | 'volcengine' | 'deepseek' | 'siliconflow' | 'dashscope' | 'moonshot' | 'spark' | 'other'
 
 export interface AiEngine extends AiLlmSettings {
   id: string
@@ -533,6 +536,8 @@ export interface AiSettings {
   }
   webSearch: {
     enabled: boolean
+    /** 联网搜索系统提示词（可在高级设置编辑） */
+    prompt: string
   }
   retrieval: {
     enabled: boolean
@@ -544,6 +549,12 @@ export interface AiSettings {
     evidencePrompt: string
     readerContextPrompt: string
     selectionPrompt: string
+    /** 会话级「当前章」注入提示词（本章 ≤ fullTextMaxChars 时每会话一次） */
+    fullTextInjectPrompt: string
+    /** 本章注入字数上限（默认 50000，按当前章计，非全书） */
+    fullTextMaxChars: number
+    /** 大纲生成 system 提示词 */
+    outlineSystemPrompt: string
     maxHistoryMessages: number
     greetingPatterns: string[]
     chapterPatterns: string[]
@@ -558,6 +569,13 @@ export interface AiChatPayload {
   autoContext?: string
   currentChapterIndex?: number
   quotes?: string[]
+  /**
+   * 本轮是否注入「当前章节」正文（每会话最多一次，且本章字数 ≤ fullTextMaxChars）。
+   * 注入后仍会做知识库检索。
+   */
+  injectFullText?: boolean
+  /** 待注入的当前章正文 */
+  fullText?: string
 }
 
 export type AiQuestionCategory =

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { History as HistoryIcon, Trash2, Play, BookOpen, FileText } from 'lucide-react'
 import { useHistoryStore } from '../stores/historyStore'
 import { useBookStore } from '../stores/bookStore'
-import { usePlayerStore } from '../stores/playerStore'
 import type { BookData, HistoryEntry } from '../global'
 
 interface HistoryViewProps {
@@ -101,11 +100,7 @@ export default function HistoryView({ showToast, onContinueReading }: HistoryVie
       return
     }
     const idx = entry.endSentenceIndex ?? entry.startSentenceIndex
-    // Default to system TTS (Edge), user can switch to Qwen later
-    const player = usePlayerStore.getState()
-    if (player.ttsEngine === 'qwen' && !player.useSystemTTS) {
-      player.setUseSystemTTS(true)
-    }
+    // 继续听时保留用户当前引擎选择，不强制切离线
     onContinueReading(book, idx, entry.sentenceRange ?? null)
   }
 

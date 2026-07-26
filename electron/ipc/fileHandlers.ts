@@ -28,6 +28,10 @@ import {
 } from '../../src/utils/bookData'
 import { generatePseudoStructure, validateStructure } from '../services/parsers/structureBuilder'
 import { hashSentences } from '../../src/utils/contentHash'
+import { mergeAiSettings } from '../services/ai/ai-config'
+import { NmemBridge } from '../services/ai/nmem-bridge'
+import { IngestService } from '../services/ai/ingest-service'
+import { IngestScheduler } from '../services/ai/ingest-scheduler'
 
 /** 递归复制目录 */
 function copyDirRecursive(src: string, dest: string): void {
@@ -105,6 +109,49 @@ export function registerFileHandlers(
   settingsService: SettingsService,
   engineManager: EngineManager
 ): void {
+  const nmem = new NmemBridge(() => mergeAiSettings(settingsService.get().ai).nmem)
+  const ingestService = new IngestService(nmem)
+
+  // 从 bookStore 获取当前所有书（通过 loadJsonFile 读 books.json）
+  const ingestScheduler = new IngestScheduler(
+    getDataDir,
+    nmem,
+    ingestService,
+    () => loadJsonFile<BookData[]>('books.json', []),
+    (level, msg) => level === 'info' ? logService.info('AI', msg) : logService.error('AI', msg)
+  )
+
+  // 启动探针（autoIngest 开启时生效）
+  if (mergeAiSettings(settingsService.get().ai).nmem.autoIngest) {
+    ingestScheduler.start()
+  }
+
+  const autoIngestBook = (book: BookData): void => {
+    if (!mergeAiSettings(settingsService.get().ai).nmem.autoIngest) return
+    void ingestScheduler.tryIngest(book).then((ok) => {
+      if (!ok) {
+        const win = BrowserWindow.getFocusedWindow()
+        win?.webContents.send('ai:ingest:error', `知识库未连接，《${book.title}》将在连接后自动导入`)
+      }
+    })
+  }
+
+  ipcMain.handle('ai:nmem:sync-all', async (_event, force = false) => {
+    try {
+      // 默认只同步需要更新的书；force=true 才整本强制重传（避免 MDM 重复堆源）
+      const result = await ingestScheduler.syncAll({ force: Boolean(force) })
+      logService.info(
+        'AI',
+        `知识库同步完成: 成功 ${result.synced} 本，失败 ${result.failed} 本，跳过已同步 ${result.skipped} 本`
+      )
+      return { success: true, ...result }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logService.error('AI', `知识库全量同步失败: ${message}`)
+      return { success: false, error: message }
+    }
+  })
+
   // === Open file dialog ===
   ipcMain.handle('file:select', async (): Promise<string[] | null> => {
     const win = BrowserWindow.getFocusedWindow()
@@ -223,11 +270,13 @@ export function registerFileHandlers(
       // Preserve progress if updating an existing book
       const existingBook = existingIdx >= 0 ? existingBooks[existingIdx] : null
 
-      // 正文是否实质变化：句数不同或抽样前几句不同 → 清空编辑记录与旧原文快照
+      const incomingContentHash = hashSentences(sentences)
+      const existingStructureValid = existingBook ? validateStructure(existingBook) : false
+
+      // 正文是否实质变化：比较全文稳定哈希，避免后文变化却错误沿用旧结构。
       const contentChanged =
         !existingBook ||
-        existingBook.sentences.length !== sentences.length ||
-        existingBook.sentences.slice(0, 3).join('\n') !== sentences.slice(0, 3).join('\n')
+        hashSentences(existingBook.sentences) !== incomingContentHash
 
       const book = normalizeBookData({
         ...existingBook,
@@ -251,8 +300,14 @@ export function registerFileHandlers(
         editHistory: contentChanged ? undefined : existingBook?.editHistory,
         timeMap: contentChanged ? undefined : existingBook?.timeMap,
         // 结构化：内容变了用新 structure，没变且旧 structure 有效则沿用
-        structure: contentChanged ? finalStructure : (existingBook?.structure ?? finalStructure),
-        structureMeta: contentChanged ? finalStructureMeta : (existingBook?.structureMeta ?? finalStructureMeta)
+        structure:
+          !contentChanged && existingStructureValid
+            ? existingBook?.structure
+            : finalStructure,
+        structureMeta:
+          !contentChanged && existingStructureValid
+            ? existingBook?.structureMeta
+            : finalStructureMeta
       })
 
       if (!book) {
@@ -287,6 +342,7 @@ export function registerFileHandlers(
         }
       }
 
+      autoIngestBook(book)
       return { success: true, book }
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error)
@@ -789,6 +845,11 @@ export function registerFileHandlers(
   ipcMain.handle('data:clearCache', async (_event, type: string) => {
     try {
       const dir = getDataDir()
+      /** 清空 JSON 文件（写空内容，避免 Windows 文件锁导致 unlink 失败） */
+      const emptyJson = (filename: string, content = '[]'): void => {
+        const p = join(dir, filename)
+        if (existsSync(p)) writeFileSync(p, content, 'utf-8')
+      }
       /** 删除目录下匹配前缀的缓存文件夹（含 cache_<engineId>） */
       const removeAudioCaches = (): void => {
         for (const name of ['edge_cache', 'qwen_cache']) {
@@ -809,27 +870,27 @@ export function registerFileHandlers(
 
       switch (type) {
         case 'books':
-          if (existsSync(join(dir, 'books.json'))) unlinkSync(join(dir, 'books.json'))
+          emptyJson('books.json')
           if (existsSync(join(dir, 'covers')))
             rmSync(join(dir, 'covers'), { recursive: true, force: true })
           break
         case 'history':
-          if (existsSync(join(dir, 'history.json'))) unlinkSync(join(dir, 'history.json'))
+          emptyJson('history.json')
           break
         case 'audio':
           removeAudioCaches()
           break
         case 'logs':
-          if (existsSync(join(dir, 'logs.json'))) unlinkSync(join(dir, 'logs.json'))
+          emptyJson('logs.json')
           break
         case 'bookmarks':
-          if (existsSync(join(dir, 'bookmarks.json'))) unlinkSync(join(dir, 'bookmarks.json'))
+          emptyJson('bookmarks.json')
           break
         case 'all':
-          for (const f of ['books.json', 'history.json', 'logs.json', 'bookmarks.json', 'albums.json']) {
-            if (existsSync(join(dir, f))) unlinkSync(join(dir, f))
+          for (const f of ['books.json', 'history.json', 'logs.json', 'bookmarks.json', 'albums.json', 'ai-history.json']) {
+            emptyJson(f)
           }
-          for (const d of ['covers', 'cache']) {
+          for (const d of ['covers', 'cache', 'outlines']) {
             if (existsSync(join(dir, d))) rmSync(join(dir, d), { recursive: true, force: true })
           }
           removeAudioCaches()

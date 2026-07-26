@@ -3,6 +3,11 @@ import TitleBar from './components/TitleBar'
 import SideNav from './components/SideNav'
 import BookShelf from './components/BookShelf'
 import PlayerView from './components/PlayerView'
+import AiReaderView from './components/reader/AiReaderView'
+import AiPlaybackCapsule, {
+  shouldShowAiPlaybackCapsule,
+  shouldShowFullPlaybackBar
+} from './components/reader/AiPlaybackCapsule'
 import ControlBar from './components/ControlBar'
 import ProgressBar from './components/ProgressBar'
 import BookmarksView from './components/BookmarksView'
@@ -38,7 +43,8 @@ import {
   SPEED_STEP,
   VOLUME_STEP,
   DEFAULT_SPEED,
-  DEFAULT_VOLUME
+  DEFAULT_VOLUME,
+  shouldPublishBookPlaybackState
 } from './stores/playerStore'
 import PlayerOSD from './components/PlayerOSD'
 import { useOsdStore } from './stores/osdStore'
@@ -68,6 +74,7 @@ export default function App() {
     setChapters,
     setCurrentView,
     currentView,
+    readerMode,
     setLoading,
     loadBooks,
     updateBookProgress,
@@ -83,12 +90,21 @@ export default function App() {
     setVolume,
     setVoiceId,
     playState,
+    rawSpeechActive,
     currentSentenceIndex
   } = usePlayerStore()
 
   const { settings, loadSettings } = useSettingsStore()
   const { loadLogs } = useLogStore()
   const { loadHistory } = useHistoryStore()
+
+  // === 播放器沉浸模式（正文区右上 fixed 悬浮开关；开启后隐藏顶/底栏） ===
+  const [playerImmersive, setPlayerImmersive] = useState(false)
+
+  useEffect(() => {
+    // 离开播放器时退出沉浸，避免下次进来状态错乱
+    if (currentView !== 'player') setPlayerImmersive(false)
+  }, [currentView])
 
   // === Toast helpers ===
   const showToast = useCallback((type: ToastItem['type'], message: string, duration?: number) => {
@@ -232,13 +248,19 @@ export default function App() {
 
   // === Tray events ===
   useEffect(() => {
-    window.api?.onTrayTogglePlay(() => {
-      if (playState === 'playing') tts.pause()
-      else tts.play()
-    })
-    window.api?.onTrayPrevSentence(() => tts.prevSentence())
-    window.api?.onTrayNextSentence(() => tts.nextSentence())
-  }, [playState, tts])
+    const cleanups: Array<() => void> = []
+    cleanups.push(
+      window.api?.onTrayTogglePlay(() => {
+        if (usePlayerStore.getState().playState === 'playing') tts.pause()
+        else tts.play()
+      }) ?? (() => {})
+    )
+    cleanups.push(window.api?.onTrayPrevSentence(() => tts.prevSentence()) ?? (() => {}))
+    cleanups.push(window.api?.onTrayNextSentence(() => tts.nextSentence()) ?? (() => {}))
+    return () => {
+      cleanups.forEach((fn) => fn())
+    }
+  }, [tts])
 
   // === Floating ball events ===
   useEffect(() => {
@@ -351,6 +373,21 @@ export default function App() {
     }
   }, [tts])
 
+  // === AI 阅读模式：停止 TTS，但保留阅读位置（不 reset 到范围起点）===
+  useEffect(() => {
+    if (readerMode === 'ai-reading') tts.pause()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readerMode])
+
+  // === 切到阅读器且处于 AI 阅读时，禁止残留的书籍 TTS 继续响 ===
+  useEffect(() => {
+    if (currentView === 'player' && readerMode === 'ai-reading') {
+      const state = usePlayerStore.getState().playState
+      if (state === 'playing') tts.pause()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentView, readerMode])
+
   // === 实时日志推送（主进程 → 渲染进程） ===
   useEffect(() => {
     const cleanup = window.api?.onLogEntry((entry) => {
@@ -360,6 +397,16 @@ export default function App() {
       cleanup?.()
     }
   }, [])
+
+  // === 知识库自动导入失败提示 ===
+  useEffect(() => {
+    const cleanup = window.api?.onAiIngestError((message) => {
+      showToast('info', message)
+    })
+    return () => {
+      cleanup?.()
+    }
+  }, [showToast])
 
   // === Update floating ball state when player changes ===
   useEffect(() => {
@@ -418,24 +465,26 @@ export default function App() {
     window.api?.updateFloatingBallState(snapshot)
 
     // === 同步字幕窗口 ===
-    if (book && totalSentences > 0) {
-      window.api?.subtitleSendUpdate({
-        text: book.sentences[cur] || '',
-        bookTitle: book.title,
-        chapterTitle,
-        isPlaying: player.playState === 'playing',
-        hasContent: true,
-        progressPercent
-      })
-    } else {
-      window.api?.subtitleSendUpdate({
-        text: '',
-        isPlaying: false,
-        hasContent: false,
-        progressPercent: 0
-      })
+    if (shouldPublishBookPlaybackState(rawSpeechActive)) {
+      if (book && totalSentences > 0) {
+        window.api?.subtitleSendUpdate({
+          text: book.sentences[cur] || '',
+          bookTitle: book.title,
+          chapterTitle,
+          isPlaying: player.playState === 'playing',
+          hasContent: true,
+          progressPercent
+        })
+      } else {
+        window.api?.subtitleSendUpdate({
+          text: '',
+          isPlaying: false,
+          hasContent: false,
+          progressPercent: 0
+        })
+      }
     }
-  }, [playState, currentSentenceIndex, currentBook])
+  }, [playState, rawSpeechActive, currentSentenceIndex, currentBook])
 
   // 范围是否激活：sentences 全集长度 > 窗口大小
   // 不直接用 bookStore.sentenceRange 是为了避免该 effect 额外订阅它造成抖动；
@@ -494,6 +543,7 @@ export default function App() {
   } | null>(null)
 
   useEffect(() => {
+    if (!shouldPublishBookPlaybackState(rawSpeechActive)) return
     const book = useBookStore.getState().currentBook
     if (!book) {
       sessionStartRef.current = null
@@ -515,9 +565,8 @@ export default function App() {
       const start = sessionStartRef.current
       sessionStartRef.current = null
 
-      // Only record system/edge TTS sessions, skip qwen
+      // 记录本次会话实际使用的引擎（含千问/自定义）
       const engine = player.useSystemTTS ? 'system' : player.ttsEngine
-      if (engine === 'qwen') return
 
       const chapter = book.chapters[start.chapterIndex]
       const endPreview = book.sentences[player.currentSentenceIndex]?.slice(0, 100) || ''
@@ -539,7 +588,7 @@ export default function App() {
         sentenceRange: useBookStore.getState().sentenceRange
       })
     }
-  }, [playState])
+  }, [playState, rawSpeechActive])
 
   // Cleanup session on book change
   useEffect(() => {
@@ -669,6 +718,25 @@ export default function App() {
     [handleChapterConfirm, showToast]
   )
 
+  // === Auto-resume last reading position on startup ===
+  const autoResumedRef = useRef(false)
+  useEffect(() => {
+    if (autoResumedRef.current || books.length === 0) return
+    const s = useSettingsStore.getState().settings
+    if (s.autoResume === false) {
+      autoResumedRef.current = true
+      return
+    }
+    // 找最近阅读且未完成的书
+    const candidate = books
+      .filter((b) => !b.isCompleted && b.progressPercent > 0 && b.lastReadAt)
+      .sort((a, b) => new Date(b.lastReadAt).getTime() - new Date(a.lastReadAt).getTime())[0]
+    autoResumedRef.current = true
+    if (candidate) {
+      handleOpenBook(candidate)
+    }
+  }, [books, handleOpenBook])
+
   // === Chapter/page skip (ControlBar buttons) ===
   const handleSkipChapter = useCallback(
     (direction: -1 | 1) => {
@@ -769,12 +837,6 @@ export default function App() {
     }
   }, [tts, handleSkipChapter])
 
-  // === Floating ball toggle ===
-  const handleToggleFloatingBall = useCallback(() => {
-    const { settings, setFloatingBallEnabled } = useSettingsStore.getState()
-    setFloatingBallEnabled(!settings.floatingBallEnabled)
-  }, [])
-
   // === Subtitle toggle ===
   const handleToggleSubtitle = useCallback(() => {
     if (!subtitleEnabled) {
@@ -812,19 +874,30 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-white dark:bg-dark-bg overflow-hidden">
-      <TitleBar />
+    <div className="h-screen w-screen flex flex-col overflow-hidden bg-gray-50 dark:bg-dark-bg relative">
+      <TitleBar
+        immersive={playerImmersive && currentView === 'player'}
+        onToggleImmersive={currentView === 'player' ? () => setPlayerImmersive((v) => !v) : undefined}
+      />
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar */}
-        <SideNav
-          currentView={currentView}
-          onViewChange={setCurrentView}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
+      <div className="flex-1 flex overflow-hidden min-h-0">
+        {/* Sidebar：沉浸时收成细条可点回，或保持可导航 */}
+        <div
+          className={
+            playerImmersive && currentView === 'player'
+              ? 'w-0 overflow-hidden opacity-0 pointer-events-none'
+              : 'contents'
+          }
+        >
+          <SideNav
+            currentView={currentView}
+            onViewChange={setCurrentView}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+        </div>
 
         {/* Main content */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0 bg-white dark:bg-dark-bg min-w-0">
           {currentView === 'shelf' && (
             <BookShelf
               onImportFile={handleImportFile}
@@ -847,38 +920,83 @@ export default function App() {
             />
           )}
 
-          {currentView === 'player' && (
-            <>
-              <PlayerView
-                showToast={showToast}
-                onSeekToChapter={tts.playFrom}
-                onSelectVersion={(recordId) => {
-                  const active = useBookStore.getState().currentBook
-                  if (!active) return
-                  const base = useBookStore.getState().books.find((book) => book.id === active.id)
-                  if (base) handleChapterConfirm(base, null, undefined, recordId)
-                }}
-                onReloadBook={(book) => activateReadingBook(book)}
-                onReselectRange={(initialPage) => {
-                  const active = useBookStore.getState().currentBook
-                  if (active) setRangeSelectorData({ book: active, initialPage })
-                }}
-              />
-              <ProgressBar onSeek={tts.seekTo} onPause={tts.pause} onResume={tts.play} />
-              <ControlBar
-                onPlay={tts.play}
-                onPause={tts.pause}
-                onStop={tts.stop}
-                onPrevSentence={tts.prevSentence}
-                onNextSentence={tts.nextSentence}
-                onSkipChapter={handleSkipChapter}
-                onToggleFloatingBall={handleToggleFloatingBall}
-                onToggleSubtitle={handleToggleSubtitle}
-                subtitleEnabled={subtitleEnabled}
-                showToast={showToast}
-              />
-            </>
-          )}
+          <div className={currentView === 'player' ? 'flex-1 flex flex-col min-h-0 relative overflow-hidden' : 'hidden'}>
+              {/* 双视图常驻，CSS 切换避免卸载重建卡顿 */}
+              <div className={readerMode === 'ai-reading' ? 'contents' : 'hidden'}>
+                <AiReaderView
+                  immersive={playerImmersive}
+                  onSpeakRaw={tts.speakRaw}
+                  onStopRaw={tts.stopRaw}
+                  onSeekToSentence={tts.seekTo}
+                  onPlayFromSentence={tts.playFrom}
+                  onReselectRange={() => {
+                    const active = useBookStore.getState().currentBook
+                    if (active) setRangeSelectorData({ book: active, initialPage: 1 })
+                  }}
+                  onSelectVersion={(recordId) => {
+                    const active = useBookStore.getState().currentBook
+                    if (!active) return
+                    const base = useBookStore.getState().books.find((book) => book.id === active.id)
+                    if (base) handleChapterConfirm(base, null, undefined, recordId)
+                  }}
+                />
+              </div>
+              <div className={readerMode === 'listening' ? 'contents' : 'hidden'}>
+                <PlayerView
+                  showToast={showToast}
+                  onSeekToChapter={tts.playFrom}
+                  onSelectVersion={(recordId) => {
+                    const active = useBookStore.getState().currentBook
+                    if (!active) return
+                    const base = useBookStore.getState().books.find((book) => book.id === active.id)
+                    if (base) handleChapterConfirm(base, null, undefined, recordId)
+                  }}
+                  onReloadBook={(book) => activateReadingBook(book)}
+                  onReselectRange={(initialPage) => {
+                    const active = useBookStore.getState().currentBook
+                    if (active) setRangeSelectorData({ book: active, initialPage })
+                  }}
+                  onToggleSubtitle={handleToggleSubtitle}
+                  subtitleEnabled={subtitleEnabled}
+                  immersive={playerImmersive}
+                />
+              </div>
+
+              {shouldShowFullPlaybackBar(readerMode) && (
+                <div
+                  className={`z-30 bg-white dark:bg-dark-surface transition-transform duration-200 ease-out ${
+                    playerImmersive
+                      ? 'absolute bottom-0 left-0 right-0 translate-y-full pointer-events-none'
+                      : 'flex-shrink-0 translate-y-0'
+                  }`}
+                >
+                  <ProgressBar onSeek={tts.seekTo} onPause={tts.pause} onResume={tts.play} />
+                  <ControlBar
+                    onPlay={tts.play}
+                    onPause={tts.pause}
+                    onStop={tts.stop}
+                    onPrevSentence={tts.prevSentence}
+                    onNextSentence={tts.nextSentence}
+                    onSkipChapter={handleSkipChapter}
+                    showToast={showToast}
+                  />
+                </div>
+              )}
+
+              {shouldShowAiPlaybackCapsule(readerMode) && (
+                <AiPlaybackCapsule
+                  playState={playState}
+                  currentSentencePreview={
+                    currentBook?.sentences[currentSentenceIndex]?.trim() ||
+                    '点击正文句子设定起点，再按播放'
+                  }
+                  onPlay={tts.play}
+                  onPause={tts.pause}
+                  onPrevSentence={tts.prevSentence}
+                  onNextSentence={tts.nextSentence}
+                />
+              )}
+            </div>
 
           {currentView === 'bookmarks' && (
             <BookmarksView

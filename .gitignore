@@ -22,18 +22,24 @@ test.pdf
 # 备份文件
 *.bak-*
 .backups/
+*-main.zip
 
-# AI 辅助工具（本地开发用，不入库）
-.trellis/
+# AI 辅助工具 — 治理层入库，运行时/本地索引不入库
+.trellis/workspace/
+.trellis/.backup-*
+.trellis/.runtime/
+.trellis/.cache/
+.trellis/.template-hashes.json
+.trellis/worktrees/
 .codex/
 .claude/
 .codebuddy/
-.agents/
 .agent/
+.agents/
 .workbuddy/
+.superpowers/
 .codegraph/
 openspec/
-AGENTS.md
 
 # 编辑器
 .vscode/

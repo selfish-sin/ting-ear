@@ -11,21 +11,29 @@ import {
   Layers,
   ListChecks,
   Copy,
-  ArrowDown
+  ArrowDown,
+  Search,
+  X,
+  Camera,
+  Captions
 } from 'lucide-react'
 import { usePlayerStore } from '../stores/playerStore'
 import { useBookStore } from '../stores/bookStore'
 import { useBookmarkStore } from '../stores/bookmarkStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { clampSentenceIndex, findChapterIndex } from '../utils/bookData'
+import { isSentenceTtsSkipped } from '../utils/ttsSkip'
 import type { BookData, Chapter } from '../global'
+import SelectionPopup from './ai/SelectionPopup'
+import ReaderHeader from './reader/ReaderHeader'
 
 /** 单句行 —— memo 化，仅 props 变化时重渲染 */
-const SentenceRow = memo(function SentenceRow({
+export const SentenceRow = memo(function SentenceRow({
   sentence,
   index,
   isActive,
   isPlaying,
+  isTtsSkipped,
   bookmarked,
   bookmarkAdding,
   bookmarkInput,
@@ -42,6 +50,7 @@ const SentenceRow = memo(function SentenceRow({
   index: number
   isActive: boolean
   isPlaying: boolean
+  isTtsSkipped: boolean
   bookmarked: boolean
   bookmarkAdding: boolean
   bookmarkInput: string
@@ -57,16 +66,18 @@ const SentenceRow = memo(function SentenceRow({
   return (
     <div
       data-active={isActive || undefined}
-      className={`group flex items-start gap-3 px-3 py-2 rounded cursor-pointer transition-colors duration-200 ${
+      data-tts-skip={isTtsSkipped || undefined}
+      data-sentence-idx={index}
+      className={`group flex items-start gap-3 px-3.5 py-2.5 rounded-xl cursor-pointer transition-all duration-200 ${isTtsSkipped ? 'opacity-50' : ''} ${
         isActive
-          ? `bg-yellow-50 dark:bg-yellow-900/20 border-l-[3px] border-primary ${isPlaying ? 'sentence-active' : ''}`
-          : 'border-l-[3px] border-transparent hover:bg-gray-50 dark:hover:bg-gray-700/50'
+          ? `bg-primary/10 dark:bg-primary/15 border-l-[3px] border-primary shadow-soft ${isPlaying ? 'sentence-active' : ''}`
+          : 'border-l-[3px] border-transparent hover:bg-gray-50/90 dark:hover:bg-white/[0.04]'
       }`}
       onClick={() => onSentenceClick(index)}
       style={{ fontSize: `${fontSize}px`, lineHeight: 1.8 }}
     >
       <span
-        className={`flex-shrink-0 w-8 text-right text-xs mt-0.5 select-none ${
+        className={`flex-shrink-0 w-8 text-right text-[11px] mt-1 select-none tabular-nums ${
           isActive ? 'text-primary font-bold' : 'text-gray-300 dark:text-gray-600'
         }`}
       >
@@ -74,9 +85,11 @@ const SentenceRow = memo(function SentenceRow({
       </span>
       <span
         className={`flex-1 select-text ${
-          isActive
-            ? 'text-gray-900 dark:text-gray-50 font-medium'
-            : 'text-gray-700 dark:text-gray-300'
+              isActive
+                ? 'text-gray-900 dark:text-gray-50 font-medium'
+                : isTtsSkipped
+                  ? 'text-gray-400 dark:text-gray-500'
+                  : 'text-gray-700 dark:text-gray-300'
         }`}
       >
         {sentence}
@@ -139,6 +152,10 @@ interface PlayerViewProps {
   onReloadBook?: (book: BookData) => void
   /** 重新打开预选页，修改章节范围 / 版本。initialPage: 0=版本选择, 1=章节选择 */
   onReselectRange?: (initialPage?: 0 | 1) => void
+  onToggleSubtitle?: () => void
+  subtitleEnabled?: boolean
+  /** 沉浸模式：隐藏顶/底栏；进出开关在 App 层 fixed 悬浮，不在此渲染 */
+  immersive?: boolean
 }
 
 export default function PlayerView({
@@ -146,7 +163,10 @@ export default function PlayerView({
   onSeekToChapter,
   onSelectVersion,
   onReloadBook,
-  onReselectRange
+  onReselectRange,
+  onToggleSubtitle,
+  subtitleEnabled,
+  immersive = false
 }: PlayerViewProps) {
   const { sentences, currentBook, sentenceRange, loadBooks, getRangeBounds } = useBookStore()
   const {
@@ -172,25 +192,37 @@ export default function PlayerView({
 
   // === 自动滚动开关 ===
   const [autoScroll, setAutoScroll] = useState(true)
-  // === 文本选中复制 ===
-  const [selectionText, setSelectionText] = useState('')
-  const [selectionPos, setSelectionPos] = useState<{ x: number; y: number } | null>(null)
-
   // === Audio export ===
   const [exporting, setExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState<{ current: number; total: number } | null>(
     null
   )
+  // === 搜索功能 ===
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchMatches, setSearchMatches] = useState<number[]>([])
+  const [searchCurrent, setSearchCurrent] = useState(0)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  // 搜索前的位置，用于「返回」
+  const searchOriginRef = useRef<number | null>(null)
+
   // 真正的原文（导入时固定保存，清洗/版本切换不覆盖），供「原始版本」回看
   const originalSentences = currentBook?.originalSentences ?? sentences
+
+  // 进入沉浸时关掉搜索/下拉，避免看不见的浮层
+  useEffect(() => {
+    if (!immersive) return
+    setSearchOpen(false)
+    setSearchQuery('')
+    setChapterDropdownOpen(false)
+    setVersionDropdownOpen(false)
+  }, [immersive])
 
   // 是否有真正的章节（>1 个才算，单章"正文"不算）
   const hasChapters = (currentBook?.chapters?.length || 0) > 1
   // 无章节时的总页数
   const totalPages = currentBook && !hasChapters ? Math.ceil(sentences.length / pageSize) : 0
 
-  // 全书总字数（按当前全书内容去空白统计）
-  const totalChars = useMemo(() => sentences.join('').replace(/\s/g, '').length, [sentences])
   const readingBounds = getRangeBounds()
 
   // 可视窗口（全局索引范围）
@@ -219,6 +251,78 @@ export default function PlayerView({
       }
     }
   }, [currentSentenceIndex, autoScroll])
+
+  // === 搜索：Ctrl+F 打开 ===
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        searchOriginRef.current = usePlayerStore.getState().currentSentenceIndex
+        setSearchOpen(true)
+        setTimeout(() => searchInputRef.current?.focus(), 50)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  // === 搜索：计算匹配 ===
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setSearchMatches([])
+      setSearchCurrent(0)
+      return
+    }
+    const q = searchQuery.trim().toLowerCase()
+    const matches: number[] = []
+    for (let i = 0; i < sentences.length; i++) {
+      if (sentences[i].toLowerCase().includes(q)) matches.push(i)
+    }
+    setSearchMatches(matches)
+    setSearchCurrent(0)
+  }, [searchQuery, sentences])
+
+  // === 搜索：跳转到指定匹配 ===
+  const goToMatch = useCallback(
+    (matchIdx: number) => {
+      if (searchMatches.length === 0) return
+      const clamped = ((matchIdx % searchMatches.length) + searchMatches.length) % searchMatches.length
+      setSearchCurrent(clamped)
+      const sentenceIdx = searchMatches[clamped]
+      // 如果在分页模式，切换到对应页
+      if (!hasChapters) {
+        setPageIndex(Math.floor(sentenceIdx / pageSize))
+      } else if (currentBook) {
+        const chIdx = findChapterIndex(currentBook.chapters, sentenceIdx)
+        setCurrentChapterIndex(chIdx)
+      }
+      // 滚动到目标句子
+      setTimeout(() => {
+        const el = containerRef.current?.querySelector(`[data-sentence-idx="${sentenceIdx}"]`)
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, 80)
+    },
+    [searchMatches, hasChapters, pageSize, currentBook, setPageIndex, setCurrentChapterIndex]
+  )
+
+  // === 搜索：返回搜索前位置 ===
+  const handleSearchReturn = useCallback(() => {
+    const origin = searchOriginRef.current
+    if (origin == null) return
+    if (!hasChapters) {
+      setPageIndex(Math.floor(origin / pageSize))
+    } else if (currentBook) {
+      const chIdx = findChapterIndex(currentBook.chapters, origin)
+      setCurrentChapterIndex(chIdx)
+    }
+    setTimeout(() => {
+      const el = containerRef.current?.querySelector(`[data-sentence-idx="${origin}"]`)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+    setSearchOpen(false)
+    setSearchQuery('')
+    searchOriginRef.current = null
+  }, [hasChapters, pageSize, currentBook, setPageIndex, setCurrentChapterIndex])
 
   // 刷新当前书籍（预处理后文本更新时使用）
   const handleRefresh = useCallback(async () => {
@@ -259,13 +363,20 @@ export default function PlayerView({
 
     const rangeName = hasChapters ? currentChapter?.title || '章节' : '全文'
 
+    const player = usePlayerStore.getState()
+    const engineId =
+      player.useSystemTTS || player.ttsEngine === 'system'
+        ? 'edge'
+        : player.ttsEngine || useSettingsStore.getState().settings.ttsEngine || 'edge'
+
     const result = await window.api?.exportAudio({
       sentences: currentBook.sentences,
       voiceId,
       speed,
       startIndex: start,
       endIndex: end,
-      defaultName: `${currentBook.title}-${rangeName}`
+      defaultName: `${currentBook.title}-${rangeName}`,
+      engineId
     })
 
     setExporting(false)
@@ -341,32 +452,6 @@ export default function PlayerView({
     },
     [sentences, showToast]
   )
-
-  // 监听鼠标抬起，检测原生文本选中
-  const handleMouseUp = useCallback(() => {
-    const sel = window.getSelection()
-    const text = sel?.toString().trim() || ''
-    if (text.length > 0) {
-      const range = sel!.getRangeAt(0)
-      const rect = range.getBoundingClientRect()
-      setSelectionText(text)
-      setSelectionPos({ x: rect.left + rect.width / 2, y: rect.top })
-    } else {
-      setSelectionText('')
-      setSelectionPos(null)
-    }
-  }, [])
-
-  // 复制选中文本
-  const handleCopySelection = useCallback(() => {
-    if (!selectionText) return
-    navigator.clipboard.writeText(selectionText).then(() => {
-      showToast('success', '已复制')
-      setSelectionText('')
-      setSelectionPos(null)
-      window.getSelection()?.removeAllRanges()
-    })
-  }, [selectionText, showToast])
 
   // 书签索引集合（O(1) 查找）
   const bookmarkedSet = useMemo(() => {
@@ -515,7 +600,11 @@ export default function PlayerView({
   }
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-dark-bg relative">
+    <div
+      className={`flex flex-col overflow-hidden bg-white dark:bg-dark-bg relative min-h-0 ${
+        immersive ? 'absolute inset-0' : 'flex-1'
+      }`}
+    >
       {/* Loading overlay */}
       {isLoading && (
         <div className="absolute inset-0 bg-black/10 dark:bg-black/30 flex items-center justify-center z-10">
@@ -526,21 +615,29 @@ export default function PlayerView({
         </div>
       )}
 
-      {/* Chapter selection header */}
-      <div className="px-6 py-3 bg-white dark:bg-dark-surface border-b border-gray-100 dark:border-gray-700 flex-shrink-0 relative">
-        <div className="flex items-center justify-between">
-          {/* Chapter dropdown */}
-          <div className="relative">
+      <ReaderHeader
+        immersive={immersive}
+        left={
+          <div className="relative flex-shrink-0 md:min-w-0 md:max-w-[40%] md:flex-1">
             <button
-              onClick={() => setChapterDropdownOpen((v) => !v)}
-              className="flex items-center gap-2 text-lg font-semibold text-gray-800 dark:text-gray-100 hover:text-primary transition-colors"
-              style={{ fontSize: `${settings.fontSize.title}px` }}
+              onClick={() => {
+                setVersionDropdownOpen(false)
+                setChapterDropdownOpen((v) => !v)
+              }}
+              className="flex items-center gap-1 max-w-full h-8 px-1.5 sm:px-2 rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-dark-muted transition-colors"
+              title={currentChapter?.title || currentBook.title || '章节'}
             >
-              <span>{currentChapter?.title || '全文'}</span>
-              <ChevronDown className="w-4 h-4" />
+              <BookOpen className="w-4 h-4 flex-shrink-0 text-primary" />
+              <span
+                className="hidden md:inline truncate font-medium text-sm"
+                style={{ fontSize: `${Math.min(settings.fontSize.title, 15)}px` }}
+              >
+                {currentChapter?.title || currentBook.title || '全文'}
+              </span>
+              <ChevronDown className="w-3.5 h-3.5 flex-shrink-0 opacity-50" />
             </button>
             {chapterDropdownOpen && (
-              <div className="absolute top-full left-0 mt-1 max-h-80 w-72 overflow-y-auto bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl z-20 py-1">
+              <div className="absolute top-full left-0 mt-1 max-h-72 w-[min(18rem,calc(100vw-5rem))] overflow-y-auto bg-white dark:bg-dark-raised border border-gray-200 dark:border-dark-border rounded-xl shadow-card z-dropdown py-1">
                 {currentBook.chapters.map((ch, idx) => {
                   const inRange =
                     ch.startIndex + ch.sentenceCount > readingBounds.start &&
@@ -553,25 +650,24 @@ export default function PlayerView({
                           ? handleChapterSelect(ch)
                           : (setChapterDropdownOpen(false), onReselectRange?.(1))
                       }
-                      className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 truncate ${
+                      className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-white/5 truncate ${
                         ch.title === currentChapter?.title
                           ? 'text-primary font-medium bg-primary/5'
                           : 'text-gray-700 dark:text-gray-300'
                       } ${!inRange ? 'opacity-40' : ''}`}
-                      title={inRange ? undefined : '点击调整章节范围以包含此章'}
                     >
                       {ch.title}
-                      <span className="text-xs text-gray-400 ml-2">({ch.sentenceCount}句)</span>
+                      <span className="text-xs text-gray-400 ml-1.5">({ch.sentenceCount})</span>
                     </button>
                   )
                 })}
-                <div className="border-t border-gray-100 dark:border-gray-700 mt-1 pt-1">
+                <div className="border-t border-gray-100 dark:border-dark-border mt-1 pt-1">
                   <button
                     onClick={() => {
                       setChapterDropdownOpen(false)
                       onReselectRange?.(1)
                     }}
-                    className="w-full text-left px-4 py-2 text-xs text-primary hover:bg-primary/5 flex items-center gap-1"
+                    className="w-full text-left px-3 py-2 text-xs text-primary hover:bg-primary/5 flex items-center gap-1"
                   >
                     <ListChecks className="w-3 h-3" /> 调整章节范围
                   </button>
@@ -579,123 +675,180 @@ export default function PlayerView({
               </div>
             )}
           </div>
+        }
+        right={
+          <>
+            <button
+              onClick={() => {
+                searchOriginRef.current = currentSentenceIndex
+                setSearchOpen(true)
+                setTimeout(() => searchInputRef.current?.focus(), 50)
+              }}
+              className="icon-btn"
+              title="搜索 (Ctrl+F)"
+            >
+              <Search className="w-4 h-4" />
+            </button>
 
-          {/* Right actions: reselect range + version selector */}
-          <div className="flex items-center gap-2">
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setChapterDropdownOpen(false)
+                  setVersionDropdownOpen((v) => !v)
+                }}
+                className={`icon-btn ${versionDropdownOpen ? 'text-primary bg-primary/10' : ''}`}
+                title="切换版本"
+              >
+                <Layers className="w-4 h-4" />
+              </button>
+              {versionDropdownOpen && (
+                <div className="absolute top-full right-0 mt-1 w-64 max-w-[80vw] bg-white dark:bg-dark-raised border border-gray-200 dark:border-dark-border rounded-xl shadow-card z-dropdown py-1">
+                  <button
+                    onClick={() => {
+                      setVersionDropdownOpen(false)
+                      onSelectVersion?.()
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-white/5"
+                  >
+                    原始版本 · {originalSentences.length}句
+                  </button>
+                  {currentBook.editHistory && currentBook.editHistory.length > 0 ? (
+                    currentBook.editHistory
+                      .slice()
+                      .reverse()
+                      .map((r) => (
+                        <button
+                          key={r.id}
+                          onClick={() => {
+                            setVersionDropdownOpen(false)
+                            onSelectVersion?.(r.id)
+                          }}
+                          className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-white/5 flex items-center justify-between gap-2"
+                        >
+                          <span className="truncate">{r.label}</span>
+                          <span className="text-gray-400 flex-shrink-0">{r.sentenceCount}句</span>
+                        </button>
+                      ))
+                  ) : (
+                    <div className="px-3 py-1.5 text-xs text-gray-400">尚无清洗记录</div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <button
               onClick={() => {
                 setChapterDropdownOpen(false)
                 onReselectRange?.()
               }}
-              className="text-xs text-gray-500 hover:text-primary bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors flex items-center gap-1"
-              title="重新选择章节范围（下次打开本书将自动沿用本次选择）"
+              className="icon-btn"
+              title="重选章节范围"
             >
-              <ListChecks className="w-3 h-3" />
-              重选章节
+              <ListChecks className="w-4 h-4" />
             </button>
 
-            {/* Version selector (edit records) */}
-            <div className="relative">
-            <button
-              onClick={() => {
-                setChapterDropdownOpen(false)
-                setVersionDropdownOpen((v) => !v)
-              }}
-              className="text-xs text-gray-500 hover:text-primary bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors flex items-center gap-1"
-              title="切换版本（原始 / 各次清洗记录）"
-            >
-              <Layers className="w-3 h-3" />
-              版本
-            </button>
-            {versionDropdownOpen && (
-              <div className="absolute top-full right-0 mt-1 w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl z-20 py-1">
-                <button
-                  onClick={() => {
-                    setVersionDropdownOpen(false)
-                    onSelectVersion?.()
-                  }}
-                  className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
-                >
-                  原始版本 · {originalSentences.length}句
-                </button>
-                {currentBook.editHistory && currentBook.editHistory.length > 0 ? (
-                  currentBook.editHistory
-                    .slice()
-                    .reverse()
-                    .map((r) => (
-                      <button
-                        key={r.id}
-                        onClick={() => {
-                          setVersionDropdownOpen(false)
-                          onSelectVersion?.(r.id)
-                        }}
-                        className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center justify-between"
-                      >
-                        <span>{r.label}</span>
-                        <span className="text-gray-400 ml-2 flex-shrink-0">
-                          {r.sentenceCount}句
-                        </span>
-                      </button>
-                    ))
-                ) : (
-                  <div className="px-3 py-1.5 text-xs text-gray-400">
-                    尚无清洗记录（在「文本清洗」页处理后可在此切换）
-                  </div>
-                )}
-              </div>
-            )}
-            </div>
-          </div>
-
-          {/* Author + refresh + export */}
-          <div className="flex items-center gap-3">
             {exporting && exportProgress ? (
-              <span className="text-xs text-primary flex items-center gap-1">
+              <span className="text-[10px] text-primary flex items-center gap-0.5 px-1">
                 <Loader2 className="w-3 h-3 animate-spin" />
                 {exportProgress.current}/{exportProgress.total}
               </span>
             ) : (
-              <button
-                onClick={handleExportAudio}
-                className="p-1.5 rounded-lg text-gray-400 hover:text-primary hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                title="导出音频（合成当前章节/区间为 MP3）"
-              >
+              <button onClick={handleExportAudio} className="icon-btn" title="导出音频 MP3">
                 <Download className="w-4 h-4" />
               </button>
             )}
-            <button
-              onClick={handleRefresh}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-primary hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-              title="刷新（重新载入本书，从存储读取最新文本）"
-            >
+
+            <button onClick={handleRefresh} className="icon-btn" title="刷新本书">
               <RefreshCw className="w-4 h-4" />
             </button>
-            <div className="text-sm text-gray-500 dark:text-gray-400">{currentBook.author}</div>
-          </div>
-        </div>
 
-        {/* Progress info */}
-        <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-          第{' '}
-          {Math.max(
-            1,
-            Math.min(bounds.end - bounds.start, currentSentenceIndex - bounds.start + 1)
+            <button
+              onClick={() => void window.api?.startScreenshotOcr()}
+              className="icon-btn"
+              title="截图朗读"
+            >
+              <Camera className="w-4 h-4" />
+            </button>
+
+            {onToggleSubtitle && (
+              <button
+                onClick={onToggleSubtitle}
+                className={`icon-btn ${subtitleEnabled ? 'text-primary bg-primary/10' : ''}`}
+                title={subtitleEnabled ? '关闭桌面字幕' : '开启桌面字幕'}
+              >
+                <Captions className="w-4 h-4" />
+              </button>
+            )}
+          </>
+        }
+      />
+
+      {/* 搜索栏 */}
+      {searchOpen && !immersive && (
+        <div className="px-3 sm:px-4 py-2 bg-gray-50 dark:bg-dark-muted border-b border-gray-200 dark:border-dark-border flex-shrink-0 flex items-center gap-2 z-30">
+          <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                goToMatch(e.shiftKey ? searchCurrent - 1 : searchCurrent + 1)
+              }
+              if (e.key === 'Escape') {
+                setSearchOpen(false)
+                setSearchQuery('')
+              }
+            }}
+            placeholder="搜索文本..."
+            className="flex-1 max-w-xs text-sm px-2 py-1 rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 outline-none focus:border-primary"
+          />
+          {searchQuery && (
+            <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+              {searchMatches.length > 0 ? `${searchCurrent + 1}/${searchMatches.length}` : '无匹配'}
+            </span>
           )}
-          /{bounds.end - bounds.start} 句 ·
-          {hasChapters ? (
-            <> {currentChapter?.title || '全文'} · </>
-          ) : (
-            <>
-              {' '}
-              第 {pageIndex + 1}/{totalPages} 页 ·{' '}
-            </>
-          )}
-          全书 {sentences.length} 句 · 共 {totalChars.toLocaleString()} 字
-        </p>
-      </div>
+          <button
+            onClick={() => goToMatch(searchCurrent - 1)}
+            disabled={searchMatches.length === 0}
+            className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-500 disabled:opacity-30"
+            title="上一个 (Shift+Enter)"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => goToMatch(searchCurrent + 1)}
+            disabled={searchMatches.length === 0}
+            className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-500 disabled:opacity-30"
+            title="下一个 (Enter)"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+          <button
+            onClick={handleSearchReturn}
+            disabled={searchOriginRef.current == null}
+            className="text-xs text-gray-500 hover:text-primary px-1.5 py-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-30 whitespace-nowrap"
+            title="返回搜索前的位置"
+          >
+            返回
+          </button>
+          <button
+            onClick={() => {
+              setSearchOpen(false)
+              setSearchQuery('')
+            }}
+            className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-400"
+            title="关闭 (Esc)"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Sentence list: 按窗口 slice 显示，但传给回调的是【全局】索引 */}
-      <div ref={containerRef} className="flex-1 overflow-y-auto px-6 py-2 relative contain-content" onMouseUp={handleMouseUp}>
+      <div ref={containerRef} className="flex-1 overflow-y-auto px-3 sm:px-5 py-2 relative contain-content">
         {/* Top page nav — only for non-chaptered books */}
         {!hasChapters && (
           <div className="flex items-center justify-center gap-2 mb-2 text-xs text-gray-400">
@@ -727,6 +880,7 @@ export default function PlayerView({
               index={index}
               isActive={index === currentSentenceIndex}
               isPlaying={playState === 'playing'}
+              isTtsSkipped={isSentenceTtsSkipped(currentBook, index)}
               bookmarked={bookmarkedSet.has(index)}
               bookmarkAdding={bookmarkAdding === index}
               bookmarkInput={bookmarkInput}
@@ -797,33 +951,34 @@ export default function PlayerView({
       </div>
 
       {/* 浮动操作区 */}
-      {/* 选中文本复制气泡 */}
-      {selectionText && selectionPos && (
+      <SelectionPopup
+        containerRef={containerRef}
+        onCopied={() => showToast('success', '已复制')}
+        onSearchInBook={(text) => {
+          searchOriginRef.current = usePlayerStore.getState().currentSentenceIndex
+          setSearchQuery(text.slice(0, 80))
+          setSearchOpen(true)
+          setTimeout(() => searchInputRef.current?.focus(), 50)
+        }}
+        onPlayFromSentence={(index) => {
+          onSeekToChapter?.(index)
+        }}
+      />
+
+      {/* 自动滚动开关：沉浸时隐藏，避免挡字 */}
+      {!immersive && (
         <button
-          onClick={handleCopySelection}
-          className="fixed z-50 flex items-center gap-1 bg-gray-800 dark:bg-gray-700 text-white text-xs px-3 py-1.5 rounded-lg shadow-lg hover:bg-gray-700 dark:hover:bg-gray-600 transition-colors"
-          style={{
-            left: `${selectionPos.x}px`,
-            top: `${selectionPos.y - 40}px`,
-            transform: 'translateX(-50%)'
-          }}
+          onClick={() => setAutoScroll((v) => !v)}
+          className={`absolute bottom-4 right-4 z-20 w-9 h-9 rounded-full flex items-center justify-center shadow-lg border transition-all ${
+            autoScroll
+              ? 'bg-primary text-white border-primary hover:opacity-90'
+              : 'bg-white dark:bg-gray-800 text-gray-400 dark:text-gray-500 border-gray-200 dark:border-gray-600 hover:text-primary hover:border-primary/50'
+          }`}
+          title={autoScroll ? '自动滚动：开（点击关闭）' : '自动滚动：关（点击开启）'}
         >
-          <Copy className="w-3 h-3" /> 复制
+          <ArrowDown className="w-4 h-4" />
         </button>
       )}
-
-      {/* 自动滚动开关 */}
-      <button
-        onClick={() => setAutoScroll((v) => !v)}
-        className={`absolute bottom-4 right-4 z-20 w-9 h-9 rounded-full flex items-center justify-center shadow-lg border transition-all ${
-          autoScroll
-            ? 'bg-primary text-white border-primary hover:opacity-90'
-            : 'bg-white dark:bg-gray-800 text-gray-400 dark:text-gray-500 border-gray-200 dark:border-gray-600 hover:text-primary hover:border-primary/50'
-        }`}
-        title={autoScroll ? '自动滚动：开（点击关闭）' : '自动滚动：关（点击开启）'}
-      >
-        <ArrowDown className="w-4 h-4" />
-      </button>
     </div>
   )
 }

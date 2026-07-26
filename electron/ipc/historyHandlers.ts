@@ -1,16 +1,15 @@
 import { ipcMain } from 'electron'
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, renameSync, existsSync } from 'fs'
 import { join } from 'path'
-import { app } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import type { LogService } from '../services/log-service'
 import type { HistoryEntry } from '../../src/global'
+import { getDataDir } from './fileHandlers'
 
 const MAX_HISTORY_ENTRIES = 2000
 
 function getHistoryFile(): string {
-  const dir = join(app.getPath('userData'), '听伴')
-  return join(dir, 'history.json')
+  return join(getDataDir(), 'history.json')
 }
 
 function loadHistory(): HistoryEntry[] {
@@ -29,7 +28,10 @@ function saveHistory(history: HistoryEntry[]): void {
   if (history.length > MAX_HISTORY_ENTRIES) {
     history = history.slice(history.length - MAX_HISTORY_ENTRIES)
   }
-  writeFileSync(getHistoryFile(), JSON.stringify(history, null, 2), 'utf-8')
+  const filePath = getHistoryFile()
+  const tmpPath = `${filePath}.tmp`
+  writeFileSync(tmpPath, JSON.stringify(history, null, 2), 'utf-8')
+  renameSync(tmpPath, filePath)
 }
 
 export function registerHistoryHandlers(logService: LogService): void {

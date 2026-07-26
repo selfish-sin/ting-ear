@@ -7,16 +7,18 @@ interface Props {
 interface State {
   hasError: boolean
   error: Error | null
+  componentStack: string | null
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { hasError: false, error: null }
+  state: State = { hasError: false, error: null, componentStack: null }
 
-  static getDerivedStateFromError(error: Error): State {
+  static getDerivedStateFromError(error: Error): Partial<State> {
     return { hasError: true, error }
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
+    this.setState({ componentStack: info.componentStack })
     console.error('[ErrorBoundary] uncaught render error:', error, info.componentStack)
   }
 
@@ -29,8 +31,11 @@ export class ErrorBoundary extends Component<Props, State> {
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
               渲染过程发生未预期的错误。请尝试重启应用。
             </p>
-            <pre className="text-xs text-left bg-gray-100 dark:bg-gray-800 p-3 rounded-lg overflow-auto max-h-32 mb-4">
+            <pre className="text-xs text-left bg-gray-100 dark:bg-gray-800 p-3 rounded-lg overflow-auto max-h-32 mb-2">
               {this.state.error?.message}
+            </pre>
+            <pre className="text-xs text-left bg-gray-100 dark:bg-gray-800 p-3 rounded-lg overflow-auto max-h-40 mb-4 text-gray-500">
+              {this.state.componentStack}
             </pre>
             <button
               onClick={() => this.setState({ hasError: false, error: null })}

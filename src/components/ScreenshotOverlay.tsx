@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Check, X } from 'lucide-react'
+import { Check, X, RotateCcw } from 'lucide-react'
 
 interface Rect {
   left: number
@@ -10,41 +10,36 @@ interface Rect {
 
 type HandleDir = 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w'
 
-const HANDLE_SIZE = 8
-const MAG_SIZE = 140
-const MAG_SCALE = 3
-const MIN_SELECT = 6
+const HANDLE_SIZE = 9
+const MAG_SIZE = 128
+const MAG_SCALE = 2.5
+const MIN_SELECT = 8
 
 /**
- * 截图选区组件。
- *
- * 交互流程（两击式框选）：
- * 1. 进入 → 显示全屏截图背景 + 十字准星 + 放大镜
- * 2. 第一击 → 设定起点（锚点）
- * 3. 移动鼠标 → 选区随光标扩张（橡皮筋）
- * 4. 第二击 → 确定范围，进入调整模式（镂空蒙版 + 实时尺寸）
- * 5. 调整模式下可拖动 8 点把手缩放、拖选区内移动
- * 6. 点 ✓ → 提交 OCR，点 ✗ 或 Esc → 取消
+ * 截图选区（拖拽框选）：
+ * 1. 按下拖动 → 实时框选
+ * 2. 松手 → 进入调整模式（把手缩放 / 拖移）
+ * 3. Enter 或 ✓ → OCR；Esc 或 ✗ → 取消
  */
 export default function ScreenshotOverlay() {
   const [bgDataUrl, setBgDataUrl] = useState('')
   const [bgImage, setBgImage] = useState<HTMLImageElement | null>(null)
   const [start, setStart] = useState<{ x: number; y: number } | null>(null)
   const [current, setCurrent] = useState<{ x: number; y: number } | null>(null)
-  const [confirmed, setConfirmed] = useState(false) // 松手后进入调整模式
+  const [confirmed, setConfirmed] = useState(false)
+  const [selecting, setSelecting] = useState(false)
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 })
   const [dragMode, setDragMode] = useState<'none' | 'move' | HandleDir>('none')
   const [dragAnchor, setDragAnchor] = useState<{ x: number; y: number; rect: Rect } | null>(null)
+  const [submitting, setSubmitting] = useState(false)
   const magnifierCanvasRef = useRef<HTMLCanvasElement>(null)
 
-  // 加载背景截图
   useEffect(() => {
     void window.api?.getScreenshotDataUrl().then((url) => {
       if (url) setBgDataUrl(url)
     })
   }, [])
 
-  // 预加载 Image 对象供 Canvas 放大镜用
   useEffect(() => {
     if (!bgDataUrl) return
     const img = new Image()
@@ -52,9 +47,9 @@ export default function ScreenshotOverlay() {
     img.src = bgDataUrl
   }, [bgDataUrl])
 
-  // 放大镜渲染
+  // 放大镜
   useEffect(() => {
-    if (!bgImage || !magnifierCanvasRef.current) return
+    if (!bgImage || !magnifierCanvasRef.current || confirmed) return
     const canvas = magnifierCanvasRef.current
     const ctx = canvas.getContext('2d')
     if (!ctx) return
@@ -64,166 +59,55 @@ export default function ScreenshotOverlay() {
     const sx = mousePos.x - srcW / 2
     const sy = mousePos.y - srcH / 2
 
+    // 将 CSS 坐标映射到图片像素
+    const scaleX = bgImage.naturalWidth / window.innerWidth
+    const scaleY = bgImage.naturalHeight / window.innerHeight
+
     ctx.clearRect(0, 0, MAG_SIZE, MAG_SIZE)
-    // 绘制放大的背景区域
-    ctx.drawImage(bgImage, sx, sy, srcW, srcH, 0, 0, MAG_SIZE, MAG_SIZE)
+    ctx.fillStyle = '#111'
+    ctx.fillRect(0, 0, MAG_SIZE, MAG_SIZE)
+    ctx.imageSmoothingEnabled = false
+    ctx.drawImage(
+      bgImage,
+      sx * scaleX,
+      sy * scaleY,
+      srcW * scaleX,
+      srcH * scaleY,
+      0,
+      0,
+      MAG_SIZE,
+      MAG_SIZE
+    )
 
-    // 像素网格
-    ctx.strokeStyle = 'rgba(255,255,255,0.15)'
-    ctx.lineWidth = 0.5
-    for (let i = 0; i <= MAG_SCALE; i++) {
-      const pos = (i / MAG_SCALE) * MAG_SIZE
-      ctx.beginPath(); ctx.moveTo(pos, 0); ctx.lineTo(pos, MAG_SIZE); ctx.stroke()
-      ctx.beginPath(); ctx.moveTo(0, pos); ctx.lineTo(MAG_SIZE, pos); ctx.stroke()
-    }
-
-    // 十字准星
     const cx = MAG_SIZE / 2
     const cy = MAG_SIZE / 2
-    ctx.strokeStyle = '#3b82f6'
+    ctx.strokeStyle = 'rgba(79,110,247,0.9)'
     ctx.lineWidth = 1.5
-    ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, MAG_SIZE); ctx.stroke()
-    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(MAG_SIZE, cy); ctx.stroke()
-  }, [bgImage, mousePos])
+    ctx.beginPath()
+    ctx.moveTo(cx, 0)
+    ctx.lineTo(cx, MAG_SIZE)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(0, cy)
+    ctx.lineTo(MAG_SIZE, cy)
+    ctx.stroke()
+  }, [bgImage, mousePos, confirmed])
 
-  // Esc 取消
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        void window.api?.cancelOcrSelection()
-      }
-      if (e.key === 'Enter' && confirmed) {
-        handleConfirm()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [confirmed])
-
-  // 计算选区矩形
   const getRect = useCallback((): Rect | null => {
-    if (!start) return null
-    const pt = current || start
-    const left = Math.min(start.x, pt.x)
-    const top = Math.min(start.y, pt.y)
-    const width = Math.abs(pt.x - start.x)
-    const height = Math.abs(pt.y - start.y)
+    if (!start || !current) return null
+    const left = Math.min(start.x, current.x)
+    const top = Math.min(start.y, current.y)
+    const width = Math.abs(current.x - start.x)
+    const height = Math.abs(current.y - start.y)
+    if (width < MIN_SELECT || height < MIN_SELECT) return null
     return { left, top, width, height }
   }, [start, current])
 
-  const rect = (() => {
-    const r = getRect()
-    if (!r) return null
-    // 太小视为未选区
-    if (r.width < MIN_SELECT || r.height < MIN_SELECT) return null
-    return r
-  })()
+  const rect = getRect()
 
-  // === 鼠标事件 ===
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0) return
-
-    // 确认模式：点选区内 → 移动选区；点选区外 → 重新开始框选（第一击）
-    if (confirmed && rect) {
-      if (e.clientX >= rect.left && e.clientX <= rect.left + rect.width &&
-          e.clientY >= rect.top && e.clientY <= rect.top + rect.height) {
-        setDragMode('move')
-        setDragAnchor({ x: e.clientX, y: e.clientY, rect })
-        return
-      }
-      setConfirmed(false)
-      setStart({ x: e.clientX, y: e.clientY })
-      setCurrent({ x: e.clientX, y: e.clientY })
-      return
-    }
-
-    // 未确认模式：第一击设锚点，第二击确定范围（两击式框选）
-    if (!start) {
-      setConfirmed(false)
-      setStart({ x: e.clientX, y: e.clientY })
-      setCurrent({ x: e.clientX, y: e.clientY })
-      return
-    }
-    // 第二击 → 确定范围并进入调整模式
-    const r = getRect()
-    if (r && r.width >= MIN_SELECT && r.height >= MIN_SELECT) {
-      setConfirmed(true)
-    } else {
-      // 太小（几乎没移动）→ 回到空闲，允许重选
-      setStart(null)
-      setCurrent(null)
-    }
-  }
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    setMousePos({ x: e.clientX, y: e.clientY })
-
-    // 拖拽移动选区
-    if (dragMode === 'move' && dragAnchor) {
-      const dx = e.clientX - dragAnchor.x
-      const dy = e.clientY - dragAnchor.y
-      setStart({ x: dragAnchor.rect.left + dx, y: dragAnchor.rect.top + dy })
-      setCurrent({
-        x: dragAnchor.rect.left + dragAnchor.rect.width + dx,
-        y: dragAnchor.rect.top + dragAnchor.rect.height + dy
-      })
-      return
-    }
-
-    // 拖拽缩放把手
-    if (dragMode !== 'none' && dragAnchor) {
-      applyResize(e.clientX, e.clientY)
-      return
-    }
-
-    // 正在框选
-    if (start) {
-      setCurrent({ x: e.clientX, y: e.clientY })
-    }
-  }
-
-  const handleMouseUp = () => {
-    // 仅处理调整模式下的拖拽（移动/缩放把手）
-    if (dragMode !== 'none') {
-      setDragMode('none')
-      setDragAnchor(null)
-      if (rect && rect.width >= MIN_SELECT && rect.height >= MIN_SELECT) {
-        setConfirmed(true)
-      }
-      return
-    }
-    // 框选阶段用「两击式」：第二击已在 mousedown 中确定范围，这里不再处理
-  }
-
-  // === 缩放把手拖拽 ===
-  const startHandleDrag = (dir: HandleDir, e: React.MouseEvent) => {
-    e.stopPropagation()
-    e.preventDefault()
-    if (!rect) return
-    setDragMode(dir)
-    setDragAnchor({ x: e.clientX, y: e.clientY, rect })
-  }
-
-  const applyResize = (cx: number, cy: number) => {
-    if (!dragAnchor || dragMode === 'none' || dragMode === 'move') return
-    const { rect: r } = dragAnchor
-    const dx = cx - dragAnchor.x
-    const dy = cy - dragAnchor.y
-    let { left, top, width, height } = r
-
-    if (dragMode.includes('e')) { width = Math.max(MIN_SELECT, r.width + dx) }
-    if (dragMode.includes('w')) { left = r.left + dx; width = Math.max(MIN_SELECT, r.width - dx) }
-    if (dragMode.includes('s')) { height = Math.max(MIN_SELECT, r.height + dy) }
-    if (dragMode.includes('n')) { top = r.top + dy; height = Math.max(MIN_SELECT, r.height - dy) }
-
-    setStart({ x: left, y: top })
-    setCurrent({ x: left + width, y: top + height })
-  }
-
-  // === 确认 / 取消 ===
   const handleConfirm = useCallback(async () => {
-    if (!rect || !bgDataUrl) return
+    if (!rect || !bgDataUrl || submitting) return
+    setSubmitting(true)
     try {
       await window.api?.submitOcrSelection({
         dataUrl: bgDataUrl,
@@ -235,17 +119,169 @@ export default function ScreenshotOverlay() {
     } catch {
       void window.api?.cancelOcrSelection()
     }
-  }, [rect, bgDataUrl])
+  }, [rect, bgDataUrl, submitting])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        void window.api?.cancelOcrSelection()
+      }
+      if ((e.key === 'Enter' || e.key === ' ') && confirmed && !submitting) {
+        e.preventDefault()
+        void handleConfirm()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [confirmed, submitting, handleConfirm])
+
+  const clampPoint = (x: number, y: number) => ({
+    x: Math.max(0, Math.min(window.innerWidth, x)),
+    y: Math.max(0, Math.min(window.innerHeight, y))
+  })
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0 || submitting) return
+    const p = clampPoint(e.clientX, e.clientY)
+
+    if (confirmed && rect) {
+      const inside =
+        p.x >= rect.left &&
+        p.x <= rect.left + rect.width &&
+        p.y >= rect.top &&
+        p.y <= rect.top + rect.height
+      if (inside) {
+        setDragMode('move')
+        setDragAnchor({ x: p.x, y: p.y, rect })
+        return
+      }
+      // 点选区外：重新拖选
+      setConfirmed(false)
+      setSelecting(true)
+      setStart(p)
+      setCurrent(p)
+      return
+    }
+
+    setConfirmed(false)
+    setSelecting(true)
+    setStart(p)
+    setCurrent(p)
+  }
+
+  const applyResize = (cx: number, cy: number) => {
+    if (!dragAnchor || dragMode === 'none' || dragMode === 'move') return
+    const { rect: r } = dragAnchor
+    const dx = cx - dragAnchor.x
+    const dy = cy - dragAnchor.y
+    let { left, top, width, height } = r
+
+    if (dragMode.includes('e')) width = Math.max(MIN_SELECT, r.width + dx)
+    if (dragMode.includes('w')) {
+      left = r.left + dx
+      width = Math.max(MIN_SELECT, r.width - dx)
+    }
+    if (dragMode.includes('s')) height = Math.max(MIN_SELECT, r.height + dy)
+    if (dragMode.includes('n')) {
+      top = r.top + dy
+      height = Math.max(MIN_SELECT, r.height - dy)
+    }
+
+    // 边界钳制
+    left = Math.max(0, left)
+    top = Math.max(0, top)
+    width = Math.min(width, window.innerWidth - left)
+    height = Math.min(height, window.innerHeight - top)
+
+    setStart({ x: left, y: top })
+    setCurrent({ x: left + width, y: top + height })
+  }
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    const p = clampPoint(e.clientX, e.clientY)
+    setMousePos(p)
+
+    if (dragMode === 'move' && dragAnchor) {
+      const dx = p.x - dragAnchor.x
+      const dy = p.y - dragAnchor.y
+      let left = dragAnchor.rect.left + dx
+      let top = dragAnchor.rect.top + dy
+      const w = dragAnchor.rect.width
+      const h = dragAnchor.rect.height
+      left = Math.max(0, Math.min(left, window.innerWidth - w))
+      top = Math.max(0, Math.min(top, window.innerHeight - h))
+      setStart({ x: left, y: top })
+      setCurrent({ x: left + w, y: top + h })
+      return
+    }
+
+    if (dragMode !== 'none' && dragMode !== 'move') {
+      applyResize(p.x, p.y)
+      return
+    }
+
+    if (selecting && start) {
+      setCurrent(p)
+    }
+  }
+
+  const handleMouseUp = () => {
+    if (dragMode !== 'none') {
+      setDragMode('none')
+      setDragAnchor(null)
+      if (getRect()) setConfirmed(true)
+      return
+    }
+    if (selecting) {
+      setSelecting(false)
+      if (getRect()) setConfirmed(true)
+      else {
+        setStart(null)
+        setCurrent(null)
+      }
+    }
+  }
+
+  const startHandleDrag = (dir: HandleDir, e: React.MouseEvent) => {
+    e.stopPropagation()
+    e.preventDefault()
+    if (!rect) return
+    setDragMode(dir)
+    setDragAnchor({ x: e.clientX, y: e.clientY, rect })
+  }
 
   const handleCancel = () => {
     void window.api?.cancelOcrSelection()
   }
 
-  // === 渲染 ===
+  const handleReset = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setConfirmed(false)
+    setSelecting(false)
+    setStart(null)
+    setCurrent(null)
+    setDragMode('none')
+    setDragAnchor(null)
+  }
+
+  // 工具栏位置：尽量在选区下方，贴边时翻到上方
+  const toolbarStyle = ((): React.CSSProperties => {
+    if (!rect) return {}
+    const below = rect.top + rect.height + 10
+    const placeBelow = below + 48 < window.innerHeight
+    const top = placeBelow ? below : Math.max(8, rect.top - 48)
+    let left = rect.left + rect.width
+    left = Math.max(12, Math.min(left, window.innerWidth - 12))
+    return { left, top, transform: 'translateX(-100%)' }
+  })()
+
   if (!bgDataUrl) {
     return (
-      <div className="fixed inset-0 bg-black/60 flex items-center justify-center">
-        <div className="text-white text-sm">正在捕获屏幕...</div>
+      <div className="fixed inset-0 bg-gray-900 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-white/90">
+          <div className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          <div className="text-sm">正在捕获屏幕…</div>
+        </div>
       </div>
     )
   }
@@ -253,140 +289,155 @@ export default function ScreenshotOverlay() {
   return (
     <div
       className="fixed inset-0 select-none"
-      style={{ cursor: confirmed ? 'default' : 'crosshair' }}
+      style={{ cursor: selecting || !confirmed ? 'crosshair' : 'default' }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
     >
-      {/* 截图背景 */}
+      {/* 背景：fill 避免 object-cover 裁切导致坐标错位 */}
       <img
         src={bgDataUrl}
-        className="absolute inset-0 w-full h-full object-cover"
+        className="absolute inset-0 w-full h-full"
+        style={{ objectFit: 'fill' }}
         draggable={false}
         alt=""
       />
 
-      {/* 四块暗蒙版（镂空选区） */}
-      {rect && (
+      {/* 暗蒙版镂空 */}
+      {rect ? (
         <>
-          <div className="absolute bg-black/50" style={{ top: 0, left: 0, right: 0, height: rect.top }} />
-          <div className="absolute bg-black/50" style={{ top: rect.top + rect.height, left: 0, right: 0, bottom: 0 }} />
-          <div className="absolute bg-black/50" style={{ top: rect.top, left: 0, width: rect.left, height: rect.height }} />
-          <div className="absolute bg-black/50" style={{ top: rect.top, left: rect.left + rect.width, right: 0, height: rect.height }} />
+          <div className="absolute bg-black/55" style={{ top: 0, left: 0, right: 0, height: rect.top }} />
+          <div
+            className="absolute bg-black/55"
+            style={{ top: rect.top + rect.height, left: 0, right: 0, bottom: 0 }}
+          />
+          <div
+            className="absolute bg-black/55"
+            style={{ top: rect.top, left: 0, width: rect.left, height: rect.height }}
+          />
+          <div
+            className="absolute bg-black/55"
+            style={{
+              top: rect.top,
+              left: rect.left + rect.width,
+              right: 0,
+              height: rect.height
+            }}
+          />
         </>
+      ) : (
+        <div className="absolute inset-0 bg-black/40 pointer-events-none" />
       )}
 
-      {/* 选区边框 */}
+      {/* 选区 */}
       {rect && (
         <div
-          className="absolute border-2 border-blue-500"
+          className="absolute border-2 border-primary"
           style={{
-            left: rect.left, top: rect.top,
-            width: rect.width, height: rect.height,
-            boxShadow: '0 0 0 1px rgba(255,255,255,0.2), inset 0 0 0 1px rgba(255,255,255,0.1)',
-            cursor: dragMode === 'move' ? 'grabbing' : 'grab'
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+            boxShadow: '0 0 0 1px rgba(255,255,255,0.35), 0 0 0 9999px rgba(0,0,0,0.001)',
+            cursor: confirmed ? (dragMode === 'move' ? 'grabbing' : 'grab') : 'crosshair'
           }}
         >
-          {/* 尺寸标签（框选时显示） */}
-          {!confirmed && (
-            <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-blue-500 text-white text-xs px-2 py-0.5 rounded whitespace-nowrap shadow">
-              {Math.round(rect.width)} × {Math.round(rect.height)}
-            </div>
-          )}
+          <div className="absolute -top-7 left-0 bg-primary text-white text-[11px] px-2 py-0.5 rounded shadow font-medium tabular-nums">
+            {Math.round(rect.width)} × {Math.round(rect.height)}
+          </div>
 
-          {/* 8 点缩放把手（确认模式） */}
-          {confirmed && (
-            <>
-              {(['nw', 'n', 'ne', 'w', 'e', 'sw', 's', 'se'] as HandleDir[]).map((dir) => {
-                const style: React.CSSProperties = {
-                  position: 'absolute',
-                  width: HANDLE_SIZE, height: HANDLE_SIZE,
-                  background: '#fff',
-                  border: '2px solid #3b82f6',
-                  borderRadius: dir.length === 2 ? '2px' : '2px',
-                  cursor: `${dir}-resize`,
-                  zIndex: 10,
-                  transform: 'translate(-50%, -50%)'
-                }
-                if (dir.includes('n')) style.top = 0
-                if (dir.includes('s')) style.top = '100%'
-                if (!dir.includes('n') && !dir.includes('s')) style.top = '50%'
-                if (dir.includes('w')) style.left = 0
-                if (dir.includes('e')) style.left = '100%'
-                if (!dir.includes('w') && !dir.includes('e')) style.left = '50%'
-                return (
-                  <div
-                    key={dir}
-                    style={style}
-                    onMouseDown={(e) => startHandleDrag(dir, e)}
-                  />
-                )
-              })}
-            </>
-          )}
+          {confirmed &&
+            (['nw', 'n', 'ne', 'w', 'e', 'sw', 's', 'se'] as HandleDir[]).map((dir) => {
+              const style: React.CSSProperties = {
+                position: 'absolute',
+                width: HANDLE_SIZE,
+                height: HANDLE_SIZE,
+                background: '#fff',
+                border: '2px solid #4F6EF7',
+                borderRadius: 2,
+                cursor: `${dir}-resize`,
+                zIndex: 10,
+                transform: 'translate(-50%, -50%)'
+              }
+              if (dir.includes('n')) style.top = 0
+              if (dir.includes('s')) style.top = '100%'
+              if (!dir.includes('n') && !dir.includes('s')) style.top = '50%'
+              if (dir.includes('w')) style.left = 0
+              if (dir.includes('e')) style.left = '100%'
+              if (!dir.includes('w') && !dir.includes('e')) style.left = '50%'
+              return (
+                <div key={dir} style={style} onMouseDown={(e) => startHandleDrag(dir, e)} />
+              )
+            })}
         </div>
       )}
 
-      {/* 确认工具栏 */}
+      {/* 工具栏 */}
       {confirmed && rect && (
         <div
-          className="absolute flex items-center gap-1 bg-gray-900/90 border border-gray-700 rounded-lg px-1.5 py-1 shadow-xl z-20"
-          style={{
-            left: rect.left + rect.width,
-            top: rect.top + rect.height + 8,
-            transform: 'translateX(-100%)'
-          }}
+          className="absolute flex items-center gap-1 bg-gray-900/95 border border-white/10 rounded-xl px-1.5 py-1 shadow-2xl z-20"
+          style={toolbarStyle}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <button
+            onClick={handleReset}
+            className="p-2 rounded-lg hover:bg-white/10 text-gray-300 hover:text-white transition-colors"
+            title="重新框选"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
+          <button
             onClick={handleCancel}
-            onMouseDown={(e) => e.stopPropagation()}
-            className="p-1.5 rounded-md hover:bg-red-500/20 text-gray-300 hover:text-red-400 transition-colors"
+            className="p-2 rounded-lg hover:bg-red-500/25 text-gray-300 hover:text-red-400 transition-colors"
             title="取消 (Esc)"
           >
             <X className="w-5 h-5" />
           </button>
           <button
-            onClick={handleConfirm}
-            onMouseDown={(e) => e.stopPropagation()}
-            className="p-1.5 rounded-md hover:bg-green-500/20 text-gray-300 hover:text-green-400 transition-colors"
-            title="确认 OCR"
+            onClick={() => void handleConfirm()}
+            disabled={submitting}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary hover:bg-primary-600 text-white text-sm font-medium transition-colors disabled:opacity-50"
+            title="识别文字 (Enter)"
           >
-            <Check className="w-5 h-5" />
+            {submitting ? (
+              <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+            ) : (
+              <Check className="w-4 h-4" />
+            )}
+            识别
           </button>
         </div>
       )}
 
-      {/* 放大镜（框选模式下 + 未确认） */}
+      {/* 放大镜 */}
       {!confirmed && bgImage && (
         <canvas
           ref={magnifierCanvasRef}
           width={MAG_SIZE}
           height={MAG_SIZE}
-          className="absolute rounded-full border-2 border-blue-500 shadow-xl z-30 pointer-events-none"
+          className="absolute rounded-full border-2 border-primary shadow-xl z-30 pointer-events-none"
           style={{
-            left: mousePos.x + 24,
-            top: mousePos.y - MAG_SIZE - 24,
+            left: Math.min(mousePos.x + 20, window.innerWidth - MAG_SIZE - 8),
+            top: Math.max(8, mousePos.y - MAG_SIZE - 20),
             width: MAG_SIZE,
-            height: MAG_SIZE,
-            borderRadius: '50%'
+            height: MAG_SIZE
           }}
         />
       )}
 
-      {/* 顶部提示 */}
-      {!confirmed && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/70 text-white text-sm px-4 py-2 rounded-full pointer-events-none z-20 shadow-lg">
-          点击设定起点 · 移动鼠标扩张选区 · 再次点击确定范围 · Esc 取消
+      {/* 提示 */}
+      <div className="absolute top-5 left-1/2 -translate-x-1/2 pointer-events-none z-20">
+        <div className="bg-black/75 text-white text-sm px-4 py-2 rounded-full shadow-lg backdrop-blur-sm">
+          {submitting
+            ? '正在识别…'
+            : confirmed
+              ? '拖动调整选区 · Enter 识别 · Esc 取消'
+              : selecting
+                ? '松开鼠标完成框选'
+                : '按住拖动框选文字区域 · Esc 取消'}
         </div>
-      )}
-
-      {/* 确认模式顶部提示 */}
-      {confirmed && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-blue-500/90 text-white text-sm px-4 py-2 rounded-full pointer-events-none z-20 shadow-lg">
-          拖动把手调整大小 · 拖动选区内移动 · 点击 ✓ 确认 / ✗ 取消
-        </div>
-      )}
+      </div>
     </div>
   )
 }

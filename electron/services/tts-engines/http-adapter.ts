@@ -14,9 +14,9 @@ import axios from 'axios'
 import { createHash } from 'crypto'
 import { join } from 'path'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
-import { app } from 'electron'
 import type { ITTSAdapter, TTSResult, TTSVoice, TTSEngineConfig } from './adapter'
 import { getProviderVoices, mergeVoices } from './provider-voices'
+import { getDataDir } from '../../ipc/fileHandlers'
 
 export class HttpAdapter implements ITTSAdapter {
   readonly engineId: string
@@ -30,14 +30,17 @@ export class HttpAdapter implements ITTSAdapter {
     this.engineId = config.id
     this.engineName = config.name
 
-    this.cacheDir = join(app.getPath('userData'), '听伴', `cache_${config.id}`)
+    this.cacheDir = join(getDataDir(), `cache_${config.id}`)
     if (!existsSync(this.cacheDir)) {
       mkdirSync(this.cacheDir, { recursive: true })
     }
   }
 
-  private getCacheKey(text: string, voice: string): string {
-    return createHash('md5').update([text, voice, this.config.apiUrl || '', this.engineId].join('|')).digest('hex')
+  private getCacheKey(text: string, voice: string, speed: number): string {
+    // speed 必须进 key，否则改倍速会命中旧语速缓存
+    return createHash('md5')
+      .update([text, voice, speed.toFixed(2), this.config.apiUrl || '', this.engineId].join('|'))
+      .digest('hex')
   }
 
   async synthesize(text: string, voiceId: string, speed: number, _volume: number): Promise<TTSResult> {
@@ -48,7 +51,7 @@ export class HttpAdapter implements ITTSAdapter {
       return { success: false, error: '引擎未配置 API URL', fallback: true }
     }
 
-    const cacheKey = this.getCacheKey(text, voiceId)
+    const cacheKey = this.getCacheKey(text, voiceId, speed)
     const configuredFormat = this.getConfiguredAudioFormat()
     const cachePath = join(this.cacheDir, `${cacheKey}.${configuredFormat}`)
     if (existsSync(cachePath)) {

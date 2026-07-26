@@ -1,0 +1,207 @@
+import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { BookData } from '../src/global'
+import {
+  IngestService,
+  bookContentHash,
+  bookFullContent,
+  bookSourceName,
+  contentHash,
+  isLegacyChapterState
+} from '../electron/services/ai/ingest-service'
+import { IngestScheduler } from '../electron/services/ai/ingest-scheduler'
+import type { NmemBridge, NmemIngestResult, NmemSourceInfo } from '../electron/services/ai/nmem-bridge'
+
+function makeBook(overrides: Partial<BookData> = {}): BookData {
+  const sentences = overrides.sentences || [
+    '第一句关于经济危机。',
+    '第二句关于社会变革。',
+    '第三句关于政治整合。'
+  ]
+  return {
+    id: 'book-1',
+    title: '测试之书',
+    author: '作者',
+    filePath: '',
+    format: 'txt',
+    sentences,
+    chapters: [
+      { title: '第一章', startIndex: 0, sentenceCount: 1 },
+      { title: '第二章', startIndex: 1, sentenceCount: 1 },
+      { title: '第三章', startIndex: 2, sentenceCount: 1 }
+    ],
+    currentChapterIndex: 0,
+    currentSentenceIndex: 0,
+    progressPercent: 0,
+    isCompleted: false,
+    addedAt: '2026-07-27T00:00:00.000Z',
+    lastReadAt: '2026-07-27T00:00:00.000Z',
+    ...overrides
+  }
+}
+
+class FakeNmem {
+  calls: Array<{ content: string; name: string; sourceType: string }> = []
+  sources = new Map<string, NmemSourceInfo>()
+  nextId = 1
+  offline = false
+
+  async checkHealth() {
+    if (this.offline) throw new Error('offline')
+    return { status: 'online' as const, checkedAt: new Date().toISOString() }
+  }
+
+  async ingestContent(input: {
+    content: string
+    name: string
+    sourceType: string
+  }): Promise<NmemIngestResult> {
+    if (this.offline) throw new Error('offline')
+    this.calls.push(input)
+    // 同名同内容视为重复
+    for (const [id, info] of this.sources) {
+      if (info.name === input.name) {
+        return { sourceId: id, isDuplicate: true }
+      }
+    }
+    const id = `src-${this.nextId++}`
+    this.sources.set(id, { id, name: input.name, status: 'ready' })
+    return { sourceId: id, isDuplicate: false }
+  }
+
+  async getSource(sourceId: string): Promise<NmemSourceInfo | null> {
+    return this.sources.get(sourceId) || null
+  }
+
+  async listSources(): Promise<NmemSourceInfo[]> {
+    return [...this.sources.values()]
+  }
+
+  async search(): Promise<never[]> {
+    return []
+  }
+}
+
+async function main(): Promise<void> {
+  console.log('\nWhole-book MDM ingest')
+
+  const book = makeBook()
+  assert.equal(bookSourceName(book), '[bookId=book-1] 测试之书')
+  assert.equal(bookFullContent(book), book.sentences.join('\n'))
+  assert.equal(bookContentHash(book), contentHash(book.sentences.join('\n')))
+  console.log('  ok builds stable whole-book source name and content hash')
+
+  // 整本只打一次 ingest，不按 3 章拆分
+  {
+    const nmem = new FakeNmem()
+    const ingest = new IngestService(nmem as unknown as NmemBridge)
+    const state = await ingest.ingestWholeBook(book)
+    assert.equal(nmem.calls.length, 1)
+    assert.equal(nmem.calls[0].name, '[bookId=book-1] 测试之书')
+    assert.equal(nmem.calls[0].content, book.sentences.join('\n'))
+    assert.equal(state.status, 'searchable')
+    assert.ok(state.sourceId)
+    console.log('  ok uploads the whole book as a single source (not per chapter)')
+  }
+
+  // 调度器：内容未变时第二次 tryIngest 不重复上传
+  {
+    const root = mkdtempSync(join(tmpdir(), 'ting-ear-ingest-'))
+    try {
+      const nmem = new FakeNmem()
+      const ingest = new IngestService(nmem as unknown as NmemBridge)
+      const logs: string[] = []
+      const scheduler = new IngestScheduler(
+        () => root,
+        nmem as unknown as NmemBridge,
+        ingest,
+        () => [book],
+        (_level, msg) => logs.push(msg)
+      )
+
+      assert.equal(await scheduler.tryIngest(book), true)
+      assert.equal(nmem.calls.length, 1)
+
+      assert.equal(await scheduler.tryIngest(book), true)
+      assert.equal(nmem.calls.length, 1, 'second tryIngest must not re-upload')
+      assert.ok(logs.some((l) => l.includes('跳过')))
+
+      // syncAll 默认也应跳过
+      const result = await scheduler.syncAll()
+      assert.equal(nmem.calls.length, 1)
+      assert.equal(result.skipped, 1)
+      assert.equal(result.synced, 0)
+      console.log('  ok skips re-upload when content hash is unchanged')
+
+      // force 才重传
+      const forced = await scheduler.syncAll({ force: true })
+      assert.equal(nmem.calls.length, 2)
+      assert.equal(forced.synced, 1)
+      // 同名 → isDuplicate，但仍算成功
+      console.log('  ok force sync re-uploads only when requested')
+
+      // 状态文件应是整本格式，无 chapters 字段
+      const statusPath = join(root, 'ingest-status.json')
+      assert.ok(existsSync(statusPath))
+      const saved = JSON.parse(readFileSync(statusPath, 'utf-8'))
+      assert.equal(typeof saved['book-1'].contentHash, 'string')
+      assert.equal(saved['book-1'].chapters, undefined)
+      console.log('  ok persists whole-book status without chapter map')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  // 旧按章状态会被识别并触发整本迁移
+  {
+    const root = mkdtempSync(join(tmpdir(), 'ting-ear-ingest-legacy-'))
+    try {
+      writeFileSync(
+        join(root, 'ingest-status.json'),
+        JSON.stringify({
+          'book-1': {
+            updatedAt: '2026-01-01T00:00:00.000Z',
+            chapters: {
+              '0': {
+                sourceId: 'old-0',
+                contentHash: 'aaa',
+                status: 'searchable',
+                updatedAt: '2026-01-01T00:00:00.000Z'
+              },
+              '1': {
+                sourceId: 'old-1',
+                contentHash: 'bbb',
+                status: 'searchable',
+                updatedAt: '2026-01-01T00:00:00.000Z'
+              }
+            }
+          }
+        }),
+        'utf-8'
+      )
+      const nmem = new FakeNmem()
+      const ingest = new IngestService(nmem as unknown as NmemBridge)
+      const scheduler = new IngestScheduler(
+        () => root,
+        nmem as unknown as NmemBridge,
+        ingest,
+        () => [book],
+        () => undefined
+      )
+      const loaded = scheduler.loadStatus()['book-1']
+      assert.ok(isLegacyChapterState(loaded))
+      assert.equal(await scheduler.tryIngest(book), true)
+      assert.equal(nmem.calls.length, 1)
+      assert.equal(nmem.calls[0].content, book.sentences.join('\n'))
+      console.log('  ok migrates legacy per-chapter status to one whole-book upload')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  console.log('Whole-book MDM ingest result: 6 passed')
+}
+
+void main()

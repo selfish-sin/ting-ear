@@ -151,11 +151,14 @@ export async function listModels(config: AiLlmSettings): Promise<string[]> {
 
 function contentFromData(data: string): string | null {
   if (!data || data === '[DONE]') return null
+  // SSE 注释行 / keep-alive，忽略
+  if (data.startsWith(':')) return null
   let parsed: unknown
   try {
     parsed = JSON.parse(data)
   } catch {
-    throw new AiServiceError('invalid_response', '模型返回了无法解析的流式数据')
+    // 部分供应商会夹杂非 JSON 心跳，跳过而不是整段失败
+    return null
   }
 
   const error = (parsed as { error?: unknown }).error
@@ -167,9 +170,25 @@ function contentFromData(data: string): string | null {
     throw new AiServiceError('model_error', `模型服务返回错误：${message}`)
   }
 
-  const content = (parsed as { choices?: Array<{ delta?: { content?: unknown } }> }).choices?.[0]?.delta
-    ?.content
-  return typeof content === 'string' ? content : null
+  const choice = (parsed as {
+    choices?: Array<{
+      delta?: { content?: unknown }
+      message?: { content?: unknown }
+      text?: unknown
+    }>
+  }).choices?.[0]
+  const fromDelta = choice?.delta?.content
+  if (typeof fromDelta === 'string') return fromDelta
+  const fromMessage = choice?.message?.content
+  if (typeof fromMessage === 'string') return fromMessage
+  if (typeof choice?.text === 'string') return choice.text
+  return null
+}
+
+export interface StreamChatOptions {
+  tools?: unknown[]
+  /** 限制输出长度；大纲等结构化任务建议显式设置，避免默认过短被截断 */
+  maxTokens?: number
 }
 
 async function* requestModel(
@@ -177,12 +196,14 @@ async function* requestModel(
   messages: AiPromptMessage[],
   signal: AbortSignal,
   model: string,
-  tools?: unknown[]
+  options?: StreamChatOptions
 ): AsyncGenerator<string> {
   if (useElectronProxyTransport()) {
-    yield* requestModelViaAxios(config, messages, signal, model, tools)
+    yield* requestModelViaAxios(config, messages, signal, model, options)
     return
   }
+  const tools = options?.tools
+  const maxTokens = options?.maxTokens
 
   const controller = new AbortController()
   const onAbort = () => controller.abort()
@@ -209,6 +230,7 @@ async function* requestModel(
           messages,
           temperature: config.temperature,
           stream: true,
+          ...(typeof maxTokens === 'number' && maxTokens > 0 ? { max_tokens: maxTokens } : {}),
           ...(tools && tools.length > 0 ? { tools } : {})
         }),
         signal: controller.signal
@@ -285,8 +307,10 @@ async function* requestModelViaAxios(
   messages: AiPromptMessage[],
   signal: AbortSignal,
   model: string,
-  tools?: unknown[]
+  options?: StreamChatOptions
 ): AsyncGenerator<string> {
+  const tools = options?.tools
+  const maxTokens = options?.maxTokens
   const controller = new AbortController()
   const onAbort = () => controller.abort()
   if (signal.aborted) controller.abort()
@@ -310,6 +334,7 @@ async function* requestModelViaAxios(
       messages,
       temperature: config.temperature,
       stream: true,
+      ...(typeof maxTokens === 'number' && maxTokens > 0 ? { max_tokens: maxTokens } : {}),
       ...(tools && tools.length > 0 ? { tools } : {})
     }, {
       headers: {
@@ -372,10 +397,14 @@ export async function* streamChat(
   config: AiLlmSettings,
   messages: AiPromptMessage[],
   signal: AbortSignal,
-  tools?: unknown[]
+  toolsOrOptions?: unknown[] | StreamChatOptions
 ): AsyncGenerator<string> {
+  // 兼容旧调用：第 4 参可以是 tools 数组，也可以是 options
+  const options: StreamChatOptions | undefined = Array.isArray(toolsOrOptions)
+    ? { tools: toolsOrOptions }
+    : toolsOrOptions
   try {
-    yield* requestModel(config, messages, signal, requestModelId(config, config.model), tools)
+    yield* requestModel(config, messages, signal, requestModelId(config, config.model), options)
   } catch (error) {
     if (
       config.fallbackModel &&
@@ -384,7 +413,7 @@ export async function* streamChat(
       error.code === 'model_error' &&
       !signal.aborted
     ) {
-      yield* requestModel(config, messages, signal, requestModelId(config, config.fallbackModel), tools)
+      yield* requestModel(config, messages, signal, requestModelId(config, config.fallbackModel), options)
       return
     }
     throw error

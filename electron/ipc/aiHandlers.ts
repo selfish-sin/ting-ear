@@ -88,8 +88,12 @@ export function registerAiHandlers(settingsService: SettingsService, logService:
     const book = normalizeBookData(value)
     if (!book) return { success: false, error: '书籍数据无效' }
     try {
+      // 整本一次上传（不再按章拆分，避免 MDM 重复堆源）
       const result = await ingest.ingestBook(book)
-      logService.info('AI', `知识库导入完成: ${book.title}，新增 ${result.ingested} 章，重复 ${result.duplicates} 章`)
+      logService.info(
+        'AI',
+        `知识库整本导入完成: ${book.title}，提交 ${result.ingested}，跳过 ${result.skipped}`
+      )
       return { success: true, ...result }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -113,6 +117,7 @@ export function registerAiHandlers(settingsService: SettingsService, logService:
   // === AI 大纲生成 ===
   const outlineGen = new OutlineGenerator({
     getSettings: () => resolveEngine(mergeAiSettings(settingsService.get().ai), 'outline'),
+    getOutlineSystemPrompt: () => mergeAiSettings(settingsService.get().ai).chat.outlineSystemPrompt,
     getDataDir,
     cache: false,
     onProgress: (chapterIndex, total) => {
@@ -171,15 +176,23 @@ export function registerAiHandlers(settingsService: SettingsService, logService:
   ipcMain.handle('ai:outline:generate', async (_event, rawRequest: unknown) => {
     const request = normalizeOutlineRequest(rawRequest)
     if (!request) return { success: false, error: '大纲请求参数无效' }
+    const force =
+      Boolean(rawRequest && typeof rawRequest === 'object' && (rawRequest as { force?: unknown }).force)
     const resolved = resolveCanonicalOutlineInput(getDataDir(), request)
     if (!resolved.input) return { success: false, error: resolved.error }
     const input = resolved.input
     const contentHash = hashSentences(input.sentences)
     const previous = getOutlineRepository().load(input.bookId, input.chapterKey, contentHash)
-    if (previous?.status === 'generated' || previous?.status === 'short_chapter') {
+    // 用户点「重新生成」时 force=true，必须真正重跑；否则可直接返回缓存
+    if (
+      !force &&
+      (previous?.status === 'generated' || previous?.status === 'short_chapter')
+    ) {
       return { success: true, record: previous }
     }
     try {
+      const engineConfig = resolveEngine(mergeAiSettings(settingsService.get().ai), 'outline')
+      logService.info('AI', `大纲引擎: ${engineConfig.baseUrl} | 模型: ${engineConfig.model}`)
       const outline = await outlineGenerationQueue.enqueue(() => outlineGen.generateChapter(
         input.bookId,
         input.sentences,

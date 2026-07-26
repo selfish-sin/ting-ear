@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState, useRef } from 'react'
 import {
   ScrollText,
   Trash2,
-  RefreshCw,
   Search,
   ChevronDown
 } from 'lucide-react'
 import { useLogStore } from '../stores/logStore'
+import type { LogEntry } from '../global'
 
 interface LogsViewProps {
   showToast: (type: 'success' | 'error' | 'warning' | 'info', message: string) => void
@@ -19,21 +19,45 @@ const LEVEL_CSS = {
   DEBUG: 'text-gray-400 dark:text-gray-500'
 }
 
+/** 原始即时日志行：HH:mm:ss.SSS [LEVEL] source: message | details */
+export function formatRawLogLine(log: LogEntry): string {
+  const d = new Date(log.timestamp)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  const ms = String(d.getMilliseconds()).padStart(3, '0')
+  let line = `${hh}:${mm}:${ss}.${ms} [${log.level}] ${log.source}: ${log.message}`
+  if (log.details) line += ` | ${log.details}`
+  if (log.context && Object.keys(log.context).length > 0) {
+    try {
+      line += ` | ${JSON.stringify(log.context)}`
+    } catch {
+      /* ignore */
+    }
+  }
+  return line
+}
+
 export default function LogsView({ showToast }: LogsViewProps) {
   const { logs, loadLogs, clearLogs, levelFilter, setLevelFilter, searchKeyword, setSearchKeyword, getFilteredLogs } =
     useLogStore()
   const [autoScroll, setAutoScroll] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const prevLenRef = useRef(0)
 
-  useEffect(() => { loadLogs() }, [loadLogs])
+  // 进入页时拉一次磁盘快照；之后只靠主进程实时推送 appendLog
+  useEffect(() => {
+    void loadLogs()
+  }, [loadLogs])
 
-  // Auto-scroll to bottom when new entries arrive
+  // 新日志到达时滚到底（原始 tail -f 体验）
   useEffect(() => {
     if (!autoScroll || !scrollRef.current) return
+    if (logs.length === prevLenRef.current && prevLenRef.current !== 0) return
+    prevLenRef.current = logs.length
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight
   }, [logs, autoScroll])
 
-  // Track manual scroll — if user scrolls up, disable auto-scroll
   const handleScroll = () => {
     if (!scrollRef.current) return
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current
@@ -41,8 +65,8 @@ export default function LogsView({ showToast }: LogsViewProps) {
   }
 
   const filteredLogs = getFilteredLogs()
-  // Store sorts newest-first; we reverse for bottom-up chronological display
-  const displayLogs = [...filteredLogs].reverse()
+  // store 新→旧；显示改为旧→新（底部最新，像终端）
+  const displayLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs])
 
   const stats = useMemo(() => {
     const counts = { ERROR: 0, WARN: 0, INFO: 0, DEBUG: 0 }
@@ -57,14 +81,9 @@ export default function LogsView({ showToast }: LogsViewProps) {
 
   const handleClear = () => {
     if (confirm('确定要清空所有日志吗？')) {
-      clearLogs()
+      void clearLogs()
       showToast('success', '日志已清空')
     }
-  }
-
-  const fmt = (iso: string) => {
-    const d = new Date(iso)
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
   }
 
   const levels = [
@@ -97,42 +116,44 @@ export default function LogsView({ showToast }: LogsViewProps) {
         <div className="flex-1 relative max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
-            type="text" placeholder="搜索日志" value={searchKeyword}
+            type="text"
+            placeholder="搜索日志"
+            value={searchKeyword}
             onChange={(e) => setSearchKeyword(e.target.value)}
             className="w-full pl-9 pr-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/30"
           />
         </div>
         <div className="flex-1" />
+        <span className="text-[10px] text-emerald-600 dark:text-emerald-400 tabular-nums" title="主进程实时推送">
+          ● LIVE
+        </span>
         <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
           <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
           自动滚动
         </label>
-        <button onClick={() => loadLogs()} className="p-1.5 text-gray-400 hover:text-primary rounded" title="刷新">
-          <RefreshCw className="w-4 h-4" />
-        </button>
         <button onClick={handleClear} className="p-1.5 text-gray-400 hover:text-red-500 rounded" title="清空日志">
           <Trash2 className="w-4 h-4" />
         </button>
       </div>
 
-      {/* Log body: raw plain-text lines */}
+      {/* 原始即时日志：纯文本行，新日志实时追加 */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto font-mono text-[11px] leading-relaxed px-4 py-2 select-text"
+        data-raw-log-stream="true"
+        className="flex-1 overflow-y-auto font-mono text-[11px] leading-relaxed px-3 py-2 select-text bg-gray-50/50 dark:bg-black/20"
         style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
       >
-        {filteredLogs.length === 0 ? (
+        {displayLogs.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-gray-400">
             <ScrollText className="w-12 h-12 mb-3 opacity-30" />
             <p className="text-sm">暂无日志</p>
+            <p className="mt-1 text-[11px] text-gray-400">新日志会即时出现在这里</p>
           </div>
         ) : (
           displayLogs.map((log) => (
-            <div key={log.id} className={LEVEL_CSS[log.level]}>
-              <span className="text-gray-400 dark:text-gray-500">{fmt(log.timestamp)}</span>
-              {' ['}<span className="font-semibold">{log.level}</span>{'] '}
-              {log.source}: {log.message}
+            <div key={log.id} className={LEVEL_CSS[log.level]} data-log-id={log.id}>
+              {formatRawLogLine(log)}
             </div>
           ))
         )}

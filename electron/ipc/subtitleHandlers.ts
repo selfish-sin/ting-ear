@@ -51,15 +51,6 @@ function sendToMain(channel: string, ...args: unknown[]): void {
   getMainWindow()?.webContents.send(channel, ...args)
 }
 
-/** 获取字幕窗口所在显示器 */
-function getDisplayForWindow(win: BrowserWindow): Electron.Display {
-  const bounds = win.getBounds()
-  return (
-    screen.getDisplayMatching({ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }) ??
-    screen.getPrimaryDisplay()
-  )
-}
-
 /** 创建字幕窗口 */
 function createSubtitleWindow(logService: LogService): BrowserWindow {
   const display = screen.getPrimaryDisplay()

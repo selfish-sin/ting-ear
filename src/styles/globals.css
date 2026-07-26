@@ -2,8 +2,42 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom scrollbar — 悬停浮现 (macOS 风格) */
-/* 默认：占位但完全透明，视觉上"看不见"滚动条 */
+/* ── Base ── */
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+    color: #1e293b;
+    background: #f8f9fc;
+  }
+
+  .dark body,
+  html.dark body {
+    color: #e8eaef;
+    background: #1c1f28;
+  }
+
+  /* 选中文本 */
+  ::selection {
+    background: rgba(79, 110, 247, 0.22);
+    color: inherit;
+  }
+
+  :focus-visible {
+    outline: 2px solid rgba(79, 110, 247, 0.72);
+    outline-offset: 2px;
+  }
+}
+
+/* ── Scrollbar：悬停浮现 ── */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -20,37 +54,34 @@
   transition: background-color 0.2s ease;
 }
 .dark ::-webkit-scrollbar-thumb {
-  background: rgba(156, 163, 175, 0);
+  background: rgba(148, 163, 184, 0);
 }
-/* 悬停到任意可滚动区域 → 滚动条浮现 + 轻微展开 (8px → 11px) */
 :hover::-webkit-scrollbar {
-  width: 11px;
-  height: 11px;
+  width: 10px;
+  height: 10px;
 }
 :hover::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.45);
+  background: rgba(148, 163, 184, 0.4);
 }
 .dark :hover::-webkit-scrollbar-thumb {
-  background: rgba(156, 163, 175, 0.5);
+  background: rgba(148, 163, 184, 0.35);
 }
-/* 鼠标移到滚动条本身（准备拖动）→ 更实，明确可操作 */
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(100, 116, 139, 0.7);
+  background: rgba(100, 116, 139, 0.65);
 }
 .dark ::-webkit-scrollbar-thumb:hover {
-  background: rgba(203, 213, 225, 0.7);
+  background: rgba(203, 213, 225, 0.55);
 }
 
-/* Sentence highlight animation */
+/* ── 当前句高亮 ── */
 .sentence-enter {
-  animation: sentenceFadeIn 0.3s ease-out;
+  animation: sentenceFadeIn 0.28s ease-out;
 }
 @keyframes sentenceFadeIn {
-  from { opacity: 0.6; }
+  from { opacity: 0.55; }
   to { opacity: 1; }
 }
 
-/* Pulse glow for currently playing sentence — opacity-only animation (GPU composited) */
 .sentence-active {
   position: relative;
 }
@@ -58,26 +89,26 @@
   content: '';
   position: absolute;
   inset: 0;
-  border-radius: 0.375rem;
-  box-shadow: 0 0 12px rgba(59, 130, 246, 0.45);
+  border-radius: 0.5rem;
+  box-shadow: 0 0 0 1px rgba(79, 110, 247, 0.2), 0 0 20px rgba(79, 110, 247, 0.18);
   pointer-events: none;
-  animation: sentenceGlow 2.5s ease-in-out infinite;
+  animation: sentenceGlow 2.8s ease-in-out infinite;
 }
 @keyframes sentenceGlow {
-  0%, 100% { opacity: 0.3; }
+  0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
 
-/* Play button animation */
+/* ── 按钮轻弹 ── */
 .btn-bounce {
-  animation: btnBounce 0.2s ease-out;
+  animation: btnBounce 0.22s cubic-bezier(0.34, 1.4, 0.64, 1);
 }
 @keyframes btnBounce {
-  0% { transform: scale(0.85); }
+  0% { transform: scale(0.88); }
   100% { transform: scale(1); }
 }
 
-/* Drag region */
+/* ── 标题栏拖拽 ── */
 .titlebar-drag {
   -webkit-app-region: drag;
 }
@@ -85,32 +116,32 @@
   -webkit-app-region: no-drag;
 }
 
-/* Toast animation */
+/* ── Toast ── */
 .toast-enter {
-  animation: toastSlideIn 0.3s ease-out;
+  animation: toastSlideIn 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .toast-exit {
-  animation: toastSlideOut 0.3s ease-in forwards;
+  animation: toastSlideOut 0.25s ease-in forwards;
 }
 @keyframes toastSlideIn {
-  from { transform: translateX(100%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+  from { transform: translateY(-8px) translateX(12px); opacity: 0; }
+  to { transform: translateY(0) translateX(0); opacity: 1; }
 }
 @keyframes toastSlideOut {
-  from { transform: translateX(0); opacity: 1; }
-  to { transform: translateX(100%); opacity: 0; }
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(-6px); opacity: 0; }
 }
 
-/* Player OSD (speed / volume feedback) */
+/* ── 播放 OSD ── */
 .osd-enter {
-  animation: osdPop 0.18s ease-out;
+  animation: osdPop 0.2s cubic-bezier(0.34, 1.4, 0.64, 1);
 }
 @keyframes osdPop {
-  from { transform: scale(0.85); opacity: 0; }
+  from { transform: scale(0.88); opacity: 0; }
   to { transform: scale(1); opacity: 1; }
 }
 
-/* Marquee for floating ball */
+/* ── 悬浮球跑马灯 ── */
 .marquee {
   animation: marquee 8s linear infinite;
 }
@@ -119,18 +150,17 @@
   100% { transform: translateX(-100%); }
 }
 
-/* Spinner (loading indicator) */
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
 
-/* Range slider styling */
+/* ── Range / 进度滑块 ── */
 input[type='range'] {
   -webkit-appearance: none;
   appearance: none;
   height: 4px;
   background: #e2e8f0;
-  border-radius: 2px;
+  border-radius: 9999px;
   outline: none;
 }
 input[type='range']::-webkit-slider-thumb {
@@ -138,17 +168,172 @@ input[type='range']::-webkit-slider-thumb {
   appearance: none;
   width: 14px;
   height: 14px;
-  background: #3b82f6;
+  background: #4f6ef7;
   border-radius: 50%;
   cursor: pointer;
+  box-shadow: 0 1px 4px rgba(79, 110, 247, 0.35);
+  transition: transform 0.15s ease;
+}
+input[type='range']::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
 }
 .dark input[type='range'] {
-  background: #4b5563;
+  background: #2a3142;
 }
 
-body {
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+/* ── 通用工具类 ── */
+@layer components {
+  .app-panel {
+    @apply bg-white dark:bg-dark-surface;
+  }
+
+  .app-divider {
+    @apply border-gray-100/90 dark:border-dark-border;
+  }
+
+  .icon-btn {
+    @apply w-8 h-8 rounded-xl flex items-center justify-center
+      text-gray-500 dark:text-gray-400
+      hover:text-gray-800 dark:hover:text-gray-100
+      hover:bg-gray-100/90 dark:hover:bg-white/5
+      transition-all duration-150;
+  }
+
+  .icon-btn-sm {
+    @apply w-7 h-7 rounded-lg flex items-center justify-center
+      text-gray-500 dark:text-gray-400
+      hover:text-gray-800 dark:hover:text-gray-100
+      hover:bg-gray-100/90 dark:hover:bg-white/5
+      transition-all duration-150;
+  }
+
+  .nav-item {
+    @apply flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium
+      transition-all duration-150;
+  }
+
+  .nav-item-active {
+    @apply bg-primary/10 text-primary dark:bg-primary/15 dark:text-primary-300 shadow-none;
+  }
+
+  .nav-item-idle {
+    @apply text-gray-600 dark:text-gray-400
+      hover:bg-gray-100/80 dark:hover:bg-white/[0.04]
+      hover:text-gray-900 dark:hover:text-gray-100;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium
+      transition-colors duration-150;
+  }
+
+  .chip-active {
+    @apply bg-primary text-white shadow-soft;
+  }
+
+  .chip-idle {
+    @apply text-gray-600 dark:text-gray-300 bg-gray-100/70 dark:bg-white/[0.04]
+      hover:bg-gray-200/80 dark:hover:bg-white/[0.07];
+  }
+
+  .field-input {
+    @apply w-full rounded-xl border border-gray-200 dark:border-dark-border
+      bg-gray-50/80 dark:bg-dark-muted
+      px-3 py-2 text-sm text-gray-800 dark:text-gray-100
+      placeholder:text-gray-400 dark:placeholder:text-gray-500
+      outline-none
+      focus:border-primary/40 focus:ring-2 focus:ring-primary/15
+      transition-all duration-150;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5
+      px-3.5 py-2 rounded-xl text-sm font-medium
+      bg-primary text-white
+      hover:bg-primary-600 active:bg-primary-700
+      shadow-soft hover:shadow-glow
+      transition-all duration-150
+      disabled:opacity-40 disabled:pointer-events-none;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-1.5
+      px-3.5 py-2 rounded-xl text-sm font-medium
+      bg-gray-100 dark:bg-white/[0.06]
+      text-gray-700 dark:text-gray-200
+      hover:bg-gray-200/90 dark:hover:bg-white/[0.1]
+      transition-all duration-150
+      disabled:opacity-40 disabled:pointer-events-none;
+  }
+
+  .book-card {
+    @apply rounded-2xl bg-white dark:bg-dark-raised
+      border border-gray-100/80 dark:border-dark-border
+      shadow-soft
+      hover:shadow-card hover:border-primary/15 dark:hover:border-primary/25
+      hover:-translate-y-0.5
+      transition-all duration-200 ease-out;
+  }
+
+  .ai-markdown p + p,
+  .ai-markdown p + ul,
+  .ai-markdown p + ol,
+  .ai-markdown ul + p,
+  .ai-markdown ol + p,
+  .ai-markdown pre + p {
+    @apply mt-2;
+  }
+
+  .ai-markdown ul {
+    @apply list-disc pl-5;
+  }
+
+  .ai-markdown ol {
+    @apply list-decimal pl-5;
+  }
+
+  .ai-markdown li + li {
+    @apply mt-1;
+  }
+
+  .ai-markdown pre {
+    @apply my-2 max-w-full overflow-x-auto rounded-lg bg-gray-950 p-3 text-xs leading-5 text-gray-100;
+  }
+
+  .ai-markdown :not(pre) > code {
+    @apply rounded bg-gray-100 px-1 py-0.5 text-xs text-gray-800 dark:bg-white/10 dark:text-gray-100;
+  }
+
+  .ai-markdown blockquote {
+    @apply my-2 border-l-2 border-emerald-500 pl-3 text-gray-500 dark:text-gray-400;
+  }
+
+  .ai-markdown table {
+    @apply my-2 w-full border-collapse text-xs;
+  }
+
+  .ai-markdown th,
+  .ai-markdown td {
+    @apply border border-gray-200 px-2 py-1 text-left dark:border-dark-border;
+  }
+
+  .ai-markdown a {
+    @apply text-primary underline underline-offset-2;
+  }
+}
+
+@keyframes progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

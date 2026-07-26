@@ -12,9 +12,9 @@ export const SHORTCUT_ACTION_LIST: Array<{
   { key: 'nextSentence', label: '下一句', description: '跳到下一句' },
   { key: 'prevChapter', label: '上一章 / 页', description: '翻到上一章或上一页' },
   { key: 'nextChapter', label: '下一章 / 页', description: '翻到下一章或下一页' },
-  { key: 'speedUp', label: '倍速 +', description: '提高朗读倍速（+0.25x）' },
-  { key: 'speedDown', label: '倍速 −', description: '降低朗读倍速（−0.25x）' },
-  { key: 'volumeUp', label: '音量 +', description: '增大音量（+5%）' },
+  { key: 'speedUp', label: '倍速 +', description: '提高朗读倍速（+0.1x）' },
+  { key: 'speedDown', label: '倍速 −', description: '降低朗读倍速（−0.1x）' },
+  { key: 'volumeUp', label: '音量 +', description: '增大音量（+5%，最高 200% 增益）' },
   { key: 'volumeDown', label: '音量 −', description: '减小音量（−5%）' },
   { key: 'resetDefaults', label: '恢复默认', description: '倍速与音量恢复默认（1.0x / 80%）' }
 ]

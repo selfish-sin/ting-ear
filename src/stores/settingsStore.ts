@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { DEFAULT_CLEAN_RULES } from '../cleanRules'
 import { DEFAULT_SHORTCUTS, normalizeShortcuts } from '../shortcuts'
 import type { AppSettings, FloatingBallSettings, ShortcutMap } from '../global'
+import { mergeAiSettings } from '../aiSettings'
 
 const defaultFloatingBall: FloatingBallSettings = {
   enabled: true,
@@ -39,15 +40,6 @@ interface SettingsState {
   saveSettings: () => Promise<void>
 }
 
-function mergeLlmConfigs(
-  defaults: AppSettings['llmConfigs'],
-  loaded?: AppSettings['llmConfigs']
-): AppSettings['llmConfigs'] {
-  // 首次运行（无已存配置）才播种默认预设；之后完全信任用户配置，删除 / 编辑均持久化
-  if (!loaded || !Array.isArray(loaded) || loaded.length === 0) return defaults
-  return loaded
-}
-
 export const defaultSettings: AppSettings = {
   ttsEngine: 'edge',
   qwenApiKey: '',
@@ -61,57 +53,12 @@ export const defaultSettings: AppSettings = {
   floatingBall: defaultFloatingBall,
   theme: 'light',
   fontSize: { body: 16, title: 20 },
-  activeLlmId: 'qwen3.5-4b',
-  llmConfigs: [
-    {
-      id: 'qwen3.5-4b',
-      provider: 'ollama' as const,
-      name: '千问 3.5 4B（本地免费）',
-      baseUrl: 'http://localhost:11434',
-      apiKey: '',
-      model: 'qwen3.5:4b',
-      contextWindow: 32768,
-      maxTokens: 4096,
-      temperature: 0.3
-    },
-    {
-      id: 'deepseek-v4-flash',
-      provider: 'openai' as const,
-      name: 'DeepSeek V4 Flash（云端）',
-      baseUrl: 'https://api.deepseek.com/v1',
-      apiKey: '',
-      model: 'deepseek-chat',
-      contextWindow: 1000000,
-      maxTokens: 8192,
-      temperature: 0.3
-    },
-    {
-      id: 'glm-4.5-air',
-      provider: 'openai' as const,
-      name: '智谱 GLM-4.5 Air（云端）',
-      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-      apiKey: '',
-      model: 'glm-4.5-air',
-      contextWindow: 131072,
-      maxTokens: 4096,
-      temperature: 0.3
-    }
-  ],
-  cleanPrompt: `你是一个专业的文档清洗助手。请对以下文档片段执行清洗：
-
-规则：
-1. 删除页码与期号：如"第X页""Page X""12/345""- X -"纯数字页码行、"年第X期""总第X期""N o.""No."等
-2. 删除页眉页脚：仅当期刊名/章节名/作者名/卷期信息单独成行且重复出现时删除
-3. 合并被硬换行打断的不完整段落（非句末标点结尾的行与下一行合并）
-4. 半角标点转全角（,→， .→。 ;→； :→：）
-5. 删除单词内部多余空格（含中英文：把 "J o u r n a l" 合并为 "Journal"，"福 建" 合并为 "福建"），保留单词之间的正常空格
-6. 删除连续3个以上空行
-7. 仅删除真正的乱码：显示为方块（■/）、Unicode 私用区字符、完全无法识别的符号。保留正常外文术语、人名、参考文献中的英文
-8. 保留原文段落结构，不要因句号/问号/感叹号强行换行，不要限制单句长度
-
-严禁：添加正文内容、删除正文语义、改写原文表达、输出任何解释。只返回清洗后的纯文本。`,
   cleanRules: DEFAULT_CLEAN_RULES,
-  shortcuts: DEFAULT_SHORTCUTS
+  shortcuts: DEFAULT_SHORTCUTS,
+  dataDir: '',
+  dataDirHistory: [],
+  autoResume: true,
+  ai: mergeAiSettings()
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -201,14 +148,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             ...(((loaded as AppSettings).floatingBall as FloatingBallSettings | undefined)?.position || {})
           }
         }
+        const loadedSettings = loaded as AppSettings
         set({
           settings: {
             ...defaultSettings,
-            ...loaded,
+            ...loadedSettings,
             floatingBall: mergedFloatingBall,
-            shortcuts: normalizeShortcuts((loaded as AppSettings).shortcuts),
-            // 确保默认模型不被旧配置覆盖
-            llmConfigs: mergeLlmConfigs(defaultSettings.llmConfigs, (loaded as AppSettings).llmConfigs) as AppSettings['llmConfigs']
+            shortcuts: normalizeShortcuts(loadedSettings.shortcuts),
+            cleanRules:
+              loadedSettings.cleanRules && loadedSettings.cleanRules.length > 0
+                ? loadedSettings.cleanRules
+                : DEFAULT_CLEAN_RULES,
+            ai: mergeAiSettings(loadedSettings.ai)
           }
         })
         // Apply window settings

@@ -45,20 +45,26 @@ interface OutlineCache {
 /** 缓存格式版本——升级时旧缓存自动失效 */
 const CACHE_VERSION = 2
 
-const OUTLINE_PROMPT = `你是一个文本论证结构分析助手。给定一章的文本（按句子编号），请分析其论证结构，划分为若干段落单元。
+/** 默认大纲提示词（设置可覆盖）；强制简体中文 + 逻辑先后 */
+export const DEFAULT_OUTLINE_SYSTEM_PROMPT = `你是文本结构分析助手。根据一章中带编号的句子，把「本部分」划分成有逻辑先后关系的论述小节。
 
-要求：
-- 每单元 10~30 句为宜，按论证逻辑切分（前提→推理→结论），不是简单话题切分
-- title：简短标题（≤15字），概括该段论证主题
-- point：该段的核心论点或主张（一两句话，≤60字），说明作者在此论证了什么
-- 严格返回 JSON 数组，无其他文字：
-[{"title":"标题","startOffset":起始句编号,"point":"核心论点"}]
+规则：
+- 只返回 2～4 个小节（最多 4 个）
+- 各小节必须按论述推进排序（如：背景→展开→转折→结论），前后有逻辑承接，禁止无序主题堆砌
+- title、point 必须使用简体中文（专有名词可保留原文并配中文）
+- title ≤10 个汉字；point 可选，≤20 字
+- 只输出完整 JSON 数组，不要 markdown、不要解释：
+[{"title":"...","startOffset":0,"point":"..."}]
+- startOffset = 括号中的绝对句号，如 [26] → 26
+- 必须闭合每个字符串/对象和最外层数组 ]，禁止半截 JSON`
 
-startOffset 是句子在输入中的编号（从0开始）。第一个元素的 startOffset 必须为 0。`
+const OUTLINE_PROMPT = DEFAULT_OUTLINE_SYSTEM_PROMPT
 
-/** 分块大小（字符数）和重叠 */
-const CHUNK_SIZE = 12000
-const CHUNK_OVERLAP = 500
+/** 分块更小：输入短 → 模型输出更短，更不易截断 */
+const CHUNK_SIZE = 5000
+const CHUNK_OVERLAP = 300
+/** 输出 token 上限（短 JSON 足够；过大时部分供应商反而易截断） */
+const OUTLINE_MAX_TOKENS = 2048
 
 function hashContent(sentences: string[]): string {
   return createHash('sha256').update(sentences.join('\n')).digest('hex').slice(0, 16)
@@ -89,30 +95,57 @@ function saveCachedOutline(dataDir: string, bookId: string, contentHash: string,
 }
 
 /** 收集流式响应为完整文本 */
-async function collectStream(config: AiLlmSettings, messages: Array<{ role: 'system' | 'user'; content: string }>): Promise<string> {
+async function collectStream(
+  config: AiLlmSettings,
+  messages: Array<{ role: 'system' | 'user'; content: string }>,
+  signal?: AbortSignal,
+  maxTokens?: number
+): Promise<string> {
   const controller = new AbortController()
-  let result = ''
-  const gen = streamChat(config, messages, controller.signal)
-  for await (const chunk of gen) {
-    result += chunk
+  const onAbort = () => controller.abort()
+  if (signal?.aborted) controller.abort()
+  else signal?.addEventListener('abort', onAbort, { once: true })
+  try {
+    let result = ''
+    const gen = streamChat(config, messages, controller.signal, {
+      maxTokens: maxTokens ?? OUTLINE_MAX_TOKENS
+    })
+    for await (const chunk of gen) {
+      result += chunk
+    }
+    return result
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
   }
-  return result
 }
 
-/** 带 429 重试的 collectStream（指数退避，最多 3 次） */
+/** 可重试的瞬时错误：限流 / 空正文 / 网络抖动 */
+function isRetryableOutlineError(err: unknown): boolean {
+  if (!(err instanceof AiServiceError)) return false
+  return (
+    err.code === 'rate_limited' ||
+    err.code === 'network_error' ||
+    err.code === 'timeout' ||
+    (err.code === 'invalid_response' && /未包含有效正文|无法解析的流式数据/.test(err.message))
+  )
+}
+
+/** 带重试的 collectStream（限流/空响应/网络错误会退避重试） */
 async function collectStreamWithRetry(
   config: AiLlmSettings,
   messages: Array<{ role: 'system' | 'user'; content: string }>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maxTokens?: number
 ): Promise<string> {
   const maxRetries = 3
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await collectStream(config, messages)
+      return await collectStream(config, messages, signal, maxTokens)
     } catch (err) {
-      const isRateLimit = err instanceof AiServiceError && err.code === 'rate_limited'
-      if (!isRateLimit || attempt === maxRetries || signal?.aborted) throw err
-      const waitMs = 5000 * Math.pow(2, attempt)
+      if (!isRetryableOutlineError(err) || attempt === maxRetries || signal?.aborted) throw err
+      const waitMs = err instanceof AiServiceError && err.code === 'rate_limited'
+        ? 5000 * Math.pow(2, attempt)
+        : 1200 * (attempt + 1)
       await delay(waitMs, signal)
     }
   }
@@ -124,34 +157,137 @@ export function getLastOutlineParseError(): { raw: string; reason: string } | nu
   return lastParseError
 }
 
+/** 从 start 位置的 `{` 找到匹配的 `}`（正确处理字符串转义）；截断则返回 -1 */
+export function findMatchingBrace(source: string, start: number): number {
+  if (source[start] !== '{') return -1
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i]
+    if (inString) {
+      if (escape) {
+        escape = false
+        continue
+      }
+      if (ch === '\\') {
+        escape = true
+        continue
+      }
+      if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === '{') depth += 1
+    else if (ch === '}') {
+      depth -= 1
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+function normalizeSectionItem(item: {
+  title?: unknown
+  startOffset?: unknown
+  point?: unknown
+}): OutlineSection | null {
+  if (typeof item.title !== 'string' || item.startOffset == null) return null
+  const startOffset = Math.floor(Number(item.startOffset))
+  if (!Number.isFinite(startOffset)) return null
+  return {
+    title: String(item.title).trim(),
+    startOffset,
+    point: typeof item.point === 'string' && item.point.trim() ? item.point.trim() : undefined
+  }
+}
+
+/**
+ * 从截断/损坏的模型输出中抢救已完整的大纲对象。
+ * 例如数组末尾对象写到一半被 max_tokens 截断时，前面完整的 `{...}` 仍可保留。
+ */
+export function salvageOutlineObjects(raw: string): OutlineSection[] {
+  const text = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '')
+  const sections: OutlineSection[] = []
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{') continue
+    const end = findMatchingBrace(text, i)
+    if (end < 0) break // 后续对象已截断，停止
+    const slice = text.slice(i, end + 1)
+    try {
+      const parsed = JSON.parse(slice) as {
+        title?: unknown
+        startOffset?: unknown
+        point?: unknown
+      }
+      const section = normalizeSectionItem(parsed)
+      if (section && section.title) sections.push(section)
+    } catch {
+      // 非大纲对象，跳过
+    }
+    i = end
+  }
+  return sections.sort((a, b) => a.startOffset - b.startOffset)
+}
+
 export function parseOutlineSections(raw: string): OutlineSection[] {
+  lastParseError = null
   // 去掉 markdown 代码块包裹
   const text = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim()
 
-  const match = text.match(/\[[\s\S]*\]/)
-  if (!match) {
-    lastParseError = { raw: raw.slice(0, 500), reason: '未找到 JSON 数组' }
-    return []
-  }
-  try {
-    const parsed = JSON.parse(match[0]) as Array<{ title?: unknown; startOffset?: unknown; point?: unknown }>
-    const sections = parsed
-      .filter((item) => typeof item.title === 'string' && item.startOffset != null)
-      .map((item) => ({
-        title: String(item.title),
-        startOffset: Math.floor(Number(item.startOffset)),
-        point: typeof item.point === 'string' && item.point.trim() ? item.point.trim() : undefined
-      }))
-      .filter((item) => Number.isFinite(item.startOffset))
-      .sort((a, b) => a.startOffset - b.startOffset)
-    if (sections.length === 0) {
-      lastParseError = { raw: raw.slice(0, 500), reason: 'JSON 解析成功但无有效条目' }
+  // 1) 尝试完整 JSON 数组
+  const arrayStart = text.indexOf('[')
+  if (arrayStart >= 0) {
+    // 找最后一个可能的 ]，先试严格 parse
+    const arrayEnd = text.lastIndexOf(']')
+    if (arrayEnd > arrayStart) {
+      const candidate = text.slice(arrayStart, arrayEnd + 1)
+      try {
+        const parsed = JSON.parse(candidate) as Array<{
+          title?: unknown
+          startOffset?: unknown
+          point?: unknown
+        }>
+        if (Array.isArray(parsed)) {
+          const sections = parsed
+            .map((item) => normalizeSectionItem(item))
+            .filter((item): item is OutlineSection => Boolean(item && item.title))
+            .sort((a, b) => a.startOffset - b.startOffset)
+          if (sections.length > 0) return sections
+          lastParseError = { raw: raw.slice(0, 500), reason: 'JSON 解析成功但无有效条目' }
+        }
+      } catch (err) {
+        // 2) 完整数组失败 → 抢救其中完整对象
+        const salvaged = salvageOutlineObjects(candidate)
+        if (salvaged.length > 0) {
+          lastParseError = null
+          return salvaged
+        }
+        lastParseError = {
+          raw: raw.slice(0, 500),
+          reason: `JSON 解析失败: ${err instanceof Error ? err.message : String(err)}`
+        }
+      }
+    } else {
+      // 没有闭合 ]，直接抢救完整对象
+      const salvaged = salvageOutlineObjects(text.slice(arrayStart))
+      if (salvaged.length > 0) {
+        lastParseError = null
+        return salvaged
+      }
+      lastParseError = { raw: raw.slice(0, 500), reason: 'JSON 数组被截断且无完整条目' }
     }
-    return sections
-  } catch (err) {
-    lastParseError = { raw: raw.slice(0, 500), reason: `JSON 解析失败: ${err instanceof Error ? err.message : String(err)}` }
-    return []
+  } else {
+    // 无数组括号，仍尝试抢救散落对象
+    const salvaged = salvageOutlineObjects(text)
+    if (salvaged.length > 0) return salvaged
+    lastParseError = { raw: raw.slice(0, 500), reason: '未找到 JSON 数组' }
   }
+
+  return []
 }
 
 export function validateOutlineSections(
@@ -160,13 +296,31 @@ export function validateOutlineSections(
 ): OutlineValidation {
   if (sections.length < 1) return { valid: false, error: '至少需要一个大纲节' }
   if (sections.length > MAX_OUTLINE_SECTIONS) return { valid: false, error: `大纲节数不能超过 ${MAX_OUTLINE_SECTIONS}` }
-  if (sections[0].startOffset !== 0) return { valid: false, error: '第一节必须从第 0 句开始' }
+
+  // 自动修正：第一节 offset 不为 0 时强制归零
+  if (sections[0].startOffset !== 0) sections[0].startOffset = 0
+
+  // 自动修正：clamp 超出范围的 offset
+  for (const section of sections) {
+    if (section.startOffset >= sentenceCount) section.startOffset = sentenceCount - 1
+    if (section.startOffset < 0) section.startOffset = 0
+  }
+
+  // 修正后去重（offset 相同的只保留第一个）
+  const seen = new Set<number>()
+  const deduped: OutlineSection[] = []
+  for (const section of sections) {
+    if (seen.has(section.startOffset)) continue
+    seen.add(section.startOffset)
+    deduped.push(section)
+  }
+  sections.length = 0
+  sections.push(...deduped)
+
+  if (sections.length < 1) return { valid: false, error: '修正后无有效大纲节' }
   for (let index = 0; index < sections.length; index++) {
     const section = sections[index]
     if (!section.title.trim() || section.title.length > 120) return { valid: false, error: '大纲标题无效' }
-    if (!Number.isInteger(section.startOffset) || section.startOffset < 0 || section.startOffset >= sentenceCount) {
-      return { valid: false, error: '大纲偏移超出章节范围' }
-    }
     if (index > 0 && section.startOffset <= sections[index - 1].startOffset) {
       return { valid: false, error: '大纲偏移必须严格递增' }
     }
@@ -212,7 +366,7 @@ function buildChunks(chapterSentences: string[]): Array<{ numbered: string; base
   return chunks
 }
 
-/** 合并多块结果，按 offset 去重（重叠区域优先保留先出现的） */
+/** 合并多块结果，按 offset 去重（重叠区域优先保留先出现的）；超限时均匀抽样保留 */
 function mergeChunkResults(allSections: OutlineSection[]): OutlineSection[] {
   const seen = new Set<number>()
   const merged: OutlineSection[] = []
@@ -221,7 +375,119 @@ function mergeChunkResults(allSections: OutlineSection[]): OutlineSection[] {
     seen.add(section.startOffset)
     merged.push(section)
   }
-  return merged.sort((a, b) => a.startOffset - b.startOffset)
+  merged.sort((a, b) => a.startOffset - b.startOffset)
+  if (merged.length <= MAX_OUTLINE_SECTIONS) return merged
+  // 保留首尾 + 中间均匀抽样
+  const first = merged[0]
+  const last = merged[merged.length - 1]
+  const middle = merged.slice(1, -1)
+  const keepMiddle = Math.max(0, MAX_OUTLINE_SECTIONS - 2)
+  const sampled: OutlineSection[] = []
+  if (keepMiddle > 0 && middle.length > 0) {
+    for (let i = 0; i < keepMiddle; i++) {
+      const idx = Math.floor((i * middle.length) / keepMiddle)
+      sampled.push(middle[Math.min(idx, middle.length - 1)])
+    }
+  }
+  const result = [first, ...sampled, last]
+  // 抽样后可能重复 offset，再去重
+  const out: OutlineSection[] = []
+  const outSeen = new Set<number>()
+  for (const section of result) {
+    if (outSeen.has(section.startOffset)) continue
+    outSeen.add(section.startOffset)
+    out.push(section)
+  }
+  return out
+}
+
+function buildChunkUserPrompt(
+  chapterTitle: string,
+  totalSentences: number,
+  chunkIndex: number,
+  chunkCount: number,
+  chunk: { numbered: string; baseOffset: number },
+  chunkSentenceCount: number
+): string {
+  const rangeStart = chunk.baseOffset
+  const rangeEnd = chunk.baseOffset + chunkSentenceCount - 1
+  const isFirst = chunkIndex === 0
+  return [
+    `Chapter title: ${chapterTitle}`,
+    `Whole chapter has ${totalSentences} sentences (indices 0–${Math.max(0, totalSentences - 1)}).`,
+    `This is PART ${chunkIndex + 1}/${chunkCount} covering sentences [${rangeStart}–${rangeEnd}] only.`,
+    `Return 2–4 COMPLETE sections for THIS PART only.`,
+    isFirst
+      ? `The first section MUST have startOffset ${rangeStart}.`
+      : `startOffset values MUST fall within [${rangeStart}, ${rangeEnd}].`,
+    `Prefer short titles; point is optional (≤20 words). Close the JSON array.`,
+    '',
+    chunk.numbered
+  ].join('\n')
+}
+
+/**
+ * 安全请求一块大纲：网络/空正文失败返回 null，不抛到外层，
+ * 这样前面已抢救的小节不会整章作废。
+ */
+async function requestChunkOutline(
+  config: AiLlmSettings,
+  messages: Array<{ role: 'system' | 'user'; content: string }>,
+  signal: AbortSignal | undefined,
+  log?: (level: 'info' | 'error', message: string) => void,
+  label?: string
+): Promise<OutlineSection[]> {
+  try {
+    const raw = await collectStreamWithRetry(config, messages, signal, OUTLINE_MAX_TOKENS)
+    log?.('info', `大纲原始响应${label || ''}: ${raw.slice(0, 400)}`)
+    const parsed = parseOutlineSections(raw)
+    if (parsed.length > 0) {
+      log?.('info', `大纲解析成功${label || ''}: ${parsed.length} 节`)
+      return parsed
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log?.('error', `大纲请求失败${label || ''}: ${msg}`)
+    // 空正文等：再试一次极简提示
+  }
+
+  if (signal?.aborted) return []
+
+  try {
+    await delay(1000, signal)
+  } catch {
+    return []
+  }
+
+  const retryMessages: Array<{ role: 'system' | 'user'; content: string }> = [
+    {
+      role: 'system',
+      content:
+        '只输出 JSON 数组，2～3 个对象：{"title":"中文标题","startOffset":数字}。' +
+        '不要 point。title 必须简体中文。必须闭合数组。'
+    },
+    {
+      role: 'user',
+      content:
+        messages[messages.length - 1]?.content +
+        '\n\n重试：上次失败或截断。最多 3 条，只要 title（中文）+ startOffset，输出完整 JSON 数组。'
+    }
+  ]
+
+  try {
+    const raw = await collectStreamWithRetry(config, retryMessages, signal, 1024)
+    log?.('info', `大纲重试响应${label || ''}: ${raw.slice(0, 400)}`)
+    const parsed = parseOutlineSections(raw)
+    if (parsed.length > 0) {
+      log?.('info', `大纲重试成功${label || ''}: ${parsed.length} 节`)
+      return parsed
+    }
+    log?.('error', `大纲重试仍无有效条目${label || ''}${lastParseError ? `（${lastParseError.reason}）` : ''}`)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log?.('error', `大纲重试失败${label || ''}: ${msg}`)
+  }
+  return []
 }
 
 /** 请求间隔，避免触发速率限制 */
@@ -238,6 +504,8 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 export interface OutlineGeneratorOptions {
   getSettings: () => AiLlmSettings
   getDataDir: () => string
+  /** 可配置大纲 system 提示词（默认中文逻辑链） */
+  getOutlineSystemPrompt?: () => string
   cache?: boolean
   onProgress?: (chapterIndex: number, total: number) => void
   log?: (level: 'info' | 'error', message: string) => void
@@ -245,6 +513,11 @@ export interface OutlineGeneratorOptions {
 
 export class OutlineGenerator {
   constructor(private options: OutlineGeneratorOptions) {}
+
+  private outlineSystemPrompt(): string {
+    const custom = this.options.getOutlineSystemPrompt?.()?.trim()
+    return custom || OUTLINE_PROMPT
+  }
 
   /** 生成单章大纲（带缓存） */
   async generateChapter(
@@ -283,30 +556,83 @@ export class OutlineGenerator {
     try {
       const chunks = buildChunks(chapterSentences)
       const allSections: OutlineSection[] = []
+      let chunkFailures = 0
+      log?.('info', `大纲分块: 章${chapterIndex + 1} 共 ${chapterSentences.length} 句 → ${chunks.length} 块`)
 
       for (let ci = 0; ci < chunks.length; ci++) {
         if (signal?.aborted) break
         if (ci > 0) {
           try { await delay(DELAY_BETWEEN_CHUNKS_MS, signal) } catch { break }
         }
-        const raw = await collectStreamWithRetry(config, [
-          { role: 'system', content: `${OUTLINE_PROMPT}\n最低节数：${calculateMinimumSections(chapterSentences.length)}；最多节数：${MAX_OUTLINE_SECTIONS}。startOffset 使用整章相对句号，必须严格递增且第一节为 0；若模型只判断出一个完整单元，也必须返回这一节。` },
-          { role: 'user', content: `章节标题：${chapter.title}\n共 ${chapterSentences.length} 句。\n\n${chunks[ci].numbered}` }
-        ], signal)
-        log?.('info', `大纲原始响应[ch${chapterIndex}][chunk${ci}]: ${raw.slice(0, 300)}`)
-        allSections.push(...parseOutlineSections(raw))
+
+        const chunk = chunks[ci]
+        const chunkSentenceCount = Math.max(1, chunk.numbered.split('\n').filter(Boolean).length)
+        const messages = [
+          { role: 'system' as const, content: this.outlineSystemPrompt() },
+          {
+            role: 'user' as const,
+            content: buildChunkUserPrompt(
+              chapter.title,
+              chapterSentences.length,
+              ci,
+              chunks.length,
+              chunk,
+              chunkSentenceCount
+            )
+          }
+        ]
+
+        // 单块失败不抛出，避免「空正文」毁掉前面已抢救的小节
+        const parsed = await requestChunkOutline(
+          config,
+          messages,
+          signal,
+          log,
+          `[ch${chapterIndex}][chunk${ci}]`
+        )
+
+        if (parsed.length === 0) {
+          chunkFailures += 1
+        } else {
+          const lo = Math.max(0, chunk.baseOffset - 8)
+          const hi = Math.min(
+            chapterSentences.length - 1,
+            chunk.baseOffset + chunkSentenceCount + 8
+          )
+          const inRange = parsed.filter((s) => s.startOffset >= lo && s.startOffset <= hi)
+          allSections.push(...(inRange.length ? inRange : parsed))
+        }
       }
 
       const merged = mergeChunkResults(allSections)
       const validation = validateOutlineSections(merged, chapterSentences.length)
       if (validation.valid) {
+        if (chunkFailures > 0) {
+          log?.('info', `大纲部分成功：${merged.length} 节，${chunkFailures}/${chunks.length} 块失败已跳过`)
+        } else {
+          log?.('info', `大纲生成成功：${merged.length} 节`)
+        }
         result = { chapterIndex, sections: merged }
       } else {
-        const detail = lastParseError ? `（${lastParseError.reason}）` : ''
-        result = { chapterIndex, sections: [{ title: chapter.title, startOffset: 0 }], error: `模型未返回有效大纲${detail}` }
+        const detail = lastParseError
+          ? `（${lastParseError.reason}）`
+          : validation.error
+            ? `（${validation.error}）`
+            : chunkFailures > 0
+              ? `（${chunkFailures} 个分块请求失败或返回空）`
+              : ''
+        result = {
+          chapterIndex,
+          sections: [{ title: chapter.title, startOffset: 0 }],
+          error: `模型未返回有效大纲${detail}`
+        }
       }
     } catch (err) {
-      result = { chapterIndex, sections: [{ title: chapter.title, startOffset: 0 }], error: err instanceof Error ? err.message : '生成失败' }
+      result = {
+        chapterIndex,
+        sections: [{ title: chapter.title, startOffset: 0 }],
+        error: err instanceof Error ? err.message : '生成失败'
+      }
     }
 
     // 增量写入缓存

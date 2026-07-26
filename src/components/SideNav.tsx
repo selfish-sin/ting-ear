@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import {
   Home,
   BookOpen,
@@ -7,7 +7,9 @@ import {
   ScrollText,
   Settings,
   FileText,
-  Sparkles
+  Sparkles,
+  ChevronsLeft,
+  ChevronsRight
 } from 'lucide-react'
 import { useBookStore } from '../stores/bookStore'
 
@@ -30,10 +32,10 @@ const navItems = [
 
 export default function SideNav({ currentView, onViewChange, onOpenSettings }: SideNavProps) {
   const { currentBook } = useBookStore()
+  const [expanded, setExpanded] = useState(false)
 
   const handleNavClick = useCallback(
     (view: 'shelf' | 'player' | 'bookmarks' | 'history' | 'logs' | 'quicktext' | 'textclean') => {
-      // Player view requires a book to be loaded
       if (view === 'player' && !currentBook) {
         onViewChange('shelf')
       } else {
@@ -44,17 +46,21 @@ export default function SideNav({ currentView, onViewChange, onOpenSettings }: S
   )
 
   return (
-    <div className="w-48 h-full bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 flex flex-col select-none">
-      {/* App logo */}
-      <div className="p-4 flex items-center gap-2 border-b border-gray-100 dark:border-gray-800">
-        <div className="w-7 h-7 rounded bg-primary flex items-center justify-center">
+    <aside
+      className={`h-full flex flex-col select-none bg-surface dark:bg-dark-surface border-r border-gray-200 dark:border-dark-border shrink-0 transition-[width] duration-200 ease-in-out ${expanded ? 'w-40' : 'w-12'}`}
+    >
+      {/* Logo */}
+      <div className="px-2 pt-3 pb-2 flex items-center gap-2 justify-center" style={expanded ? { justifyContent: 'flex-start', paddingLeft: '0.625rem' } : undefined}>
+        <div className="w-8 h-8 rounded-xl bg-primary flex items-center justify-center shadow-sm shrink-0">
           <span className="text-white text-sm font-bold">听</span>
         </div>
-        <span className="font-semibold text-gray-700 dark:text-gray-200">听伴</span>
+        {expanded && (
+          <span className="font-semibold text-sm text-gray-800 dark:text-gray-100 leading-tight truncate">听伴</span>
+        )}
       </div>
 
-      {/* Nav items */}
-      <nav className="flex-1 p-2 flex flex-col gap-1">
+      {/* Nav */}
+      <nav className="flex-1 px-1.5 pt-1 pb-2 flex flex-col gap-0.5 overflow-y-auto">
         {navItems.map((item) => {
           const Icon = item.icon
           const isActive = currentView === item.id
@@ -64,31 +70,41 @@ export default function SideNav({ currentView, onViewChange, onOpenSettings }: S
               key={item.id}
               onClick={() => handleNavClick(item.id)}
               disabled={disabled}
-              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+              title={item.label}
+              className={`nav-item ${expanded ? 'justify-start' : 'justify-center'} ${
                 isActive
-                  ? 'bg-primary text-white shadow-sm'
+                  ? 'nav-item-active'
                   : disabled
-                  ? 'text-gray-300 dark:text-gray-600 cursor-not-allowed'
-                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
+                    ? 'text-gray-300 dark:text-gray-600 cursor-not-allowed opacity-50'
+                    : 'nav-item-idle'
               }`}
             >
-              <Icon className="w-4 h-4" />
-              <span>{item.label}</span>
+              <Icon className="w-[18px] h-[18px] shrink-0" strokeWidth={isActive ? 2.25 : 1.85} />
+              {expanded && <span className="truncate">{item.label}</span>}
             </button>
           )
         })}
       </nav>
 
-      {/* Settings button */}
-      <div className="p-2 border-t border-gray-100 dark:border-gray-800">
+      {/* Settings + expand toggle */}
+      <div className="p-1.5 border-t border-gray-200 dark:border-dark-border flex flex-col gap-0.5">
         <button
           onClick={onOpenSettings}
-          className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+          title="设置"
+          className={`nav-item w-full ${expanded ? 'justify-start' : 'justify-center'} nav-item-idle`}
         >
-          <Settings className="w-4 h-4" />
-          <span>设置</span>
+          <Settings className="w-[18px] h-[18px] shrink-0" strokeWidth={1.85} />
+          {expanded && <span>设置</span>}
+        </button>
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          title={expanded ? '收起' : '展开'}
+          className={`nav-item w-full ${expanded ? 'justify-start' : 'justify-center'} nav-item-idle`}
+        >
+          {expanded ? <ChevronsLeft className="w-[18px] h-[18px] shrink-0" strokeWidth={1.85} /> : <ChevronsRight className="w-[18px] h-[18px] shrink-0" strokeWidth={1.85} />}
+          {expanded && <span>收起</span>}
         </button>
       </div>
-    </div>
+    </aside>
   )
 }

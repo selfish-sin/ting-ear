@@ -5,9 +5,13 @@ import { useSettingsStore } from '../stores/settingsStore'
 import type { TTSVoice, TTSEngineConfig, ToastItem } from '../global'
 
 interface VoiceSelectorProps {
-  /** 紧凑模式（ControlBar 用）：宽度更窄，仅显示音色名 */
+  /** 紧凑模式：宽度更窄，仅显示音色名 */
   compact?: boolean
+  /** 图标模式：只显示喇叭按钮，适合顶栏工具条 */
+  iconOnly?: boolean
   showToast: (type: ToastItem['type'], message: string) => void
+  /** 下拉开关（用于自动隐藏时钉住底栏） */
+  onOpenChange?: (open: boolean) => void
 }
 
 /** 性别 → 中文标签 + emoji */
@@ -25,13 +29,29 @@ function languageLabel(lang?: string): string | null {
   return lang
 }
 
-export default function VoiceSelector({ compact = false, showToast }: VoiceSelectorProps) {
+export default function VoiceSelector({
+  compact = false,
+  iconOnly = false,
+  showToast,
+  onOpenChange
+}: VoiceSelectorProps) {
   const { voiceId, setVoiceId, useSystemTTS, setUseSystemTTS } = usePlayerStore()
   const { setSettings, saveSettings } = useSettingsStore()
 
   const [engines, setEngines] = useState<TTSEngineConfig[]>([])
   const [activeEngine, setActiveEngine] = useState<string>('edge')
   const [open, setOpen] = useState(false)
+
+  const setOpenSafe = useCallback(
+    (next: boolean | ((v: boolean) => boolean)) => {
+      setOpen((prev) => {
+        const value = typeof next === 'function' ? next(prev) : next
+        onOpenChange?.(value)
+        return value
+      })
+    },
+    [onOpenChange]
+  )
   const [loading, setLoading] = useState(true)
   const [previewingId, setPreviewingId] = useState<string | null>(null)
   const previewAudioRef = useRef<HTMLAudioElement | null>(null)
@@ -65,12 +85,16 @@ export default function VoiceSelector({ compact = false, showToast }: VoiceSelec
     if (!open) return
     const handler = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false)
+        setOpenSafe(false)
       }
     }
     window.addEventListener('mousedown', handler)
     return () => window.removeEventListener('mousedown', handler)
-  }, [open])
+  }, [open, setOpenSafe])
+
+  useEffect(() => {
+    return () => onOpenChange?.(false)
+  }, [onOpenChange])
 
   // 卸载时停止试听
   useEffect(() => {
@@ -101,7 +125,7 @@ export default function VoiceSelector({ compact = false, showToast }: VoiceSelec
         setUseSystemTTS(true)
         setSettings({ voiceId: voice.id, ttsEngine: 'system' })
         void saveSettings()
-        setOpen(false)
+        setOpenSafe(false)
         return
       }
       // 切换回在线引擎时关闭离线模式
@@ -120,9 +144,9 @@ export default function VoiceSelector({ compact = false, showToast }: VoiceSelec
       // 持久化到 settings.json
       setSettings({ voiceId: voice.id, ttsEngine: engine.id })
       void saveSettings()
-      setOpen(false)
+      setOpenSafe(false)
     },
-    [voiceId, activeEngine, useSystemTTS, setVoiceId, setUseSystemTTS, setSettings, saveSettings]
+    [voiceId, activeEngine, useSystemTTS, setVoiceId, setUseSystemTTS, setSettings, saveSettings, setOpenSafe]
   )
 
   // 试听：调用 ttsPreviewVoice 合成一句示例，用 <audio> 播放
@@ -164,9 +188,16 @@ export default function VoiceSelector({ compact = false, showToast }: VoiceSelec
 
   if (loading) {
     return (
-      <div className="flex items-center gap-1 text-xs text-gray-400">
-        <Loader2 className="w-3 h-3 animate-spin" />
-        <span>加载音色…</span>
+      <div
+        className={
+          iconOnly
+            ? 'icon-btn opacity-50'
+            : 'flex items-center gap-1 text-xs text-gray-400'
+        }
+        title="加载音色…"
+      >
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        {!iconOnly && <span>加载音色…</span>}
       </div>
     )
   }
@@ -174,35 +205,55 @@ export default function VoiceSelector({ compact = false, showToast }: VoiceSelec
   if (engines.length === 0) {
     return (
       <div className="text-xs text-gray-400" title="未配置可用 TTS 引擎">
-        无可用音色
+        {iconOnly ? '—' : '无可用音色'}
       </div>
     )
   }
 
+  const triggerTitle = currentVoice
+    ? `${currentVoice.name}${currentEngine ? ' · ' + currentEngine.name.split('（')[0] : ''}`
+    : '选择音色'
+
   return (
     <div ref={containerRef} className="relative">
       {/* 触发按钮 */}
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className={`flex items-center gap-1.5 text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-gray-600 dark:text-gray-300 hover:border-primary/50 transition-colors ${
-          compact ? 'max-w-[130px]' : 'max-w-[220px]'
-        }`}
-        title={currentVoice ? `${currentVoice.name}${currentEngine ? ' · ' + currentEngine.name.split('（')[0] : ''}` : '选择音色'}
-      >
-        <span className="truncate flex-1 text-left">
-          {currentVoice ? currentVoice.name : '选择音色'}
-        </span>
-        {!compact && currentEngine && (
-          <span className="flex-shrink-0 text-[10px] text-primary/70 bg-primary/10 px-1 rounded">
-            {currentEngine.name.split('（')[0]}
+      {iconOnly ? (
+        <button
+          onClick={() => setOpenSafe((v) => !v)}
+          className={`icon-btn ${open ? 'text-primary bg-primary/10' : ''}`}
+          title={triggerTitle}
+        >
+          <Volume2 className="w-4 h-4" />
+        </button>
+      ) : (
+        <button
+          onClick={() => setOpenSafe((v) => !v)}
+          className={`flex items-center gap-1.5 text-xs bg-white dark:bg-dark-raised border border-gray-200 dark:border-dark-border rounded-lg px-2 py-1 text-gray-600 dark:text-gray-300 hover:border-primary/50 transition-colors ${
+            compact ? 'max-w-[130px]' : 'max-w-[220px]'
+          }`}
+          title={triggerTitle}
+        >
+          <span className="truncate flex-1 text-left">
+            {currentVoice ? currentVoice.name : '选择音色'}
           </span>
-        )}
-        <ChevronDown className={`w-3 h-3 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
+          {!compact && currentEngine && (
+            <span className="flex-shrink-0 text-[10px] text-primary/70 bg-primary/10 px-1 rounded">
+              {currentEngine.name.split('（')[0]}
+            </span>
+          )}
+          <ChevronDown
+            className={`w-3 h-3 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
+          />
+        </button>
+      )}
 
-      {/* 下拉面板 */}
+      {/* 下拉面板：顶栏向下，底栏向上 */}
       {open && (
-        <div className="absolute right-0 bottom-full mb-2 w-80 max-h-80 overflow-y-auto bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl z-50 py-1">
+        <div
+          className={`absolute right-0 w-80 max-h-80 overflow-y-auto bg-white dark:bg-dark-raised border border-gray-200 dark:border-dark-border rounded-xl shadow-card z-50 py-1 ${
+            iconOnly ? 'top-full mt-1.5' : 'bottom-full mb-2'
+          }`}
+        >
           {engines.map((engine, ei) => (
             <div key={engine.id}>
               {/* 引擎名头部 */}

@@ -76,7 +76,7 @@ const api = {
   aiConvDelete: (bookId: string, convId: string) => ipcRenderer.invoke('ai:conv:delete', bookId, convId),
   aiNmemStatus: (force = false) => ipcRenderer.invoke('ai:nmem:status', force),
   aiNmemIngest: (book: unknown) => ipcRenderer.invoke('ai:nmem:ingest', book),
-  aiNmemSyncAll: () => ipcRenderer.invoke('ai:nmem:sync-all'),
+  aiNmemSyncAll: (force = false) => ipcRenderer.invoke('ai:nmem:sync-all', force),
   aiListModels: (config: unknown) => ipcRenderer.invoke('ai:models:list', config),
   aiTestModel: (config: unknown) => ipcRenderer.invoke('ai:model:test', config),
   aiOutlineGenerate: (request: unknown) => ipcRenderer.invoke('ai:outline:generate', request),

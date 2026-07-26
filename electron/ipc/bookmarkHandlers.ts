@@ -1,14 +1,13 @@
 import { ipcMain } from 'electron'
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, renameSync, existsSync } from 'fs'
 import { join } from 'path'
-import { app } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import type { LogService } from '../services/log-service'
 import type { Bookmark } from '../../src/global'
+import { getDataDir } from './fileHandlers'
 
 function getBookmarksFile(): string {
-  const dir = join(app.getPath('userData'), '听伴')
-  return join(dir, 'bookmarks.json')
+  return join(getDataDir(), 'bookmarks.json')
 }
 
 function loadBookmarks(): Bookmark[] {
@@ -23,7 +22,10 @@ function loadBookmarks(): Bookmark[] {
 }
 
 function saveBookmarks(bookmarks: Bookmark[]): void {
-  writeFileSync(getBookmarksFile(), JSON.stringify(bookmarks, null, 2), 'utf-8')
+  const filePath = getBookmarksFile()
+  const tmpPath = `${filePath}.tmp`
+  writeFileSync(tmpPath, JSON.stringify(bookmarks, null, 2), 'utf-8')
+  renameSync(tmpPath, filePath)
 }
 
 export function registerBookmarkHandlers(logService: LogService): void {

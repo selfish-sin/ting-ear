@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { useTextCleanStore } from '../stores/textCleanStore'
 import { useBookStore } from '../stores/bookStore'
+import { useQuickTextStore } from '../stores/quickTextStore'
 import EditHistoryDialog from './EditHistoryDialog'
 import { formatFullTime } from '../utils/timeFormat'
 import { splitReadableSentences } from '../utils/bookData'
@@ -30,26 +31,17 @@ interface TextCleanerViewProps {
  *
  * 左：原始文本（只读）
  * 右：清洗结果（逐句分块，便于检查断句）
- * 工具栏：快速清洗 / 手动编辑 / 应用 / 撤销
+ * 工具栏：规则清洗 / 手动编辑 / 应用 / 撤销
  */
 export default function TextCleanerView({
   showToast,
   onBackToShelf,
   onOpenVersion
 }: TextCleanerViewProps) {
-  const {
-    sourceText,
-    sourceBookId,
-    cleanedText,
-    isCleaning,
-    progress,
-    setCleanedText,
-    setIsCleaning,
-    setProgress
-  } = useTextCleanStore()
+  const { sourceText, sourceBookId, cleanedText, isCleaning, setCleanedText, setIsCleaning } =
+    useTextCleanStore()
   const [manualMode, setManualMode] = useState(false)
   const [editDraft, setEditDraft] = useState('')
-  const taskIdRef = useRef<string | null>(null)
   // 记录最近一次产生 cleanedText 的操作来源，用于「应用」时标记记录类型
   const cleanOpRef = useRef<'quick' | 'manual' | 'none'>('none')
   const [showHistory, setShowHistory] = useState(false)
@@ -63,89 +55,39 @@ export default function TextCleanerView({
   // 多选句子
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set())
 
-  // 监听清洗进度
-  useEffect(() => {
-    const cleanup = window.api?.onCleanProgress((p) => {
-      setProgress(p)
-    })
-    return () => {
-      cleanup?.()
-    }
-  }, [])
-
-  // 监听清洗完成
-  useEffect(() => {
-    const cleanup = window.api?.onCleanComplete((data) => {
-      if (data.taskId !== taskIdRef.current) return
-      setIsCleaning(false)
-      if (data.cancelled) return
-      if (data.error) {
-        showToast('error', `清洗失败: ${data.error}`)
-        return
-      }
-      // 撤销栈
-      if (cleanedText) setUndoStack((s) => [...s, cleanedText])
-      setCleanedText(data.text || '')
-      setProgress({
-        current: data.stats?.chunksUsed || 0,
-        total: data.stats?.chunksUsed || 0,
-        phase: 'done'
-      })
-
-      // 异常块提示：部分块因模型输出异常（复读/误删）已自动回退到正则清洗
-      const anomaly = data.stats?.anomalyChunks || 0
-      const regex = data.stats?.regexChunks || 0
-      const total = data.stats?.chunksUsed || 0
-      if (anomaly > 0) {
-        showToast(
-          'warning',
-          `AI 清洗完成（${data.stats?.originalLength} → ${data.stats?.cleanedLength} 字），其中 ${anomaly}/${total} 块模型输出异常已回退正则清洗`
-        )
-      } else if (regex > 0 && regex === total) {
-        showToast('info', `文本较短，已用规则清洗 · ${data.stats?.cleanedLength} 字`)
-      } else {
-        showToast(
-          'success',
-          `AI 清洗完成: ${data.stats?.originalLength} → ${data.stats?.cleanedLength} 字`
-        )
-      }
-    })
-    return () => {
-      cleanup?.()
-    }
-  }, [showToast])
-
   useEffect(() => {
     setEditDraft(cleanedText || sourceText)
   }, [cleanedText, sourceText])
 
-  // === 快速清洗（纯正则，秒出）===
+  // === 规则清洗（设置 → 清洗规则 + 结构性格式优化）===
   const handleQuickClean = async () => {
     const before = manualMode ? editDraft : sourceText
     if (!before?.trim()) {
       showToast('warning', '没有文本可处理')
       return
     }
+    setIsCleaning(true)
     try {
       const res = await window.api?.enhancedClean(before)
       if (!res?.success) {
-        showToast('error', '快速清洗失败')
+        showToast('error', res?.error || '清洗失败')
         return
       }
-      if (res.cleanedLength === before.length) {
+      if (res.cleanedLength === before.length && res.text === before) {
         showToast('info', '文本已经很整洁，无需处理')
         return
       }
-      // 撤销栈：保存当前状态，并清空旧审校疑点（文本已变）
       if (cleanedText) setUndoStack((s) => [...s, cleanedText])
       setCleanedText(res.text)
       cleanOpRef.current = 'quick'
       showToast(
         'success',
-        `快速清洗完成: ${res.originalLength} → ${res.cleanedLength} 字（去页码/页眉/空格/合断行）`
+        `清洗完成: ${res.originalLength} → ${res.cleanedLength} 字（规则 + 格式优化）`
       )
     } catch (e) {
-      showToast('error', `快速清洗异常: ${String(e)}`)
+      showToast('error', `清洗异常: ${String(e)}`)
+    } finally {
+      setIsCleaning(false)
     }
   }
 
@@ -172,7 +114,6 @@ export default function TextCleanerView({
     }
 
     // 导入快速文本供朗读
-    const { useQuickTextStore } = await import('../stores/quickTextStore')
     useQuickTextStore.getState().setText(cleanedText)
 
     if (sourceBookId) {
@@ -389,14 +330,14 @@ export default function TextCleanerView({
 
         <div className="flex-1" />
 
-        {/* 快速清洗（纯正则，秒出）*/}
+        {/* 规则清洗（设置 → 清洗 + 结构性格式优化）*/}
         <button
           onClick={handleQuickClean}
           disabled={isCleaning}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800 rounded-md hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors disabled:opacity-40"
         >
-          <Scissors className="w-3.5 h-3.5" />
-          快速清洗
+          {isCleaning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Scissors className="w-3.5 h-3.5" />}
+          {isCleaning ? '清洗中…' : '规则清洗'}
         </button>
 
         <div className="w-px h-5 bg-gray-200 dark:bg-gray-600" />
@@ -445,25 +386,6 @@ export default function TextCleanerView({
           返回
         </button>
       </div>
-
-      {/* 进度条 */}
-      {isCleaning && progress && (
-        <div className="px-4 py-2 bg-blue-50 dark:bg-blue-900/10 border-b border-blue-100 dark:border-blue-900/20">
-          <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
-            <Loader2 className="w-3 h-3 animate-spin" />
-            {progress.phase === 'chunking' && '规则清洗中...'}
-            {progress.phase === 'done' && '✓ 清洗完成'}
-          </div>
-          <div className="mt-1 h-1 bg-blue-100 dark:bg-blue-900/30 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-blue-500 rounded-full transition-all duration-300"
-              style={{
-                width: progress.total > 0 ? `${(progress.current / progress.total) * 100}%` : '10%'
-              }}
-            />
-          </div>
-        </div>
-      )}
 
       {/* 文本区域 */}
       <div className="flex-1 flex min-h-0">
@@ -599,7 +521,7 @@ export default function TextCleanerView({
                 <div className="flex items-center justify-center h-full text-gray-400">
                   <div className="text-center">
                     <Sparkles className="w-10 h-10 mx-auto mb-2 opacity-30" />
-                    <p className="text-sm">点击「快速清洗」秒出规则结果</p>
+                    <p className="text-sm">点击「规则清洗」应用清洗规则与格式优化</p>
                     <p className="text-xs mt-1">清洗后在此逐句检查断句效果，可手动编辑</p>
                   </div>
                 </div>

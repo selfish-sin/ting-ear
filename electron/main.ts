@@ -6,17 +6,19 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 interface AppWithQuitFlag {
   isQuitting?: boolean
 }
-import { registerFileHandlers } from './ipc/fileHandlers'
+import { registerFileHandlers, setCustomDataDir } from './ipc/fileHandlers'
 import { registerTtsHandlers } from './ipc/ttsHandlers'
 import { registerWindowHandlers } from './ipc/windowHandlers'
 import { registerBookmarkHandlers } from './ipc/bookmarkHandlers'
 import { registerLogHandlers } from './ipc/logHandlers'
 import { registerHistoryHandlers } from './ipc/historyHandlers'
+import { registerAiHandlers } from './ipc/aiHandlers'
 import { registerFloatingBallHandlers, sendToMainWindow, showFloatingBallWindow, showMainWindow } from './ipc/floatingBallHandlers'
 import { LogService } from './services/log-service'
 import { SettingsService } from './services/settings-service'
 import { EngineManager } from './services/tts-engines/engine-manager'
 import { QwenAdapter } from './services/tts-engines/qwen-adapter'
+import { EdgeAdapter } from './services/tts-engines/edge-adapter'
 import { registerOcrHandlers, preheatOcr } from './ipc/ocrHandlers'
 import { registerTextCleanHandlers } from './ipc/textCleanHandlers'
 import { registerSubtitleHandlers } from './ipc/subtitleHandlers'
@@ -74,6 +76,10 @@ function createWindow(): BrowserWindow {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
+  })
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const currentUrl = mainWindow?.webContents.getURL()
+    if (currentUrl && url !== currentUrl) event.preventDefault()
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -205,6 +211,15 @@ app.whenReady().then(async () => {
   settingsService = new SettingsService()
   await settingsService.load()
 
+  // 应用自定义数据目录（settings.json 始终在默认位置）
+  const customDir = (settingsService.get() as { dataDir?: string }).dataDir
+  if (customDir) {
+    setCustomDataDir(customDir)
+    // 日志目录随 dataDir 切换，重新加载目标目录中的日志
+    logService.reloadFromDisk()
+    logService.info('System', `使用自定义数据目录: ${customDir}`)
+  }
+
   logService.info('System', `听伴 v3.0 启动 | Electron ${process.versions.electron} | Node ${process.versions.node}`)
 
   createWindow()
@@ -221,9 +236,10 @@ app.whenReady().then(async () => {
   registerBookmarkHandlers(logService)
   registerLogHandlers(logService)
   registerHistoryHandlers(logService)
+  registerAiHandlers(settingsService, logService)
   registerFloatingBallHandlers(logService)
   registerOcrHandlers(logService)
-  registerTextCleanHandlers(settingsService, engineManager, logService)
+  registerTextCleanHandlers(settingsService, logService)
   registerSubtitleHandlers(logService)
 
   // NOW initialize the TTS engine (async — does not block IPC handler registration)
@@ -239,6 +255,7 @@ app.whenReady().then(async () => {
   // 活动引擎以用户设置为准（默认 'edge' 免费可用；用户在设置里可改）
   engineManager.setActiveEngine(settings.ttsEngine || 'edge')
   QwenAdapter.cleanupCache()  // 清除超过 10 天的音频缓存
+  EdgeAdapter.cleanupCache()
 
   preheatOcr(logService)  // 后台异步预热，不阻塞启动
 

@@ -7,12 +7,22 @@ import type { LogService } from '../services/log-service'
 
 let screenshotWindow: BrowserWindow | null = null
 let isOCRRunning = false
+/** 截图时被临时隐藏的窗口，结束后恢复 */
+let hiddenForCapture: BrowserWindow[] = []
 
-// RapidOCR 可执行 python 路径
-// v5: 从环境变量读取，缺省 'python'（走 PATH 解析）
 const RAPIDOCR_PYTHON = process.env.TINGEAR_PYTHON || 'python'
 
-/** 获取 rapidocr_runner.py 路径：dev 用 app.getAppPath()，prod 用 process.resourcesPath + extraResources */
+export type OcrScreenshotMeta = {
+  dataUrl: string
+  /** 覆盖层 CSS 逻辑像素宽高（与 BrowserWindow 一致） */
+  cssWidth: number
+  cssHeight: number
+  /** 截图像素宽高 */
+  imgWidth: number
+  imgHeight: number
+  scaleFactor: number
+}
+
 function getOcrScriptPath(): string {
   if (app.isPackaged) {
     return join(process.resourcesPath, 'ocr', 'rapidocr_runner.py')
@@ -20,10 +30,53 @@ function getOcrScriptPath(): string {
   return join(app.getAppPath(), 'electron', 'ocr', 'rapidocr_runner.py')
 }
 
+function getMainWindow(): BrowserWindow | null {
+  return (
+    BrowserWindow.getAllWindows().find((w) => {
+      const url = w.webContents.getURL()
+      return !url.includes('floating') && !url.includes('screenshot')
+    }) ?? null
+  )
+}
+
+function setOcrMeta(meta: OcrScreenshotMeta | null): void {
+  ;(globalThis as unknown as { __ocrScreenshotMeta?: OcrScreenshotMeta | null }).__ocrScreenshotMeta =
+    meta
+}
+
+function getOcrMeta(): OcrScreenshotMeta | null {
+  return (
+    (globalThis as unknown as { __ocrScreenshotMeta?: OcrScreenshotMeta | null }).__ocrScreenshotMeta ||
+    null
+  )
+}
+
+/** 截图前隐藏应用相关窗口，避免把自己拍进去 */
+function hideAppWindows(): void {
+  hiddenForCapture = []
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w === screenshotWindow) continue
+    if (w.isVisible()) {
+      hiddenForCapture.push(w)
+      w.hide()
+    }
+  }
+}
+
+function restoreAppWindows(): void {
+  for (const w of hiddenForCapture) {
+    try {
+      if (!w.isDestroyed()) w.show()
+    } catch {
+      /* ignore */
+    }
+  }
+  hiddenForCapture = []
+}
+
 export function registerOcrHandlers(logService: LogService): void {
   ipcMain.handle('ocr:startScreenshot', async () => {
     if (screenshotWindow) {
-      // 旧窗口还在就关了重建（确保拿到新截图）
       screenshotWindow.close()
       screenshotWindow = null
     }
@@ -31,62 +84,89 @@ export function registerOcrHandlers(logService: LogService): void {
       logService.warn('OCR', '已有 OCR 任务进行中')
       return
     }
-    const main = BrowserWindow.getAllWindows().find(
-      (w) => !w.webContents.getURL().includes('floating') && !w.webContents.getURL().includes('screenshot')
-    )
-    main?.show()
-    main?.focus()
     await startScreenshotFlow(logService)
   })
 
-  // Renderer → main: user confirmed selection
   ipcMain.handle(
     'ocr:selectionComplete',
-    async (_event, payload: { dataUrl: string; x: number; y: number; w: number; h: number }) => {
+    async (
+      _event,
+      payload: { dataUrl: string; x: number; y: number; w: number; h: number }
+    ) => {
       screenshotWindow?.close()
       screenshotWindow = null
-      await runOcr(logService, payload.dataUrl, payload.x, payload.y, payload.w, payload.h)
+      restoreAppWindows()
+      await runOcr(logService, payload)
     }
   )
 
   ipcMain.handle('ocr:cancel', async () => {
     screenshotWindow?.close()
     screenshotWindow = null
+    setOcrMeta(null)
+    restoreAppWindows()
     logService.info('OCR', '截图取消')
   })
 }
 
 async function startScreenshotFlow(logService: LogService): Promise<void> {
-  const primary = screen.getPrimaryDisplay()
-  const { width, height } = primary.size
+  const cursor = screen.getCursorScreenPoint()
+  const targetDisplay = screen.getDisplayNearestPoint(cursor)
+  const { width: cssWidth, height: cssHeight } = targetDisplay.size
+  const { x: displayX, y: displayY } = targetDisplay.bounds
+  const scaleFactor = targetDisplay.scaleFactor || 1
+  const thumbW = Math.round(cssWidth * scaleFactor)
+  const thumbH = Math.round(cssHeight * scaleFactor)
 
-  // 1. 先截屏（不依赖窗口存在）
+  // 先藏窗口再截，避免把听伴拍进画面
+  hideAppWindows()
+  // 给合成器一帧时间收起窗口
+  await new Promise((r) => setTimeout(r, 80))
+
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
-    thumbnailSize: { width, height }
+    thumbnailSize: { width: thumbW, height: thumbH }
   })
-  const primarySource = sources[0]
-  if (!primarySource) {
+  const displayId = String(targetDisplay.id)
+  const matched =
+    sources.find((s) => s.display_id === displayId) ||
+    sources.find((s) => s.id.includes(displayId)) ||
+    sources[0]
+  if (!matched) {
+    restoreAppWindows()
     logService.error('OCR', '未找到可用屏幕源')
     return
   }
-  const fullDataUrl = primarySource.thumbnail.toDataURL()
 
-  // 2. 缓存截图数据到 globalThis（渲染进程通过 IPC 读取）
-  ;(globalThis as unknown as { __ocrScreenshot?: string }).__ocrScreenshot = fullDataUrl
+  const thumb = matched.thumbnail
+  const imgSize = thumb.getSize()
+  const fullDataUrl = thumb.toDataURL()
+  logService.info(
+    'OCR',
+    `截取显示器 id=${displayId} css=${cssWidth}x${cssHeight} img=${imgSize.width}x${imgSize.height} @${scaleFactor}x`
+  )
 
-  // 3. 创建全屏 overlay 窗口（show: false → ready-to-show 再显示，消除白屏）
+  setOcrMeta({
+    dataUrl: fullDataUrl,
+    cssWidth,
+    cssHeight,
+    imgWidth: imgSize.width,
+    imgHeight: imgSize.height,
+    scaleFactor
+  })
+
   screenshotWindow = new BrowserWindow({
-    width,
-    height,
-    x: 0,
-    y: 0,
+    width: cssWidth,
+    height: cssHeight,
+    x: displayX,
+    y: displayY,
     fullscreen: true,
     frame: false,
     movable: false,
     resizable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
+    transparent: false,
     backgroundColor: '#000000',
     show: false,
     webPreferences: {
@@ -96,9 +176,13 @@ async function startScreenshotFlow(logService: LogService): Promise<void> {
     }
   })
 
+  screenshotWindow.setAlwaysOnTop(true, 'screen-saver')
+  screenshotWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+
   screenshotWindow.on('ready-to-show', () => {
     screenshotWindow?.show()
-    logService.info('OCR', '截图窗口已显示，等待用户框选')
+    screenshotWindow?.focus()
+    logService.info('OCR', '截图窗口已显示，等待框选')
   })
 
   screenshotWindow.on('closed', () => {
@@ -113,37 +197,56 @@ async function startScreenshotFlow(logService: LogService): Promise<void> {
   }
 }
 
-// IPC to expose the cached screenshot data URL to the screenshot renderer
 ipcMain.handle('ocr:getScreenshotDataUrl', () => {
-  return (globalThis as unknown as { __ocrScreenshot?: string }).__ocrScreenshot || ''
+  const meta = getOcrMeta()
+  return meta?.dataUrl || ''
+})
+
+/** 返回截图元数据（含 DPI 缩放，供前端坐标换算） */
+ipcMain.handle('ocr:getScreenshotMeta', () => {
+  return getOcrMeta()
 })
 
 async function runOcr(
   logService: LogService,
-  fullDataUrl: string,
-  x: number,
-  y: number,
-  w: number,
-  h: number
+  payload: { dataUrl: string; x: number; y: number; w: number; h: number }
 ): Promise<void> {
   isOCRRunning = true
   let tempPath = ''
+  const meta = getOcrMeta()
   try {
-    // Crop the data URL to the selected region
-    const base64 = fullDataUrl.replace(/^data:image\/png;base64,/, '')
+    const base64 = payload.dataUrl.replace(/^data:image\/\w+;base64,/, '')
     const buf = Buffer.from(base64, 'base64')
     const fullImg = nativeImage.createFromBuffer(buf)
+    const imgSize = fullImg.getSize()
+
+    // CSS 逻辑坐标 → 截图像素坐标（修高 DPI 错位）
+    const cssW = meta?.cssWidth || imgSize.width
+    const cssH = meta?.cssHeight || imgSize.height
+    const scaleX = imgSize.width / cssW
+    const scaleY = imgSize.height / cssH
+
+    let x = Math.round(payload.x * scaleX)
+    let y = Math.round(payload.y * scaleY)
+    let w = Math.round(payload.w * scaleX)
+    let h = Math.round(payload.h * scaleY)
+
+    // 钳制在图内
+    x = Math.max(0, Math.min(x, imgSize.width - 1))
+    y = Math.max(0, Math.min(y, imgSize.height - 1))
+    w = Math.max(1, Math.min(w, imgSize.width - x))
+    h = Math.max(1, Math.min(h, imgSize.height - y))
+
     const cropped = fullImg.crop({ x, y, width: w, height: h })
     const pngBuf = cropped.toPNG()
 
     tempPath = join(tmpdir(), `tingear_ocr_${Date.now()}.png`)
     writeFileSync(tempPath, pngBuf)
-    logService.info('OCR', `截图区域已保存: ${tempPath} (${w}x${h})`)
+    logService.info('OCR', `截图区域已保存: ${tempPath} (${w}x${h}px from css ${payload.w}x${payload.h})`)
 
-    // Spawn Python child process running RapidOCR
     const text = await new Promise<string>((resolve, reject) => {
       const scriptPath = getOcrScriptPath()
-      logService.info('OCR', `启动 OCR 脚本: ${RAPIDOCR_PYTHON} ${scriptPath}`)
+      logService.info('OCR', `启动 OCR: ${RAPIDOCR_PYTHON} ${scriptPath}`)
       const proc = spawn(RAPIDOCR_PYTHON, [scriptPath, tempPath], {
         windowsHide: true,
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
@@ -178,31 +281,30 @@ async function runOcr(
     })
 
     logService.info('OCR', `识别成功，共 ${text.length} 字`)
-    // Send to main window
-    const main = BrowserWindow.getAllWindows().find(
-      (w) => !w.webContents.getURL().includes('floating') && !w.webContents.getURL().includes('screenshot')
-    )
+    const main = getMainWindow()
+    main?.show()
+    main?.focus()
     main?.webContents.send('ocr:result', text)
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     logService.error('OCR', `OCR 失败: ${msg}`)
-    const main = BrowserWindow.getAllWindows().find(
-      (w) => !w.webContents.getURL().includes('floating') && !w.webContents.getURL().includes('screenshot')
-    )
+    const main = getMainWindow()
+    main?.show()
+    main?.focus()
     main?.webContents.send('ocr:error', msg)
   } finally {
+    setOcrMeta(null)
     if (tempPath && existsSync(tempPath)) {
       try {
         unlinkSync(tempPath)
       } catch {
-        // ignore
+        /* ignore */
       }
     }
     isOCRRunning = false
   }
 }
 
-// ==== OCR 预热：启动时后台加载模型到 OS 磁盘缓存，首用从 4-6s 降到 1-2s ====
 let preheated = false
 
 export function preheatOcr(logService: LogService): void {
@@ -214,26 +316,13 @@ export function preheatOcr(logService: LogService): void {
 
   const proc = spawn(py, [script, '--preheat'], {
     windowsHide: true,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-    timeout: 30000
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
   })
-
-  const timer = setTimeout(() => {
-    proc.kill()
-    logService.warn('OCR', '预热超时（30s）')
-  }, 30000)
-
   proc.on('close', (code) => {
-    clearTimeout(timer)
-    if (code === 0) {
-      logService.info('OCR', '预热完成')
-    } else {
-      logService.warn('OCR', `预热退出码 ${code}（不影响正常使用）`)
-    }
+    if (code === 0) logService.info('OCR', '模型预热完成')
+    else logService.warn('OCR', `模型预热退出码 ${code}（OCR 功能可能不可用）`)
   })
-
   proc.on('error', (err) => {
-    clearTimeout(timer)
-    logService.warn('OCR', `预热失败: ${err.message}（不影响正常使用）`)
+    logService.warn('OCR', `模型预热失败: ${err.message}`)
   })
 }

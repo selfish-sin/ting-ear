@@ -1,6 +1,6 @@
 import { Gauge, Volume2, VolumeX, RotateCcw } from 'lucide-react'
 import { useOsdStore } from '../stores/osdStore'
-import { usePlayerStore, SPEED_MIN, SPEED_MAX } from '../stores/playerStore'
+import { usePlayerStore, SPEED_MIN, SPEED_MAX, VOLUME_MAX } from '../stores/playerStore'
 
 /**
  * 全局快捷键调节倍速 / 音量时的 OSD 视觉反馈。
@@ -24,11 +24,12 @@ export default function PlayerOSD() {
       }
     }
     if (kind === 'volume') {
-    const muted = isMuted || volume === 0
+      const muted = isMuted || volume === 0
       return {
         Icon: muted ? VolumeX : Volume2,
         text: `${Math.round(volume * 100)}%`,
-        barRatio: volume
+        // 进度条按上限归一化（200% 时满格）
+        barRatio: muted ? 0 : volume / VOLUME_MAX
       }
     }
     return {

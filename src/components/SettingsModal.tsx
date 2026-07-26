@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react'
-import { X, Eye, EyeOff, ExternalLink, Database, Plus, Trash2, TestTube, Lock, Download, Copy } from 'lucide-react'
+import { X, Eye, EyeOff, ExternalLink, Database, Plus, Trash2, TestTube, Lock, Download, Copy, FolderOpen, Check, AlertCircle, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react'
 import { useSettingsStore } from '../stores/settingsStore'
 import { usePlayerStore } from '../stores/playerStore'
 import { useBookStore } from '../stores/bookStore'
 import { useHistoryStore } from '../stores/historyStore'
+import { useLogStore } from '../stores/logStore'
 import VoiceSelector from './VoiceSelector'
 import CleanRulesSettings from './CleanRulesSettings'
+import AiSettingsPanel from './settings/AiSettingsPanel'
+import { mergeAiSettings } from '../aiSettings'
 import { SHORTCUT_ACTION_LIST, keyToAccelerator, acceleratorToKeys, acceleratorPreview, isModifierKey, requiresModifier } from '../shortcuts'
 import type { TTSEngineConfig, ShortcutAction } from '../global'
 
@@ -14,11 +17,12 @@ interface SettingsModalProps {
   showToast: (type: 'success' | 'error' | 'warning' | 'info', message: string) => void
 }
 
-type Tab = 'general' | 'tts' | 'appearance' | 'clean' | 'shortcuts' | 'about'
+type Tab = 'general' | 'tts' | 'ai' | 'appearance' | 'clean' | 'shortcuts' | 'about'
 
 const tabs: Array<{ key: Tab; label: string }> = [
   { key: 'general', label: '常规' },
   { key: 'tts', label: '朗读' },
+  { key: 'ai', label: 'AI' },
   { key: 'appearance', label: '外观' },
   { key: 'clean', label: '清洗' },
   { key: 'shortcuts', label: '快捷键' },
@@ -55,6 +59,17 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
   const [deployImporting, setDeployImporting] = useState(false)
   const [deployTemplateExpanded, setDeployTemplateExpanded] = useState(false)
 
+  // 数据目录管理 state
+  const [dataDir, setDataDir] = useState('')
+  const [defaultDataDir, setDefaultDataDir] = useState('')
+  const [editingDir, setEditingDir] = useState(false)
+  const [dirInput, setDirInput] = useState('')
+  const [dirValid, setDirValid] = useState<null | { valid: boolean; error?: string; path?: string }>(null)
+  const [dirValidating, setDirValidating] = useState(false)
+  const [migrating, setMigrating] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
+  const [dirHistory, setDirHistory] = useState<string[]>([])
+
   const loadEngines = async () => {
     const list = await window.api?.ttsGetEngines()
     if (list) setEngines(list)
@@ -63,6 +78,20 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
   useEffect(() => {
     if (activeTab === 'tts') loadEngines()
   }, [activeTab])
+
+  // 加载数据目录信息
+  useEffect(() => {
+    if (activeTab !== 'general') return
+    Promise.all([
+      window.api?.dataDirGet(),
+      window.api?.dataDirGetDefault()
+    ]).then(([current, def]) => {
+      if (current) setDataDir(current)
+      if (def) setDefaultDataDir(def)
+    })
+    // 从 settings 中读取历史记录
+    setDirHistory(settings.dataDirHistory || [])
+  }, [activeTab, settings.dataDirHistory])
 
   // 快捷键捕获：点击某条后，监听下一次键盘输入
   // 捕获快捷键期间，临时停用主进程的全部全局快捷键，
@@ -107,6 +136,121 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
       window.api?.applyShortcuts((useSettingsStore.getState().settings.shortcuts || {}) as Record<string, string>)
     }
   }, [capturingKey, setShortcuts, showToast])
+
+  // === 数据目录处理函数 ===
+
+  // 打开文件夹
+  const handleOpenDir = async (path?: string) => {
+    const result = await window.api?.dataDirOpen(path)
+    if (!result?.success) {
+      showToast('error', result?.error || '无法打开文件夹')
+    }
+  }
+
+  // 选择文件夹
+  const handleSelectDir = async () => {
+    const result = await window.api?.dataDirSelect()
+    if (result?.success && result.path) {
+      setDirInput(result.path)
+      // 自动验证
+      validateDir(result.path)
+    }
+  }
+
+  // 验证路径
+  const validateDir = async (path: string) => {
+    if (!path.trim()) {
+      setDirValid(null)
+      return
+    }
+    setDirValidating(true)
+    try {
+      const result = await window.api?.dataDirValidate(path)
+      setDirValid(result || null)
+    } catch {
+      setDirValid({ valid: false, error: '验证失败', path })
+    } finally {
+      setDirValidating(false)
+    }
+  }
+
+  // 输入框内容变化时防抖验证
+  const handleDirInputChange = (value: string) => {
+    setDirInput(value)
+    setDirValid(null)
+    // 防抖验证
+    const timer = setTimeout(() => validateDir(value), 400)
+    return () => clearTimeout(timer)
+  }
+
+  // 保存新路径
+  const handleSaveDir = async () => {
+    if (!dirValid?.valid) {
+      showToast('error', '路径无效，无法保存')
+      return
+    }
+    const newPath = dirValid.path || dirInput
+    if (newPath === dataDir) {
+      showToast('info', '路径未变化')
+      setEditingDir(false)
+      return
+    }
+
+    // 确认是否迁移数据
+    const shouldMigrate = window.confirm(
+      `是否将现有数据迁移到新位置？\n\n旧路径: ${dataDir}\n新路径: ${newPath}\n\n点击「确定」迁移数据（推荐）\n点击「取消」仅切换路径（数据需手动迁移）`
+    )
+
+    if (shouldMigrate) {
+      setMigrating(true)
+      try {
+        const result = await window.api?.dataDirMigrate(newPath)
+        if (!result?.success) {
+          showToast('error', result?.error || '数据迁移失败')
+          setMigrating(false)
+          return
+        }
+        showToast('success', result.migrated ? '数据迁移完成' : '无需迁移')
+      } catch (e) {
+        showToast('error', `迁移失败: ${String(e)}`)
+        setMigrating(false)
+        return
+      }
+      setMigrating(false)
+    }
+
+    // 更新设置
+    const oldPath = dataDir
+    const history = [...(settings.dataDirHistory || []), oldPath].filter(Boolean)
+    setSettings({ dataDir: newPath, dataDirHistory: history })
+    setDataDir(newPath)
+    setDirHistory(history)
+    setEditingDir(false)
+    setDirInput('')
+    setDirValid(null)
+    showToast('success', '数据目录已更新，重启应用后完全生效')
+  }
+
+  // 恢复到历史路径
+  const handleRestoreDir = async (oldPath: string) => {
+    setDirInput(oldPath)
+    setEditingDir(true)
+    await validateDir(oldPath)
+  }
+
+  // 恢复到默认路径
+  const handleRestoreDefault = async () => {
+    setDirInput(defaultDataDir)
+    setEditingDir(true)
+    await validateDir(defaultDataDir)
+  }
+
+  // 取消编辑
+  const handleCancelEdit = () => {
+    setEditingDir(false)
+    setDirInput('')
+    setDirValid(null)
+  }
 
   const handleTestConnection = async () => {
     setTesting(true)
@@ -168,12 +312,128 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
               {/* Data directory */}
               <div>
                 <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">数据存储</h3>
-                <div className="flex items-center gap-2 text-xs">
-                  <Database className="w-4 h-4 text-gray-400" />
-                  <code className="flex-1 px-2 py-1.5 bg-gray-100 dark:bg-gray-900 rounded text-gray-600 dark:text-gray-400">
-                    %APPDATA%/听伴/
-                  </code>
-                </div>
+                {!editingDir ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 text-xs">
+                      <Database className="w-4 h-4 text-gray-400 shrink-0" />
+                      <code
+                        className="flex-1 px-2 py-1.5 bg-gray-100 dark:bg-gray-900 rounded text-gray-600 dark:text-gray-400 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors truncate"
+                        title={dataDir || '加载中...'}
+                        onClick={() => handleOpenDir(dataDir)}
+                      >
+                        {dataDir || '%APPDATA%/听伴/'}
+                      </code>
+                      <button
+                        onClick={() => handleOpenDir(dataDir)}
+                        className="p-1.5 text-gray-400 hover:text-primary hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
+                        title="在文件管理器中打开"
+                      >
+                        <FolderOpen className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          setEditingDir(true)
+                          setDirInput(dataDir)
+                          setDirValid(null)
+                        }}
+                        className="px-2 py-1 text-xs text-primary hover:bg-primary/10 rounded transition-colors"
+                      >
+                        更改
+                      </button>
+                    </div>
+                    {dirHistory.length > 0 && (
+                      <div>
+                        <button
+                          onClick={() => setShowHistory((v) => !v)}
+                          className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                        >
+                          {showHistory ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                          历史路径 ({dirHistory.length})
+                        </button>
+                        {showHistory && (
+                          <div className="mt-1 space-y-1">
+                            {dirHistory.map((p, i) => (
+                              <div key={i} className="flex items-center gap-2 text-[11px] px-2 py-1 bg-gray-50 dark:bg-gray-900/50 rounded">
+                                <code className="flex-1 truncate text-gray-500 dark:text-gray-400">{p}</code>
+                                <button
+                                  onClick={() => handleRestoreDir(p)}
+                                  className="text-primary hover:underline shrink-0"
+                                  title="恢复到此路径"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={dirInput}
+                        onChange={(e) => handleDirInputChange(e.target.value)}
+                        placeholder="输入或选择文件夹路径..."
+                        className="flex-1 px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/30 font-mono"
+                      />
+                      <button
+                        onClick={handleSelectDir}
+                        className="flex items-center gap-1 px-2 py-1.5 text-xs border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors shrink-0"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5" />
+                        浏览
+                      </button>
+                    </div>
+                    {/* 验证状态 */}
+                    {dirValidating && (
+                      <div className="text-[11px] text-gray-400 flex items-center gap-1">
+                        <span className="animate-pulse">●</span> 验证中...
+                      </div>
+                    )}
+                    {dirValid && !dirValidating && (
+                      <div className={`text-[11px] flex items-center gap-1 ${dirValid.valid ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                        {dirValid.valid ? (
+                          <><Check className="w-3 h-3" /> 路径有效: {dirValid.path}</>
+                        ) : (
+                          <><AlertCircle className="w-3 h-3" /> {dirValid.error}: {dirValid.path}</>
+                        )}
+                      </div>
+                    )}
+                    {/* 操作按钮 */}
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={handleSaveDir}
+                        disabled={!dirValid?.valid || migrating}
+                        className="px-3 py-1 text-xs bg-primary text-white rounded hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {migrating ? '迁移中...' : '保存'}
+                      </button>
+                      <button
+                        onClick={handleCancelEdit}
+                        className="px-3 py-1 text-xs text-gray-500 dark:text-gray-400 hover:underline"
+                      >
+                        取消
+                      </button>
+                      {dataDir !== defaultDataDir && (
+                        <button
+                          onClick={handleRestoreDefault}
+                          className="ml-auto flex items-center gap-1 px-2 py-1 text-[11px] text-gray-400 hover:text-primary"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          恢复默认
+                        </button>
+                      )}
+                    </div>
+                    {dirInput && dirInput !== dataDir && dirValid?.valid && (
+                      <p className="text-[11px] text-amber-500 dark:text-amber-400">
+                        ⚠️ 更改路径后建议重启应用以确保所有功能正常工作
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Window behavior */}
@@ -196,6 +456,15 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
                   />
                   显示悬浮窗
                 </label>
+
+                <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 cursor-pointer mt-3">
+                  <input
+                    type="checkbox"
+                    checked={settings.autoResume !== false}
+                    onChange={(e) => setSettings({ autoResume: e.target.checked })}
+                  />
+                  启动时恢复上次阅读
+                </label>
               </div>
 
               {/* Reset TTS engine */}
@@ -215,17 +484,17 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
                 </button>
               </div>
 
-              {/* 清除缓存 */}
+              {/* 数据管理 */}
               <div>
-                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">清除缓存</h3>
+                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">数据管理</h3>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
-                  清理本地数据，不会影响模型配置和朗读设置
+                  删除书籍、封面、历史等本地数据。朗读设置与清洗规则不受影响。
                 </p>
                 <div className="flex flex-wrap gap-2">
                   <button
                     onClick={async () => {
                       if (!window.confirm('确定清除书架数据？（书籍、封面、编辑记录）')) return
-                      await (window.api as any)?.clearCache('books')
+                      await window.api?.clearCache('books')
                       useBookStore.getState().loadBooks()
                       showToast('success', '书架数据已清除并刷新')
                     }}
@@ -236,7 +505,7 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
                   <button
                     onClick={async () => {
                       if (!window.confirm('确定清除收听历史？')) return
-                      await (window.api as any)?.clearCache('history')
+                      await window.api?.clearCache('history')
                       useHistoryStore.getState().loadHistory()
                       showToast('success', '收听历史已清除并刷新')
                     }}
@@ -247,7 +516,7 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
                   <button
                     onClick={async () => {
                       if (!window.confirm('确定清除语音缓存？（Edge / 千问已合成的音频）')) return
-                      await (window.api as any)?.clearCache('audio')
+                      await window.api?.clearCache('audio')
                       showToast('success', '语音缓存已清除')
                     }}
                     className="px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 hover:border-red-200 transition-colors"
@@ -257,28 +526,47 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
                   <button
                     onClick={async () => {
                       if (!window.confirm('确定清除日志？')) return
-                      await (window.api as any)?.clearCache('logs')
+                      await window.api?.clearCache('logs')
                       showToast('success', '日志已清除')
                     }}
                     className="px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 hover:border-red-200 transition-colors"
                   >
-                    📋 日志 & 书签
+                    📋 日志
                   </button>
                   <button
                     onClick={async () => {
-                      if (!window.confirm('⚠️ 确定清除全部数据？\n\n书架、历史、缓存、日志全部清空。\n模型配置和朗读设置会保留。')) return
-                      await (window.api as any)?.clearCache('all')
-                      useBookStore.getState().loadBooks()
+                      if (!window.confirm('⚠️ 确定删除全部书籍与数据？\n\n书架、历史、缓存、日志、AI 对话全部清空。\n朗读设置与清洗规则会保留。')) return
+                      // 1. 先清空内存状态，防止自动保存把旧数据写回
+                      const bookStore = useBookStore.getState()
+                      bookStore.setCurrentBook(null)
+                      bookStore.setBooks([])
+                      // 2. 通过正常保存通道持久化空书架
+                      await window.api?.saveProgress([])
+                      // 3. 清除其余文件（封面、音频缓存、大纲、历史等）
+                      const result = await window.api?.clearCache('all')
+                      if (result && !result.success) {
+                        showToast('error', `部分清除失败：${result.error || '未知错误'}`)
+                        return
+                      }
+                      // 4. 刷新各 store
                       useHistoryStore.getState().loadHistory()
-                      showToast('success', '全部缓存已清除并刷新（模型配置保留）')
+                      useLogStore.getState().loadLogs()
+                      showToast('success', '全部书籍与数据已删除（设置保留）')
                     }}
                     className="px-3 py-1.5 text-xs bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
                   >
-                    全部清除（保留设置）
+                    删除全部书籍与数据
                   </button>
                 </div>
               </div>
             </div>
+          )}
+
+          {activeTab === 'ai' && (
+            <AiSettingsPanel
+              value={mergeAiSettings(settings.ai)}
+              onChange={(ai) => setSettings({ ai })}
+            />
           )}
 
           {activeTab === 'tts' && (
@@ -723,17 +1011,20 @@ requests.post("https://api.openai.com/v1/audio/speech",
                 />
               </div>
 
-              {/* Default volume */}
+              {/* Default volume（默认音量仍建议 ≤100%；播放时可临时增强到 200%） */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
                   默认音量: {Math.round(settings.defaultVolume * 100)}%
+                  <span className="ml-2 text-xs font-normal text-gray-400">
+                    （播放时可增强至 200%）
+                  </span>
                 </label>
                 <input
                   type="range"
                   min="0"
                   max="1"
                   step="0.05"
-                  value={settings.defaultVolume}
+                  value={Math.min(1, settings.defaultVolume)}
                   onChange={(e) => {
                     const val = parseFloat(e.target.value)
                     setSettings({ defaultVolume: val })
@@ -813,6 +1104,7 @@ requests.post("https://api.openai.com/v1/audio/speech",
                   className="w-full"
                 />
               </div>
+
             </div>
           )}
 

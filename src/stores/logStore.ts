@@ -20,11 +20,16 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   loadLogs: async () => {
     try {
-      const logs = (await window.api?.loadLogs()) as LogEntry[]
-      const sorted = (logs || []).sort((a, b) =>
-        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-      )
-      set({ logs: sorted })
+      const diskLogs = (await window.api?.loadLogs()) as LogEntry[]
+      const existing = get().logs
+      // 合并：磁盘快照 + 已有实时条目，按 id 去重；实时条目优先保留
+      const byId = new Map<string, LogEntry>()
+      for (const entry of diskLogs || []) byId.set(entry.id, entry)
+      for (const entry of existing) byId.set(entry.id, entry)
+      const merged = Array.from(byId.values())
+      merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      if (merged.length > 5000) merged.length = 5000
+      set({ logs: merged })
     } catch {
       // ignore
     }
@@ -32,6 +37,8 @@ export const useLogStore = create<LogState>((set, get) => ({
 
   appendLog: (entry) =>
     set((s) => {
+      // 实时推送：去重后插到最前（最新）
+      if (s.logs.some((l) => l.id === entry.id)) return s
       const next = [entry, ...s.logs]
       if (next.length > 5000) next.length = 5000
       return { logs: next }

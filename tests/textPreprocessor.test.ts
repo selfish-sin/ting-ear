@@ -1,17 +1,20 @@
 /**
  * textPreprocessor 单元测试
- * 覆盖全部 5 个处理阶段
+ * 覆盖格式优化各阶段 + enhancedClean 统一流水线
  *
- * 运行: npx ts-node tests/textPreprocessor.test.ts
- * 或:  npx tsx tests/textPreprocessor.test.ts
+ * 运行: npx tsx tests/textPreprocessor.test.ts
  */
 import {
   preprocessText,
+  enhancedClean,
   removeCJKSpaceGaps,
   mergeBrokenLines,
   collapseBlankLines,
+  collapseExtraSpaces,
   removePageArtifacts,
   normalizePunctuation,
+  mergeSingleCharLines,
+  removeRepeatingHeaders,
   splitSentences
 } from '../electron/services/parsers/textPreprocessor'
 
@@ -52,6 +55,10 @@ assert('消除中文标点前后的空格', () => {
   return result.includes('你好，世界')
 })
 
+assert('消除中文与半角标点间空格', () => {
+  return removeCJKSpaceGaps('很好 .') === '很好.'
+})
+
 // ============================================================
 // Stage 2: mergeBrokenLines
 // ============================================================
@@ -69,10 +76,22 @@ assert('句末标点结尾的行不合并', () => {
   return result.split('\n').length === 2 // two separate sentences
 })
 
+assert('英文小写续行合并', () => {
+  const input = 'This is a long sentence that was\nbroken across lines.'
+  const result = mergeBrokenLines(input)
+  return result.includes('was broken') && !result.includes('\nbroken')
+})
+
+assert('英文连字符断词合并', () => {
+  const input = 'inter-\nnational'
+  const result = mergeBrokenLines(input)
+  return result.includes('international')
+})
+
 // ============================================================
-// Stage 3: collapseBlankLines
+// Stage 3: collapseBlankLines / spaces
 // ============================================================
-console.log('\n📌 Stage 3 — collapseBlankLines')
+console.log('\n📌 Stage 3 — collapseBlankLines / spaces')
 
 assert('3+ 空行压缩为 2 个', () => {
   const input = '段落一\n\n\n\n\n段落二'
@@ -84,6 +103,10 @@ assert('保留两个空行', () => {
   const input = '段落一\n\n段落二'
   const result = collapseBlankLines(input)
   return result === input // unchanged
+})
+
+assert('连续空格压缩', () => {
+  return collapseExtraSpaces('hello    world') === 'hello world'
 })
 
 // ============================================================
@@ -102,9 +125,9 @@ assert('中文后逗号半角转全角', () => {
 })
 
 // ============================================================
-// Stage 5: removePageArtifacts
+// Stage 5: removePageArtifacts / headers / vertical
 // ============================================================
-console.log('\n📌 Stage 5 — removePageArtifacts')
+console.log('\n📌 Stage 5 — 页码 / 页眉 / 竖排')
 
 assert('移除页码行', () => {
   const result = removePageArtifacts('第一章\n12\n都是正文')
@@ -114,6 +137,18 @@ assert('移除页码行', () => {
 assert('移除"第X页"模式', () => {
   const result = removePageArtifacts('第 1 页\n正文内容')
   return result === '\n正文内容' || !result.includes('第 1 页')
+})
+
+assert('竖排单字母合成词', () => {
+  const input = 'J\no\nu\nr\nn\na\nl\n正文'
+  const result = mergeSingleCharLines(input)
+  return result.includes('Journal') && result.includes('正文')
+})
+
+assert('重复页眉删除', () => {
+  const input = '福建师范大学学报\n正文一\n福建师范大学学报\n正文二\n福建师范大学学报\n正文三'
+  const result = removeRepeatingHeaders(input)
+  return !result.includes('福建师范大学学报') && result.includes('正文一')
 })
 
 // ============================================================
@@ -137,9 +172,9 @@ assert('空文本返回空数组', () => {
 })
 
 // ============================================================
-// 集成: preprocessText 完整流水线
+// 集成: preprocessText / enhancedClean 统一流水线
 // ============================================================
-console.log('\n📌 集成 — preprocessText 完整流水线')
+console.log('\n📌 集成 — preprocessText / enhancedClean')
 
 assert('完整流水线处理中文空格书', () => {
   const input = '第 1 页\n\n这 是 一 本 好 书。今天天气不错,适合看书.'
@@ -149,6 +184,16 @@ assert('完整流水线处理中文空格书', () => {
     text.includes('今天天气不错，适合看书。') &&
     !text.includes('第 1 页')
   )
+})
+
+assert('enhancedClean 与 preprocessText 结果一致', () => {
+  const input = 'Page 3\n这 是 测 试。Hello,\nworld is fine.'
+  return enhancedClean(input) === preprocessText(input).text
+})
+
+assert('居中页码 - 12 - 被删除', () => {
+  const text = enhancedClean('正文开始\n- 12 -\n继续正文')
+  return !text.includes('12') && text.includes('正文开始') && text.includes('继续正文')
 })
 
 // ============================================================

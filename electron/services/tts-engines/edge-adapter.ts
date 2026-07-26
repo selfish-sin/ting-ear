@@ -8,8 +8,8 @@ if (!globalThis.crypto?.subtle) {
 
 import { join } from 'path'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs'
-import { app } from 'electron'
 import type { ITTSAdapter, TTSResult, TTSVoice } from './adapter'
+import { getDataDir } from '../../ipc/fileHandlers'
 
 /**
  * Edge TTS adapter.
@@ -74,7 +74,7 @@ export class EdgeAdapter implements ITTSAdapter {
 
   constructor() {
     try {
-      this.cacheDir = join(app.getPath('userData'), '听伴', 'edge_cache')
+      this.cacheDir = join(getDataDir(), 'edge_cache')
       if (!existsSync(this.cacheDir)) {
         mkdirSync(this.cacheDir, { recursive: true })
       }
@@ -88,7 +88,7 @@ export class EdgeAdapter implements ITTSAdapter {
   /** 清理超过 10 天的缓存文件（启动时调用） */
   static cleanupCache(): void {
     try {
-      const dir = join(app.getPath('userData'), '听伴', 'edge_cache')
+      const dir = join(getDataDir(), 'edge_cache')
       if (!existsSync(dir)) return
       const cutoff = Date.now() - 10 * 86400000
       for (const f of readdirSync(dir)) {
@@ -144,12 +144,14 @@ export class EdgeAdapter implements ITTSAdapter {
         await new Promise<void>((resolve, reject) => {
           const { audioStream } = tts.toStream(text, toProsody(speed, volume))
           let settled = false
+          // 按时长与字数给更宽超时：短句 12s，长句最多 45s
+          const timeoutMs = Math.min(45000, Math.max(12000, 8000 + text.length * 40))
           const timer = setTimeout(() => {
             if (settled) return
             settled = true
             try { tts.close() } catch { /* ignore */ }
-            reject(new Error('Edge TTS: synthesize timeout (8s)'))
-          }, 8000)
+            reject(new Error(`Edge TTS: synthesize timeout (${Math.round(timeoutMs / 1000)}s)`))
+          }, timeoutMs)
 
           audioStream.on('data', (b: Buffer) => chunks.push(b))
           audioStream.on('close', () => {

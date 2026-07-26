@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { usePlayerStore } from '../stores/playerStore'
+import { useBookStore } from '../stores/bookStore'
 
 interface UseKeyboardOptions {
   onPlay: () => void
@@ -34,11 +35,17 @@ export function useKeyboard({
       }
 
       switch (e.code) {
-        case 'Space':
+        case 'Space': {
           e.preventDefault()
-          if (playState === 'playing') onPause()
-          else onPlay()
+          const mode = useBookStore.getState().readerMode
+          if (playState === 'playing') {
+            onPause()
+          } else if (mode !== 'ai-reading') {
+            // AI 阅读模式下 Space 不主动启动 TTS
+            onPlay()
+          }
           break
+        }
         case 'Escape':
           e.preventDefault()
           onStop()

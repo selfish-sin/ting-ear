@@ -1,12 +1,12 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { app } from 'electron'
 import axios from 'axios'
 import type { ITTSAdapter, TTSResult, TTSVoice, TTSEngineConfig } from './adapter'
 import { QwenAdapter } from './qwen-adapter'
 import { EdgeAdapter } from './edge-adapter'
 import { HttpAdapter } from './http-adapter'
 import { getProviderVoices, mergeVoices } from './provider-voices'
+import { getDataDir } from '../../ipc/fileHandlers'
 
 type DeployParseResult = {
   format: string
@@ -26,21 +26,25 @@ type DeployParseResult = {
 export class EngineManager {
   private adapters: Map<string, ITTSAdapter> = new Map()
   private config: TTSEngineConfig[] = []
-  private configPath: string
   private activeEngineId: string
 
   constructor() {
-    const dir = join(app.getPath('userData'), '听伴')
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    this.configPath = join(dir, 'engines.json')
     this.activeEngineId = 'edge' // Default to Edge TTS (free)
     this.loadConfig()
   }
 
+  /** 始终跟随 getDataDir()，自定义数据目录后引擎配置与书籍同目录 */
+  private getConfigPath(): string {
+    const dir = getDataDir()
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    return join(dir, 'engines.json')
+  }
+
   private loadConfig(): void {
     try {
-      if (existsSync(this.configPath)) {
-        const data = readFileSync(this.configPath, 'utf-8')
+      const configPath = this.getConfigPath()
+      if (existsSync(configPath)) {
+        const data = readFileSync(configPath, 'utf-8')
         this.config = JSON.parse(data)
       }
     } catch {
@@ -50,7 +54,7 @@ export class EngineManager {
 
   private saveConfig(): void {
     try {
-      writeFileSync(this.configPath, JSON.stringify(this.config, null, 2), 'utf-8')
+      writeFileSync(this.getConfigPath(), JSON.stringify(this.config, null, 2), 'utf-8')
     } catch {
       // ignore
     }
@@ -118,6 +122,7 @@ export class EngineManager {
 
     // Try active engine first
     const adapter = this.getAdapter(targetEngine)
+    let adapterError: string | undefined
     if (adapter) {
       console.info(`[TTS] trying engine: ${adapter.engineId}`)
       const result = await adapter.synthesize(text, voiceId, speed, volume)
@@ -125,6 +130,8 @@ export class EngineManager {
       if (result.success) {
         return { ...result, engineUsed: adapter.engineId }
       }
+      // 保留适配器的原始原因，供 IPC 日志和前端提示定位网络/响应问题。
+      adapterError = result.error
     } else {
       console.info(`[TTS] adapter not found for: ${targetEngine}`)
     }
@@ -133,7 +140,12 @@ export class EngineManager {
     // 千问是付费 API，只在用户手动选择时才用，不做自动回退
     // useTTS.ts 收到 failure 后自动降级到系统离线 TTS（免费）
     console.info(`[TTS] ${targetEngine} failed, no fallback`)
-    return { success: false, error: `${targetEngine} 不可用`, fallback: true, engineUsed: 'system' }
+    return {
+      success: false,
+      error: adapterError || `${targetEngine} 不可用`,
+      fallback: true,
+      engineUsed: 'system'
+    }
   }
 
   /** Get voices for an engine */

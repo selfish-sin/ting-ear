@@ -23,7 +23,8 @@ import {
   ChevronUp,
   ChevronDown,
   Minus,
-  ListChecks
+  ListChecks,
+  MoreHorizontal
 } from 'lucide-react'
 import { useBookStore } from '../stores/bookStore'
 import { useAlbumStore } from '../stores/albumStore'
@@ -37,6 +38,7 @@ import {
 import { ALBUM_TITLE_MAX_LENGTH } from '../utils/albumUtils'
 import { BOOK_TITLE_MAX_LENGTH, normalizeBookTitle } from '../utils/bookData'
 import type { AlbumItem, BookData, CustomAlbum } from '../global'
+import ContextMenu, { type ContextMenuGroup } from './ui/ContextMenu'
 
 // 与 electron/ipc/fileHandlers.ts 中的 SUPPORTED_EXTENSIONS 保持一致
 const SUPPORTED_EXTENSIONS = new Set(['epub', 'txt', 'pdf', 'docx', 'md', 'html', 'htm', 'mobi', 'azw', 'azw3', 'prc'])
@@ -139,9 +141,12 @@ export default function BookShelf({
   useEffect(() => {
     localStorage.setItem(SHELF_SCALE_KEY, String(shelfScale))
   }, [shelfScale])
-  const [contextMenu, setContextMenu] = useState<{ book: BookData; x: number; y: number } | null>(
-    null
-  )
+  const [contextMenu, setContextMenu] = useState<{
+    book: BookData
+    x: number
+    y: number
+    triggerElement: HTMLElement | null
+  } | null>(null)
   const [coverUrls, setCoverUrls] = useState<Record<string, string>>({})
   const [isAddContentOpen, setIsAddContentOpen] = useState(false)
   const [albumEditor, setAlbumEditor] = useState<AlbumEditor | null>(null)
@@ -310,6 +315,13 @@ export default function BookShelf({
     return sorted
   }, [books, searchKeyword, sortBy, albumBookIds, activeAlbum, albumBookItems])
 
+  // 继续阅读：最近阅读的未完成书籍
+  const lastReadBook = useMemo(() => {
+    return books
+      .filter((b) => !b.isCompleted && b.progressPercent > 0 && b.lastReadAt)
+      .sort((a, b) => new Date(b.lastReadAt).getTime() - new Date(a.lastReadAt).getTime())[0] ?? null
+  }, [books])
+
   // ---- Selection helpers ----
   const selectedCount = selectedIds.size
   const allSelected = displayBooks.length > 0 && displayBooks.every((b) => selectedIds.has(b.id))
@@ -406,13 +418,15 @@ export default function BookShelf({
       }
       showToast('info', `开始导出《${book.title}》音频...`)
 
+      const settings = (await window.api?.loadSettings()) as { voiceId?: string; ttsEngine?: string } | null
       const result = await window.api?.exportAudio({
         sentences: book.sentences,
-        voiceId: 'zh-CN-XiaoxiaoNeural', // 导出统一用默认晓晓音色
+        voiceId: settings?.voiceId || 'zh-CN-XiaoxiaoNeural',
         speed: 1.0,
         startIndex: 0,
         endIndex: book.sentences.length,
-        defaultName: book.title
+        defaultName: book.title,
+        engineId: settings?.ttsEngine && settings.ttsEngine !== 'system' ? settings.ttsEngine : 'edge'
       })
 
       if (result?.success) {
@@ -438,13 +452,15 @@ export default function BookShelf({
     let done = 0
     for (const book of targetBooks) {
       showToast('info', `正在导出《${book.title}》(${done + 1}/${targetBooks.length})...`)
+      const settings = (await window.api?.loadSettings()) as { voiceId?: string; ttsEngine?: string } | null
       const result = await window.api?.exportAudio({
         sentences: book.sentences,
-        voiceId: 'zh-CN-XiaoxiaoNeural',
+        voiceId: settings?.voiceId || 'zh-CN-XiaoxiaoNeural',
         speed: 1.0,
         startIndex: 0,
         endIndex: book.sentences.length,
-        defaultName: book.title
+        defaultName: book.title,
+        engineId: settings?.ttsEngine && settings.ttsEngine !== 'system' ? settings.ttsEngine : 'edge'
       })
       if (result?.success) done++
     }
@@ -610,18 +626,39 @@ export default function BookShelf({
     [onImportFile, showToast]
   )
 
-  const handleContextMenu = (e: React.MouseEvent, book: BookData) => {
+  const handleContextMenu = (e: React.MouseEvent<HTMLElement>, book: BookData) => {
     e.preventDefault()
-    setContextMenu({ book, x: e.clientX, y: e.clientY })
+    e.stopPropagation()
+    setContextMenu({
+      book,
+      x: e.clientX,
+      y: e.clientY,
+      triggerElement: e.currentTarget
+    })
   }
 
-  useEffect(() => {
-    const closeMenu = () => setContextMenu(null)
-    if (contextMenu) {
-      window.addEventListener('click', closeMenu)
-      return () => window.removeEventListener('click', closeMenu)
-    }
-  }, [contextMenu])
+  const handleMenuButtonClick = (e: React.MouseEvent<HTMLButtonElement>, book: BookData) => {
+    e.stopPropagation()
+    const rect = e.currentTarget.getBoundingClientRect()
+    setContextMenu({
+      book,
+      x: rect.right,
+      y: rect.bottom + 4,
+      triggerElement: e.currentTarget
+    })
+  }
+
+  const handleBookCardKeyDown = (e: React.KeyboardEvent<HTMLElement>, book: BookData) => {
+    if (!(e.shiftKey && e.key === 'F10')) return
+    e.preventDefault()
+    const rect = e.currentTarget.getBoundingClientRect()
+    setContextMenu({
+      book,
+      x: rect.left + Math.min(rect.width, 48),
+      y: rect.top + Math.min(rect.height, 48),
+      triggerElement: e.currentTarget
+    })
+  }
 
   const handleUploadCover = async (book: BookData) => {
     try {
@@ -701,6 +738,23 @@ export default function BookShelf({
     }
   }
 
+  const handleReprocessBook = async (book: BookData) => {
+    try {
+      const result = await window.api?.reprocessBook(book.id)
+      if (result?.success) {
+        showToast(
+          'success',
+          `已切除多余空格${result.stats?.spacesRemoved ? `（消除 ${result.stats.spacesRemoved} 个）` : ''}`
+        )
+        await loadBooks()
+      } else {
+        showToast('error', result?.error || '处理失败')
+      }
+    } catch (error) {
+      showToast('error', `处理失败: ${String(error)}`)
+    }
+  }
+
   const badgeColors: Record<string, string> = {
     epub: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
     txt: 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300',
@@ -747,10 +801,150 @@ export default function BookShelf({
     )
   }
 
+  const bookMenuGroups: ContextMenuGroup[] = contextMenu
+    ? [
+        {
+          id: 'reading',
+          items: [
+            {
+              id: 'open',
+              label: '打开阅读',
+              icon: <BookOpen className="h-4 w-4" />,
+              onSelect: () => onOpenBook(contextMenu.book)
+            },
+            ...(onSelectChapters
+              ? [{
+                  id: 'chapters',
+                  label: '选择章节',
+                  icon: <ListChecks className="h-4 w-4" />,
+                  onSelect: () => onSelectChapters(contextMenu.book)
+                }]
+              : []),
+            {
+              id: 'favorite',
+              label: favorites.has(contextMenu.book.id) ? '取消收藏' : '收藏',
+              icon: <Star className={`h-4 w-4 ${favorites.has(contextMenu.book.id) ? 'fill-current text-amber-400' : ''}`} />,
+              onSelect: () => toggleFavorite(contextMenu.book.id)
+            }
+          ]
+        },
+        {
+          id: 'metadata',
+          items: [
+            {
+              id: 'cover-upload',
+              label: '更换封面',
+              icon: <Image className="h-4 w-4" />,
+              onSelect: () => handleUploadCover(contextMenu.book)
+            },
+            {
+              id: 'cover-regenerate',
+              label: '重新生成封面',
+              icon: <RefreshCw className="h-4 w-4" />,
+              onSelect: () => handleRegenerateCover(contextMenu.book)
+            },
+            {
+              id: 'rename',
+              label: '编辑文章标题',
+              icon: <Pencil className="h-4 w-4" />,
+              onSelect: () => handleEditBookTitle(contextMenu.book)
+            }
+          ]
+        },
+        {
+          id: 'export',
+          items: [
+            {
+              id: 'export-bookmarks',
+              label: '导出书签',
+              icon: <Upload className="h-4 w-4" />,
+              onSelect: () => handleExportBookmarks(contextMenu.book)
+            },
+            {
+              id: 'export-audio',
+              label: '导出音频',
+              icon: <Download className="h-4 w-4" />,
+              onSelect: () => handleExportAudio(contextMenu.book)
+            }
+          ]
+        },
+        {
+          id: 'album',
+          items: activeAlbum
+            ? [
+                {
+                  id: 'album-up',
+                  label: '在专辑中上移',
+                  icon: <ChevronUp className="h-4 w-4" />,
+                  onSelect: async () => {
+                    await moveItem(
+                      activeAlbum.id,
+                      { resourceType: 'book', resourceId: contextMenu.book.id },
+                      -1
+                    )
+                    setSortBy('custom')
+                  }
+                },
+                {
+                  id: 'album-down',
+                  label: '在专辑中下移',
+                  icon: <ChevronDown className="h-4 w-4" />,
+                  onSelect: async () => {
+                    await moveItem(
+                      activeAlbum.id,
+                      { resourceType: 'book', resourceId: contextMenu.book.id },
+                      1
+                    )
+                    setSortBy('custom')
+                  }
+                },
+                {
+                  id: 'album-remove',
+                  label: '移出当前专辑',
+                  icon: <X className="h-4 w-4" />,
+                  onSelect: () => handleRemoveFromAlbum(contextMenu.book)
+                }
+              ]
+            : []
+        },
+        {
+          id: 'tools',
+          items: [
+            {
+              id: 'reprocess',
+              label: '切除空格',
+              icon: <Scissors className="h-4 w-4" />,
+              onSelect: () => handleReprocessBook(contextMenu.book)
+            },
+            ...(onCleanText
+              ? [{
+                  id: 'clean',
+                  label: '清洗格式',
+                  icon: <Sparkles className="h-4 w-4" />,
+                  onSelect: () => onCleanText(contextMenu.book)
+                }]
+              : [])
+          ]
+        },
+        {
+          id: 'danger',
+          items: [
+            {
+              id: 'delete',
+              label: '删除书籍',
+              icon: <Trash2 className="h-4 w-4" />,
+              danger: true,
+              onSelect: () => handleDeleteBook(contextMenu.book)
+            }
+          ]
+        }
+      ]
+    : []
+
   return (
     <div
       className={`relative flex-1 flex flex-col transition-colors duration-200 overflow-hidden ${
-        isDragOver ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-white dark:bg-dark-bg'
+        isDragOver ? 'bg-primary/5 dark:bg-primary/10' : 'bg-surface dark:bg-dark-bg'
       }`}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
@@ -759,26 +953,24 @@ export default function BookShelf({
     >
       {/* Drag-and-drop upload overlay */}
       {isDragOver && isFileDrag && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-blue-50/90 dark:bg-blue-950/80 backdrop-blur-sm pointer-events-none">
-          <div className="flex flex-col items-center gap-4 px-10 py-12 rounded-2xl border-2 border-dashed border-primary bg-white/60 dark:bg-gray-900/60 shadow-lg">
-            <Upload className="w-16 h-16 text-primary animate-bounce" />
-            <p className="text-xl font-semibold text-primary">释放鼠标以导入书籍</p>
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-primary/10 dark:bg-primary/15 backdrop-blur-sm pointer-events-none">
+          <div className="flex flex-col items-center gap-4 px-10 py-12 rounded-3xl border-2 border-dashed border-primary/60 bg-white/80 dark:bg-dark-raised/80 shadow-card">
+            <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center">
+              <Upload className="w-8 h-8 text-primary" />
+            </div>
+            <p className="text-lg font-semibold text-primary">释放以导入书籍</p>
             <p className="text-sm text-gray-500 dark:text-gray-400">
-              支持 EPUB · TXT · PDF · DOCX · MD · HTML · MOBI
+              EPUB · TXT · PDF · DOCX · MD · HTML · MOBI
             </p>
           </div>
         </div>
       )}
 
-      {/* Album tabs: albums are first-class shelf views. */}
-      <div className="flex items-center gap-1 px-4 pt-3 overflow-x-auto flex-shrink-0">
+      {/* Album tabs */}
+      <div className="flex items-center gap-1.5 px-4 pt-3.5 overflow-x-auto flex-shrink-0">
         <button
           onClick={() => openAlbum(null)}
-          className={`px-3 py-1.5 text-sm rounded-md whitespace-nowrap transition-colors ${
-            !activeAlbumId
-              ? 'bg-primary text-white'
-              : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
-          }`}
+          className={`chip whitespace-nowrap ${!activeAlbumId ? 'chip-active' : 'chip-idle'}`}
         >
           全部书籍
         </button>
@@ -788,21 +980,17 @@ export default function BookShelf({
             <button
               key={album.id}
               onClick={() => openAlbum(album.id)}
-              className={`inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md whitespace-nowrap transition-colors ${
-                isActive
-                  ? 'bg-primary text-white'
-                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
-              }`}
+              className={`chip whitespace-nowrap ${isActive ? 'chip-active' : 'chip-idle'}`}
               title={album.title}
             >
-              <Folder className="w-3.5 h-3.5" />
+              <Folder className="w-3.5 h-3.5 opacity-80" />
               <span className="max-w-32 truncate">{album.title}</span>
             </button>
           )
         })}
         <button
           onClick={handleCreateAlbum}
-          className="p-1.5 rounded-md text-gray-500 hover:text-primary hover:bg-gray-100 dark:hover:bg-gray-800"
+          className="icon-btn-sm"
           title={activeAlbum ? '新建子专辑' : '新建专辑'}
         >
           <Plus className="w-4 h-4" />
@@ -848,22 +1036,22 @@ export default function BookShelf({
       )}
 
       {/* Top toolbar */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200/60 dark:border-dark-border flex-shrink-0">
         <div className="flex-1 relative max-w-xs">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
           <input
             type="text"
             placeholder="搜索书名或作者"
             value={searchKeyword}
             onChange={(e) => setSearchKeyword(e.target.value)}
-            className="w-full pl-9 pr-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/30"
+            className="field-input pl-9 pr-3 py-1.5"
           />
         </div>
 
         <select
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value as SortBy)}
-          className="text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1.5 text-gray-600 dark:text-gray-300"
+          className="text-sm field-input py-1.5 w-auto min-w-[7rem]"
         >
           <option value="recent">最近阅读</option>
           <option value="added">添加时间</option>
@@ -871,37 +1059,41 @@ export default function BookShelf({
           {activeAlbum && <option value="custom">专辑顺序</option>}
         </select>
 
-        <div className="flex bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5">
+        <div className="flex bg-gray-100/90 dark:bg-white/[0.05] rounded-xl p-0.5">
           <button
             onClick={() => setViewMode('grid')}
-            className={`p-1.5 rounded ${
-              viewMode === 'grid' ? 'bg-white dark:bg-gray-700 shadow-sm' : ''
+            className={`p-1.5 rounded-lg transition-all ${
+              viewMode === 'grid'
+                ? 'bg-white dark:bg-dark-raised shadow-soft text-primary'
+                : 'text-gray-500'
             }`}
             title="网格视图"
           >
-            <LayoutGrid className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+            <LayoutGrid className="w-4 h-4" />
           </button>
           <button
             onClick={() => setViewMode('list')}
-            className={`p-1.5 rounded ${
-              viewMode === 'list' ? 'bg-white dark:bg-gray-700 shadow-sm' : ''
+            className={`p-1.5 rounded-lg transition-all ${
+              viewMode === 'list'
+                ? 'bg-white dark:bg-dark-raised shadow-soft text-primary'
+                : 'text-gray-500'
             }`}
             title="列表视图"
           >
-            <List className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+            <List className="w-4 h-4" />
           </button>
         </div>
 
         {/* 书架缩放滑块 — 仅网格视图下显示 */}
         {viewMode === 'grid' && (
-          <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg px-1.5 py-1">
+          <div className="flex items-center gap-1 bg-gray-100/90 dark:bg-white/[0.05] rounded-xl px-1.5 py-1">
             <button
               onClick={() => setShelfScale((s) => Math.max(SHELF_SCALE_MIN, s - 1))}
               disabled={shelfScale <= SHELF_SCALE_MIN}
-              className="p-0.5 rounded text-gray-500 dark:text-gray-400 hover:text-primary hover:bg-white dark:hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-gray-500 transition-colors"
+              className="icon-btn-sm disabled:opacity-30"
               title="缩小"
             >
-              <Minus className="w-4 h-4" />
+              <Minus className="w-3.5 h-3.5" />
             </button>
             <input
               type="range"
@@ -916,25 +1108,22 @@ export default function BookShelf({
             <button
               onClick={() => setShelfScale((s) => Math.min(SHELF_SCALE_MAX, s + 1))}
               disabled={shelfScale >= SHELF_SCALE_MAX}
-              className="p-0.5 rounded text-gray-500 dark:text-gray-400 hover:text-primary hover:bg-white dark:hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-gray-500 transition-colors"
+              className="icon-btn-sm disabled:opacity-30"
               title="放大"
             >
-              <Plus className="w-4 h-4" />
+              <Plus className="w-3.5 h-3.5" />
             </button>
           </div>
         )}
 
-        <button
-          onClick={handleSelectFile}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-sm rounded-lg hover:bg-primary/90 transition-colors"
-        >
+        <button onClick={handleSelectFile} className="btn-primary py-1.5 text-[13px]">
           <Upload className="w-4 h-4" />
           <span>导入书籍</span>
         </button>
         {activeAlbum && (
           <button
             onClick={() => setIsAddContentOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-primary text-primary text-sm rounded-lg hover:bg-primary/5 transition-colors"
+            className="btn-secondary py-1.5 text-[13px] border border-primary/25 text-primary hover:bg-primary/5"
           >
             <Plus className="w-4 h-4" />
             <span>添加内容</span>
@@ -991,6 +1180,39 @@ export default function BookShelf({
 
       {/* Book list / Empty state */}
       <div className="flex-1 overflow-y-auto p-4">
+        {/* 继续阅读 — 最近阅读的书一键恢复 */}
+        {!activeAlbumId && lastReadBook && (
+          <div
+            className="mb-5 flex items-center gap-3.5 p-3.5 rounded-2xl border border-primary/20 bg-primary/[0.04] dark:bg-primary/[0.08] cursor-pointer hover:border-primary/40 hover:bg-primary/[0.07] dark:hover:bg-primary/[0.12] transition-all group/resume"
+            onClick={() => onOpenBook(lastReadBook)}
+          >
+            <div className="w-11 h-14 rounded-lg overflow-hidden flex-shrink-0 bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 shadow-sm ring-1 ring-black/[0.06] dark:ring-white/[0.08]">
+              {coverUrls[lastReadBook.id] ? (
+                <img src={coverUrls[lastReadBook.id]} alt="" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-lg font-bold text-primary/40">
+                  {lastReadBook.title.charAt(0)}
+                </div>
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-medium text-primary/70 bg-primary/10 px-1.5 py-0.5 rounded">继续阅读</span>
+                <span className="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">{lastReadBook.title}</span>
+              </div>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 truncate">
+                {lastReadBook.chapters?.[lastReadBook.currentChapterIndex]?.title || `第 ${lastReadBook.currentChapterIndex + 1} 章`}
+                {' · '}
+                {Math.round(lastReadBook.progressPercent)}%
+              </p>
+              <div className="mt-1.5 h-1 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                <div className="h-full rounded-full bg-primary/70 transition-all" style={{ width: `${Math.min(100, lastReadBook.progressPercent)}%` }} />
+              </div>
+            </div>
+            <ChevronRight className="w-5 h-5 text-gray-300 dark:text-gray-600 group-hover/resume:text-primary transition-colors flex-shrink-0" />
+          </div>
+        )}
+
         {childAlbums.length > 0 && (
           <div className="mb-5">
             <div className="flex items-center justify-between mb-2">
@@ -1040,19 +1262,20 @@ export default function BookShelf({
 
         {displayBooks.length === 0 ? (
           <div
-            className={`h-full flex flex-col items-center justify-center border-2 border-dashed rounded-xl transition-all ${
-              isDragOver ? 'border-primary bg-primary/5' : 'border-gray-300 dark:border-gray-600'
+            className={`h-full flex flex-col items-center justify-center border-2 border-dashed rounded-3xl transition-all mx-1 ${
+              isDragOver
+                ? 'border-primary bg-primary/5'
+                : 'border-gray-200 dark:border-dark-border bg-white/40 dark:bg-dark-surface/40'
             }`}
           >
-            <FileText className="w-16 h-16 text-gray-300 dark:text-gray-600 mb-4" />
-            <h3 className="text-lg font-medium text-gray-500 dark:text-gray-400">还没有书籍</h3>
-            <p className="text-sm text-gray-400 dark:text-gray-500 mt-2">
-              拖拽 EPUB / TXT / PDF / DOCX / MD / HTML / MOBI 文件到此处
+            <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
+              <FileText className="w-8 h-8 text-primary/50" />
+            </div>
+            <h3 className="text-base font-semibold text-gray-600 dark:text-gray-300">书架还是空的</h3>
+            <p className="text-sm text-gray-400 dark:text-gray-500 mt-2 max-w-xs text-center leading-relaxed">
+              拖拽电子书到这里，或点击下方按钮导入
             </p>
-            <button
-              onClick={handleSelectFile}
-              className="mt-6 inline-flex items-center gap-2 px-6 py-2.5 bg-primary text-white rounded-lg hover:bg-primary/90 transition-colors shadow-sm"
-            >
+            <button onClick={handleSelectFile} className="btn-primary mt-6 px-6 py-2.5">
               <Upload className="w-4 h-4" />
               <span>导入书籍</span>
             </button>
@@ -1068,17 +1291,28 @@ export default function BookShelf({
                   }
                 }}
                 onContextMenu={(e) => handleContextMenu(e, book)}
-                className={`group relative cursor-pointer rounded-xl border transition-all ${SCALE_TO_PAD[shelfScale]} ${
+                onKeyDown={(e) => handleBookCardKeyDown(e, book)}
+                tabIndex={0}
+                className={`group relative cursor-pointer book-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${SCALE_TO_PAD[shelfScale]} ${
                   selectedIds.has(book.id)
-                    ? 'border-primary bg-primary/5 dark:bg-primary/10 shadow-md'
-                    : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-dark-surface hover:shadow-lg hover:border-primary/30'
+                    ? 'border-primary/50 bg-primary/5 dark:bg-primary/10 ring-2 ring-primary/20'
+                    : ''
                 }`}
               >
                 {/* Selection checkbox — always visible */}
                 <SelectCheckbox id={book.id} />
+                <button
+                  type="button"
+                  onClick={(e) => handleMenuButtonClick(e, book)}
+                  className="absolute left-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded bg-white/85 text-gray-500 opacity-70 shadow-sm transition hover:opacity-100 focus-visible:opacity-100 dark:bg-gray-800/85 dark:text-gray-300"
+                  aria-label="更多书籍操作"
+                  title="更多操作"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
                 {/* Cover — 点击换封面 */}
                 <div
-                  className="w-full aspect-[3/4] rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 dark:from-primary/30 dark:to-primary/10 flex items-center justify-center mb-2 overflow-hidden relative group/cover cursor-pointer"
+                  className="w-full aspect-[3/4] rounded-xl bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 flex items-center justify-center mb-2.5 overflow-hidden relative group/cover cursor-pointer shadow-sm ring-1 ring-black/[0.06] dark:ring-white/[0.08]"
                   onClick={(e) => {
                     e.stopPropagation()
                     handleUploadCover(book)
@@ -1158,7 +1392,9 @@ export default function BookShelf({
                   }
                 }}
                 onContextMenu={(e) => handleContextMenu(e, book)}
-                className={`group relative flex items-center gap-3 px-4 py-3 rounded-lg border transition-all cursor-pointer ${
+                onKeyDown={(e) => handleBookCardKeyDown(e, book)}
+                tabIndex={0}
+                className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border transition-all cursor-pointer book-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
                   selectedIds.has(book.id)
                     ? 'border-primary bg-primary/5 dark:bg-primary/10'
                     : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-dark-surface hover:shadow-md hover:border-primary/30'
@@ -1221,6 +1457,15 @@ export default function BookShelf({
                 >
                   <Star className={`w-4 h-4 ${favorites.has(book.id) ? 'fill-amber-400' : ''}`} />
                 </button>
+                <button
+                  type="button"
+                  onClick={(e) => handleMenuButtonClick(e, book)}
+                  className="icon-btn-sm flex-shrink-0"
+                  aria-label="更多书籍操作"
+                  title="更多操作"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
                 <div className="w-32 flex-shrink-0">
                   <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
                     <div
@@ -1238,167 +1483,14 @@ export default function BookShelf({
         )}
       </div>
 
-      {/* Context menu */}
-      {contextMenu && (
-        <div
-          className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl py-1 text-sm min-w-[160px]"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            onClick={() => {
-              onOpenBook(contextMenu.book)
-              setContextMenu(null)
-            }}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <BookOpen className="w-4 h-4" /> 打开阅读
-          </button>
-          {onSelectChapters && (
-            <button
-              onClick={() => {
-                onSelectChapters(contextMenu.book)
-                setContextMenu(null)
-              }}
-              className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-            >
-              <ListChecks className="w-4 h-4" /> 选择章节
-            </button>
-          )}
-          <button
-            onClick={() => {
-              handleUploadCover(contextMenu.book)
-              setContextMenu(null)
-            }}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <Image className="w-4 h-4" /> 更换封面
-          </button>
-          <button
-            onClick={() => handleRegenerateCover(contextMenu.book)}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <RefreshCw className="w-4 h-4" /> 重新生成封面
-          </button>
-          <button
-            onClick={() => handleEditBookTitle(contextMenu.book)}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <Pencil className="w-4 h-4" /> 编辑文章标题
-          </button>
-          <button
-            onClick={() => {
-              toggleFavorite(contextMenu.book.id)
-              setContextMenu(null)
-            }}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <Star
-              className={`w-4 h-4 ${favorites.has(contextMenu.book.id) ? 'fill-amber-400 text-amber-400' : ''}`}
-            />
-            {favorites.has(contextMenu.book.id) ? '取消收藏' : '收藏'}
-          </button>
-          <button
-            onClick={() => {
-              handleExportBookmarks(contextMenu.book)
-              setContextMenu(null)
-            }}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <Upload className="w-4 h-4" /> 导出书签
-          </button>
-          <button
-            onClick={() => handleExportAudio(contextMenu.book)}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <Download className="w-4 h-4" /> 导出音频
-          </button>
-          {activeAlbum && (
-            <>
-              <button
-                onClick={async () => {
-                  await moveItem(
-                    activeAlbum.id,
-                    { resourceType: 'book', resourceId: contextMenu.book.id },
-                    -1
-                  )
-                  setSortBy('custom')
-                  setContextMenu(null)
-                }}
-                className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-              >
-                <ChevronUp className="w-4 h-4" /> 在专辑中上移
-              </button>
-              <button
-                onClick={async () => {
-                  await moveItem(
-                    activeAlbum.id,
-                    { resourceType: 'book', resourceId: contextMenu.book.id },
-                    1
-                  )
-                  setSortBy('custom')
-                  setContextMenu(null)
-                }}
-                className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-              >
-                <ChevronDown className="w-4 h-4" /> 在专辑中下移
-              </button>
-              <button
-                onClick={() => {
-                  handleRemoveFromAlbum(contextMenu.book)
-                  setContextMenu(null)
-                }}
-                className="w-full text-left px-4 py-2 text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/20 flex items-center gap-2"
-              >
-                <X className="w-4 h-4" /> 移出当前专辑
-              </button>
-            </>
-          )}
-          <div className="my-1 border-t border-gray-100 dark:border-gray-700" />
-          <button
-            onClick={async () => {
-              if (!contextMenu.book) return
-              setContextMenu(null)
-              try {
-                const result = await window.api?.reprocessBook(contextMenu.book.id)
-                if (result?.success) {
-                  showToast(
-                    'success',
-                    `已切除多余空格${result.stats?.spacesRemoved ? `（消除 ${result.stats.spacesRemoved} 个）` : ''}`
-                  )
-                  await loadBooks()
-                } else {
-                  showToast('error', result?.error || '处理失败')
-                }
-              } catch (e) {
-                showToast('error', `处理失败: ${String(e)}`)
-              }
-            }}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <Scissors className="w-4 h-4" /> 切除空格
-          </button>
-          <button
-            onClick={() => {
-              if (!contextMenu.book || !onCleanText) return
-              setContextMenu(null)
-              onCleanText(contextMenu.book)
-            }}
-            className="w-full text-left px-4 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-          >
-            <Sparkles className="w-4 h-4" /> 清洗格式
-          </button>
-          <button
-            onClick={() => {
-              handleDeleteBook(contextMenu.book)
-              setContextMenu(null)
-            }}
-            className="w-full text-left px-4 py-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-2"
-          >
-            <Trash2 className="w-4 h-4" /> 删除书籍
-          </button>
-        </div>
-      )}
+      <ContextMenu
+        open={contextMenu !== null}
+        point={{ x: contextMenu?.x ?? 0, y: contextMenu?.y ?? 0 }}
+        groups={bookMenuGroups}
+        ariaLabel="书籍操作"
+        triggerElement={contextMenu?.triggerElement}
+        onClose={() => setContextMenu(null)}
+      />
 
       {bookTitleEditor && (
         <div

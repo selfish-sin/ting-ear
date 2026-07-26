@@ -1,7 +1,8 @@
-import { app, BrowserWindow } from 'electron'
+import { BrowserWindow } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
+import { getDataDir } from '../ipc/fileHandlers'
 
 export interface LogEntry {
   id: string
@@ -24,31 +25,29 @@ export class LogService {
     LogService.mainWindow = win
   }
 
-  private logDir: string
-  private logFile: string
   private logs: LogEntry[] = []
 
   constructor() {
-    this.logDir = join(app.getPath('userData'), '听伴')
-    // Fallback if the directory name has encoding issues
-    if (!this.logDir) {
-      this.logDir = join(app.getPath('userData'), 'ting-ear')
-    }
-    this.logFile = join(this.logDir, 'logs.json')
-    this.ensureDir()
     this.load()
   }
 
+  private getLogFile(): string {
+    return join(getDataDir(), 'logs.json')
+  }
+
   private ensureDir(): void {
-    if (!existsSync(this.logDir)) {
-      mkdirSync(this.logDir, { recursive: true })
+    const dir = getDataDir()
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true })
     }
   }
 
   private load(): void {
     try {
-      if (existsSync(this.logFile)) {
-        const data = readFileSync(this.logFile, 'utf-8')
+      this.ensureDir()
+      const logFile = this.getLogFile()
+      if (existsSync(logFile)) {
+        const data = readFileSync(logFile, 'utf-8')
         this.logs = JSON.parse(data)
       }
     } catch {
@@ -56,13 +55,31 @@ export class LogService {
     }
   }
 
+  /** 数据目录切换后重新从新路径加载 */
+  reloadFromDisk(): void {
+    try {
+      this.ensureDir()
+      const logFile = this.getLogFile()
+      if (existsSync(logFile)) {
+        const data = readFileSync(logFile, 'utf-8')
+        this.logs = JSON.parse(data)
+      }
+    } catch {
+      /* keep in-memory */
+    }
+  }
+
   private save(): void {
     try {
+      this.ensureDir()
       // Trim logs if exceeding max
       if (this.logs.length > MAX_LOG_ENTRIES) {
         this.logs = this.logs.slice(this.logs.length - TRIM_TO)
       }
-      writeFileSync(this.logFile, JSON.stringify(this.logs, null, 2), 'utf-8')
+      const logFile = this.getLogFile()
+      const tmpPath = `${logFile}.tmp`
+      writeFileSync(tmpPath, JSON.stringify(this.logs, null, 2), 'utf-8')
+      renameSync(tmpPath, logFile)
     } catch (error) {
       console.error('Failed to save logs:', error)
     }
@@ -130,7 +147,8 @@ export class LogService {
     this.save()
   }
 
+  /** 当前日志目录（随 getDataDir 变化） */
   getLogDir(): string {
-    return this.logDir
+    return getDataDir()
   }
 }

@@ -2,8 +2,8 @@ import axios from 'axios'
 import { createHash } from 'crypto'
 import { join } from 'path'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs'
-import { app } from 'electron'
 import type { ITTSAdapter, TTSResult, TTSVoice } from './adapter'
+import { getDataDir } from '../../ipc/fileHandlers'
 
 const QWEN_VOICES: TTSVoice[] = [
   { id: 'Cherry', name: '芊悦', description: '女声 阳光亲切', gender: 'female', language: 'zh-CN' },
@@ -39,14 +39,14 @@ export class QwenAdapter implements ITTSAdapter {
   constructor(apiKey: string, endpoint: string) {
     this.apiKey = apiKey
     this.endpoint = endpoint
-    this.cacheDir = join(app.getPath('userData'), '听伴', 'qwen_cache')
+    this.cacheDir = join(getDataDir(), 'qwen_cache')
     if (!existsSync(this.cacheDir)) mkdirSync(this.cacheDir, { recursive: true })
   }
 
   /** 清理超过 10 天的缓存文件（启动时调用） */
   static cleanupCache(): void {
     try {
-      const dir = join(app.getPath('userData'), '听伴', 'qwen_cache')
+      const dir = join(getDataDir(), 'qwen_cache')
       if (!existsSync(dir)) return
       const cutoff = Date.now() - 10 * 86400000
       for (const f of readdirSync(dir)) {
