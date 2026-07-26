@@ -29,6 +29,16 @@ function modelsEndpoint(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, '')}/models`
 }
 
+function requestModelId(config: AiLlmSettings, model: string): string {
+  if (
+    /bigmodel\.cn|zhipuai/i.test(config.baseUrl) &&
+    model.trim().toLowerCase() === 'glm-4.7-flash'
+  ) {
+    return 'glm-4.7'
+  }
+  return model
+}
+
 function httpError(status: number, details: string): AiServiceError {
   if (status === 401 || status === 403) {
     return new AiServiceError('auth_failed', 'API Key 无效或没有访问权限', status)
@@ -365,7 +375,7 @@ export async function* streamChat(
   tools?: unknown[]
 ): AsyncGenerator<string> {
   try {
-    yield* requestModel(config, messages, signal, config.model, tools)
+    yield* requestModel(config, messages, signal, requestModelId(config, config.model), tools)
   } catch (error) {
     if (
       config.fallbackModel &&
@@ -374,7 +384,7 @@ export async function* streamChat(
       error.code === 'model_error' &&
       !signal.aborted
     ) {
-      yield* requestModel(config, messages, signal, config.fallbackModel, tools)
+      yield* requestModel(config, messages, signal, requestModelId(config, config.fallbackModel), tools)
       return
     }
     throw error
