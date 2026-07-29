@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-export const OUTLINE_CACHE_VERSION = 3
+export const OUTLINE_CACHE_VERSION = 4
 
 export type ChapterOutlineStatus = 'queued' | 'generating' | 'generated' | 'short_chapter' | 'failed'
 
@@ -10,6 +10,7 @@ export interface ChapterOutlineSectionRecord {
   originalTitle: string
   customTitle?: string
   point?: string
+  summary?: string
   startOffset: number
 }
 

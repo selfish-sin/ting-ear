@@ -1,6 +1,11 @@
-import { mergeSmallChapters, splitReadableSentences } from '../../../src/utils/bookData'
+import { splitReadableSentences } from '../../../src/utils/bookData'
 import { hashSentences } from '../../../src/utils/contentHash'
 import type { StructuredChapter, Chapter, BookData } from '../../../src/global'
+import {
+  type ChapterMode,
+  buildChaptersByMode,
+  chaptersToBoundaries
+} from './chapterBuilder'
 
 export { generatePseudoStructure } from '../../../src/utils/bookData'
 
@@ -31,15 +36,28 @@ export function deriveChapters(structure: StructuredChapter[]): Chapter[] {
   }))
 }
 
-/** Regroup fine-grained source chapters while retaining every original block. */
+/**
+ * 按分章模式重排 structure（保留 blocks）。
+ * 默认 original：保留目录粒度，仅切超长章；merged 才套 35~400。
+ */
 export function regroupStructuredChapters(
   structure: StructuredChapter[],
-  options?: { minSentences?: number; maxSentences?: number }
+  options?: { minSentences?: number; maxSentences?: number; mode?: ChapterMode }
 ): { structure: StructuredChapter[]; chapters: Chapter[] } {
   const sourceChapters = deriveChapters(structure)
   if (sourceChapters.length <= 1) return { structure, chapters: sourceChapters }
 
-  const mergedChapters = mergeSmallChapters(sourceChapters, options)
+  const totalSentences =
+    structure.length > 0 ? structure[structure.length - 1].sentenceRange[1] : 0
+  // 默认 original；若只传了旧 min/max 且 min>=35 则视为 merged
+  const effectiveMode: ChapterMode =
+    options?.mode ??
+    (options?.minSentences !== undefined && options.minSentences >= 35 ? 'merged' : 'original')
+  const mergedChapters = buildChaptersByMode(
+    totalSentences,
+    chaptersToBoundaries(sourceChapters),
+    effectiveMode
+  )
   const regrouped = mergedChapters.map((chapter) => {
     const start = chapter.startIndex
     const end = start + chapter.sentenceCount

@@ -10,11 +10,12 @@ import {
 console.log('\nFull-text inject rules (current chapter only)')
 
 assert.equal(shouldInjectFullText('hello', 50000, false), true)
-assert.equal(shouldInjectFullText('hello', 50000, true), false)
+// 已注入标记不再永久关闭：追问仍可注入，保证多轮有上下文
+assert.equal(shouldInjectFullText('hello', 50000, true), true)
 assert.equal(shouldInjectFullText('', 50000, false), false)
 assert.equal(shouldInjectFullText('a'.repeat(50001), 50000, false), false)
 assert.equal(shouldInjectFullText('a'.repeat(50000), 50000, false), true)
-console.log('  ok enforces 50k cap and once-per-session flag')
+console.log('  ok enforces 50k cap; allows re-inject for follow-ups')
 
 // 只取当前章，不是全书
 const chapterText = buildChapterFullText(
@@ -46,7 +47,7 @@ assert.equal(merged.webSearch.enabled, true)
 assert.ok(merged.webSearch.prompt.includes('联网'))
 assert.equal(merged.chat.fullTextMaxChars, 50000)
 assert.ok(merged.chat.outlineSystemPrompt.includes('简体中文'))
-assert.ok(merged.chat.fullTextInjectPrompt.includes('当前章节'))
+assert.ok(merged.chat.fullTextInjectPrompt.includes('当前章节') || merged.chat.fullTextInjectPrompt.includes('本章'))
 assert.equal(AI_DEFAULTS.chat.fullTextMaxChars, 50000)
 console.log('  ok merges defaults for chapter inject prompts')
 

@@ -1,11 +1,7 @@
 import { readFileSync } from 'fs'
 import { preprocessText, splitSentences, sanitizeControlChars } from './textPreprocessor'
-import { refineChapters } from './chapterBuilder'
+import { buildChaptersByMode, type Boundary } from './chapterBuilder'
 import type { BookData } from '../../../src/global'
-
-// HTML 标题（h1~h6）可能很密集；归一化合并极小小节，避免章节列表过碎
-const HTML_MIN_SENTENCES = 50
-const HTML_MAX_SENTENCES = 900
 
 /**
  * 从 HTML 头部检测编码声明，未声明时返回 'utf-8'。
@@ -127,13 +123,14 @@ export function parseHtml(filePath: string): BookData {
     }
   }
 
-  // 归一化：合并极小小节、切分超长章（无句子时保持原样）
+  // 导入只存原始切法；合并留给预选页
+  const hasHeaderChapters = chapterList.length > 1
+  const sourceBoundaries: Boundary[] = hasHeaderChapters
+    ? chapterList.map((c) => ({ title: c.title, sentenceIndex: c.startIndex }))
+    : []
   const finalChapters =
     allSentences.length > 0
-      ? refineChapters(allSentences.length, chapterList, {
-          minSentences: HTML_MIN_SENTENCES,
-          maxSentences: HTML_MAX_SENTENCES
-        })
+      ? buildChaptersByMode(allSentences.length, sourceBoundaries, 'original')
       : chapterList.length > 0
         ? chapterList
         : [{ title: title || '正文', startIndex: 0, sentenceCount: 0 }]
@@ -146,6 +143,7 @@ export function parseHtml(filePath: string): BookData {
     format: 'html',
     sentences: allSentences,
     chapters: finalChapters,
+    sourceBoundaries,
     currentChapterIndex: 0,
     currentSentenceIndex: 0,
     progressPercent: 0,

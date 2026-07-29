@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { ChevronDown, ChevronRight, Code2, Quote, Square, Volume2 } from 'lucide-react'
 import type { Block } from '../../global'
 import { cn } from '../../utils/cn'
@@ -25,7 +25,7 @@ const headingSizes: Record<number, string> = {
   6: 'text-sm'
 }
 
-export default function ContentCard({
+function ContentCard({
   block,
   sentences,
   currentSentenceIndex,
@@ -200,3 +200,21 @@ export default function ContentCard({
     </article>
   )
 }
+
+/** 仅当本段 active 状态/高亮句/内容变化时重渲染，避免整章每句跟着重绘 */
+export default memo(ContentCard, (prev, next) => {
+  if (prev.block !== next.block) return false
+  if (prev.sentences !== next.sentences) return false
+  if (prev.onSpeakRaw !== next.onSpeakRaw) return false
+  if (prev.onStopRaw !== next.onStopRaw) return false
+  if (prev.onSeekToSentence !== next.onSeekToSentence) return false
+  const [start, end] = prev.block.sentenceRange
+  const prevActive = prev.currentSentenceIndex >= start && prev.currentSentenceIndex < end
+  const nextActive = next.currentSentenceIndex >= start && next.currentSentenceIndex < end
+  if (prevActive !== nextActive) return false
+  // 段内高亮句移动时需要刷新
+  if (prevActive && nextActive && prev.currentSentenceIndex !== next.currentSentenceIndex) {
+    return false
+  }
+  return true
+})

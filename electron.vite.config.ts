@@ -34,7 +34,15 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/index.html') }
+        input: { index: resolve(__dirname, 'src/index.html') },
+        output: {
+          manualChunks: {
+            'react-vendor': ['react', 'react-dom'],
+            'icons': ['lucide-react'],
+            'markdown': ['react-markdown', 'remark-gfm'],
+            'state': ['zustand']
+          }
+        }
       }
     }
   }

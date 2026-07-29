@@ -57,9 +57,68 @@ interface BookState {
   setCurrentView: (view: BookState['currentView']) => void
   setLoading: (loading: boolean, message?: string) => void
   loadBooks: () => Promise<void>
+  /** 按需加载单本书完整数据并替换内存 stub */
+  loadFullBook: (bookId: string) => Promise<BookData | null>
   persistBooks: () => Promise<boolean>
+  /** 立即落盘（切书/退出前调用，避免防抖丢失进度） */
+  flushPersist: () => Promise<boolean>
   // 全局范围边界：null 时返回全书 [0, length)
   getRangeBounds: () => { start: number; end: number }
+}
+
+// 进度/timeMap 高频更新：只写 progress.json 轻量字段，禁止把整本 sentences 过 IPC
+const PERSIST_DEBOUNCE_MS = 8000
+let _persistTimer: ReturnType<typeof setTimeout> | null = null
+let _storeRef: {
+  persistProgressOnly: () => Promise<boolean>
+  mergeTimeMap: (bookId: string, timeMap: number[]) => void
+} | null = null
+let _persistInFlight: Promise<boolean> | null = null
+/** 是否已完成至少一次 loadBooks；未 hydrate 前禁止任何写盘，防止空数组覆盖真书架 */
+let booksHydrated = false
+
+// timeMap 合并进 books[] 的待写入缓冲（flush 前必须落地）
+let timeMapMergeTimer: ReturnType<typeof setTimeout> | null = null
+const pendingTimeMapRef: { bookId: string | null; timeMap: number[] | null } = {
+  bookId: null,
+  timeMap: null
+}
+
+function applyPendingTimeMap() {
+  if (timeMapMergeTimer) {
+    clearTimeout(timeMapMergeTimer)
+    timeMapMergeTimer = null
+  }
+  const { bookId, timeMap } = pendingTimeMapRef
+  pendingTimeMapRef.bookId = null
+  pendingTimeMapRef.timeMap = null
+  if (!bookId || !timeMap || !_storeRef) return
+  _storeRef.mergeTimeMap(bookId, timeMap)
+}
+
+function debouncedPersist() {
+  if (_persistTimer) clearTimeout(_persistTimer)
+  _persistTimer = setTimeout(() => {
+    _persistTimer = null
+    applyPendingTimeMap()
+    if (_storeRef) void _storeRef.persistProgressOnly()
+  }, PERSIST_DEBOUNCE_MS)
+}
+
+/** 取消防抖并立刻写盘；并发调用共享同一次 in-flight */
+export async function flushBookPersist(): Promise<boolean> {
+  if (!booksHydrated) return false
+  if (_persistTimer) {
+    clearTimeout(_persistTimer)
+    _persistTimer = null
+  }
+  applyPendingTimeMap()
+  if (!_storeRef) return false
+  if (_persistInFlight) return _persistInFlight
+  _persistInFlight = _storeRef.persistProgressOnly().finally(() => {
+    _persistInFlight = null
+  })
+  return _persistInFlight
 }
 
 export const useBookStore = create<BookState>((set, get) => ({
@@ -77,9 +136,8 @@ export const useBookStore = create<BookState>((set, get) => ({
   setBooks: (books) => set({ books: normalizeBookCollection(books) }),
 
   addBook: (book) => {
-    const normalized = normalizeBookData(book)
-    if (!normalized) return
-    set((s) => ({ books: [...s.books.filter((item) => item.id !== normalized.id), normalized] }))
+    // 导入返回的书已被主进程 normalizeBookData 规范化过，跳过重复规范化
+    set((s) => ({ books: [...s.books.filter((item) => item.id !== book.id), book] }))
     void get().persistBooks()
   },
 
@@ -113,6 +171,7 @@ export const useBookStore = create<BookState>((set, get) => ({
     // null / '__original__' 仍写回主书（主流程打开书时常用 '__original__'）。
     const versionId = get().currentVersionId
     if (versionId && versionId !== '__original__') {
+      // 仅内存会话态；不写盘、不碰 books[]，避免阅读中整树重渲染
       set((state) => ({
         currentBook:
           state.currentBook?.id === bookId
@@ -121,8 +180,9 @@ export const useBookStore = create<BookState>((set, get) => ({
       }))
       return
     }
-    set((state) => ({
-      books: state.books.map((book) => {
+    set((state) => {
+      let changed = false
+      const books = state.books.map((book) => {
         if (book.id !== bookId) return book
         // 读原始版本时，用当前展示句数与主本取较小侧 clamp，防止越界
         const lengthForClamp =
@@ -133,18 +193,31 @@ export const useBookStore = create<BookState>((set, get) => ({
           progress.currentSentenceIndex,
           lengthForClamp
         )
+        const currentChapterIndex = findChapterIndex(book.chapters, currentSentenceIndex)
+        const progressPercent = Math.max(0, Math.min(progress.progressPercent, 100))
+        // 字段未变则保持同一引用，避免 App/书架无意义重渲染
+        if (
+          book.currentSentenceIndex === currentSentenceIndex &&
+          book.currentChapterIndex === currentChapterIndex &&
+          book.progressPercent === progressPercent &&
+          book.lastReadAt === progress.lastReadAt
+        ) {
+          return book
+        }
+        changed = true
         return {
           ...book,
           ...progress,
           currentSentenceIndex,
-          currentChapterIndex: findChapterIndex(book.chapters, currentSentenceIndex),
-          progressPercent: Math.max(0, Math.min(progress.progressPercent, 100))
+          currentChapterIndex,
+          progressPercent
         }
-      }),
-      currentBook:
-        state.currentBook?.id === bookId ? { ...state.currentBook, ...progress } : state.currentBook
-    }))
-    void get().persistBooks()
+      })
+      // 播放中进度以 playerStore 为准；不刷新 currentBook 引用，避免正文树每句重挂
+      if (!changed) return state
+      return { books }
+    })
+    debouncedPersist()
   },
 
   renameBook: async (bookId, value) => {
@@ -207,15 +280,17 @@ export const useBookStore = create<BookState>((set, get) => ({
       sentenceRange: s.currentBook?.id === bookId ? null : s.sentenceRange,
       currentVersionId: s.currentBook?.id === bookId ? null : s.currentVersionId
     }))
+    void window.api?.deleteBook(bookId)
     void get().persistBooks()
   },
 
   setCurrentBook: (book) => {
-    const normalized = book ? normalizeBookData(book) : null
+    // 调用方（activateReadingBook / loadFullBook）已 normalize；此处禁止二次全量规范化
+    // （大书 hash + structure 校验可达数百 ms，是打开书卡顿主因之一）
     set({
-      currentBook: normalized,
-      sentences: normalized?.sentences || [],
-      chapters: normalized?.chapters || [],
+      currentBook: book,
+      sentences: book?.sentences || [],
+      chapters: book?.chapters || [],
       // 重置范围：跨书泄漏是最隐蔽的 bug 来源
       sentenceRange: null,
       currentVersionId: null,
@@ -229,16 +304,27 @@ export const useBookStore = create<BookState>((set, get) => ({
   setCurrentVersionId: (currentVersionId) => set({ currentVersionId }),
   setReaderMode: (readerMode) => set({ readerMode }),
   updateCurrentTimeMap: (timeMap) => {
-    set((state) => ({
-      currentBook: state.currentBook ? { ...state.currentBook, timeMap } : null,
-      books:
-        state.currentVersionId === null && state.currentBook
-          ? state.books.map((book) =>
-              book.id === state.currentBook?.id ? { ...book, timeMap } : book
-            )
-          : state.books
-    }))
-    if (get().currentVersionId === null) void get().persistBooks()
+    // 播放中 live timeMap 在 playerStore；这里合并进 books[] 仅供落盘。
+    // 内存更新也走防抖：避免每句 map 整库 books 触发订阅方重渲染。
+    if (get().currentVersionId !== null) return
+    const currentId = get().currentBook?.id
+    if (!currentId) return
+    pendingTimeMapRef.bookId = currentId
+    pendingTimeMapRef.timeMap = timeMap
+    if (timeMapMergeTimer) clearTimeout(timeMapMergeTimer)
+    timeMapMergeTimer = setTimeout(() => {
+      timeMapMergeTimer = null
+      const { bookId, timeMap: pending } = pendingTimeMapRef
+      pendingTimeMapRef.bookId = null
+      pendingTimeMapRef.timeMap = null
+      if (!bookId || !pending) return
+      set((state) => ({
+        books: state.books.map((book) =>
+          book.id === bookId ? { ...book, timeMap: pending } : book
+        )
+      }))
+      debouncedPersist()
+    }, 2000)
   },
 
   // 虚拟范围：不再物理切片 sentences/chapters。
@@ -265,23 +351,80 @@ export const useBookStore = create<BookState>((set, get) => ({
 
   loadBooks: async () => {
     try {
-      const books = await window.api?.loadProgress()
-      if (books) {
-        set({ books: normalizeBookCollection(books) })
+      // 轻量加载：只读 index+progress，跳过单书 JSON（启动加速）
+      const shelf = await window.api?.loadShelf()
+      if (shelf && Array.isArray(shelf)) {
+        const now = new Date().toISOString()
+        const stubBooks: BookData[] = shelf.map((sb) => ({
+          id: sb.id,
+          title: sb.title,
+          author: sb.author,
+          coverPath: sb.coverPath ?? undefined,
+          coverSource: sb.coverSource ?? undefined,
+          filePath: sb.filePath,
+          format: sb.format,
+          sentences: [], // stub: 按需加载
+          chapters: [],
+          currentChapterIndex: sb.currentChapterIndex ?? 0,
+          currentSentenceIndex: sb.currentSentenceIndex ?? 0,
+          progressPercent: sb.progressPercent ?? 0,
+          isCompleted: sb.isCompleted ?? false,
+          addedAt: sb.addedAt || now,
+          lastReadAt: sb.lastReadAt || sb.addedAt || now,
+          originalSentences: [],
+          editHistory: [],
+          bookmarks: [],
+          timeMap: []
+        }))
+        set({ books: stubBooks })
       }
     } catch {
       // ignore
+    } finally {
+      booksHydrated = true
+    }
+  },
+
+  loadFullBook: async (bookId) => {
+    try {
+      const data = await window.api?.loadBookData(bookId)
+      if (!data) return null
+      // 库内数据已规范化：trusted 跳过全文 SHA-256 / 重清洗 / pseudo 重建
+      const contentHash =
+        data &&
+        typeof data === 'object' &&
+        data !== null &&
+        'structureMeta' in data &&
+        (data as { structureMeta?: { contentHash?: string } }).structureMeta?.contentHash
+      const normalized = normalizeBookData(data, {
+        trusted: true,
+        ...(typeof contentHash === 'string' ? { contentHash } : {})
+      })
+      if (!normalized) return null
+      // 替换内存中的 stub
+      set((s) => ({
+        books: s.books.map((b) => (b.id === bookId ? normalized : b)),
+        currentBook: s.currentBook?.id === bookId ? normalized : s.currentBook
+      }))
+      return normalized
+    } catch {
+      return null
     }
   },
 
   persistBooks: async () => {
+    // 未加载完成前绝不写盘（曾导致 dev/HMR 用空数组覆盖 60MB 书架）
+    if (!booksHydrated) return false
     try {
+      // 内容变更路径：发送全部书籍（含 stub）；后端 saveLibrary 跳过空内容书
       const result = await window.api?.saveProgress(get().books)
       return result?.success === true
     } catch {
       return false
     }
   },
+
+  flushPersist: () => flushBookPersist(),
 
   // 返回当前有效播放窗口的全局索引边界。
   // 无书 / 未设范围 → {0, sentences.length}；有范围 → clamp 后的 {start, end}。
@@ -296,3 +439,39 @@ export const useBookStore = create<BookState>((set, get) => ({
     )
   }
 }))
+
+// 绑定 store 引用供 debouncedPersist / timeMap 合并使用
+_storeRef = {
+  /** 高频进度：只传 id + 进度字段，绝不带 sentences */
+  persistProgressOnly: async () => {
+    if (!booksHydrated) return false
+    try {
+      const books = useBookStore.getState().books
+      if (books.length === 0) return false
+      const payload = books.map((b) => ({
+        id: b.id,
+        currentSentenceIndex: b.currentSentenceIndex,
+        currentChapterIndex: b.currentChapterIndex,
+        progressPercent: b.progressPercent,
+        lastReadAt: b.lastReadAt,
+        isCompleted: b.isCompleted,
+        timeMap: b.timeMap
+      }))
+      const result = await window.api?.saveProgressOnly?.(payload)
+      // 旧版 preload 无 saveProgressOnly 时回退（不应走整库，尽量只写有内容的书会很重）
+      if (!result && window.api?.saveProgress) {
+        // 回退仍用 saveProgress，但只在 API 缺失时
+        const full = await window.api.saveProgress(books)
+        return full?.success === true
+      }
+      return result?.success === true
+    } catch {
+      return false
+    }
+  },
+  mergeTimeMap: (bookId, timeMap) => {
+    useBookStore.setState((state) => ({
+      books: state.books.map((book) => (book.id === bookId ? { ...book, timeMap } : book))
+    }))
+  }
+}

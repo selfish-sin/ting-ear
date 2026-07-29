@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState, useMemo, memo } from 'react'
+import { useRef, useEffect, useCallback, useState, useMemo, memo, type ReactNode } from 'react'
 import {
   BookOpen,
   ChevronDown,
@@ -44,7 +44,8 @@ export const SentenceRow = memo(function SentenceRow({
   onBookmarkAdd,
   onBookmarkSubmit,
   onBookmarkCancel,
-  onBookmarkInputChange
+  onBookmarkInputChange,
+  activeRowRef
 }: {
   sentence: string
   index: number
@@ -62,9 +63,11 @@ export const SentenceRow = memo(function SentenceRow({
   onBookmarkSubmit: (index: number) => void
   onBookmarkCancel: () => void
   onBookmarkInputChange: (value: string) => void
+  activeRowRef: (el: HTMLDivElement | null) => void
 }) {
   return (
     <div
+      ref={isActive ? activeRowRef : undefined}
       data-active={isActive || undefined}
       data-tts-skip={isTtsSkipped || undefined}
       data-sentence-idx={index}
@@ -168,22 +171,30 @@ export default function PlayerView({
   subtitleEnabled,
   immersive = false
 }: PlayerViewProps) {
-  const { sentences, currentBook, sentenceRange, loadBooks, getRangeBounds } = useBookStore()
-  const {
-    currentSentenceIndex,
-    playState,
-    currentChapterIndex,
-    setCurrentChapterIndex,
-    pageIndex,
-    setPageIndex,
-    pageSize,
-    voiceId,
-    speed
-  } = usePlayerStore()
-  const { settings } = useSettingsStore()
-  const { addBookmark, toggleBookmark, bookmarks } = useBookmarkStore()
+  // selector 订阅：避免 timeMap/volume 等无关字段拖着整页重渲染
+  const sentences = useBookStore((s) => s.sentences)
+  const currentBook = useBookStore((s) => s.currentBook)
+  const sentenceRange = useBookStore((s) => s.sentenceRange)
+  const loadBooks = useBookStore((s) => s.loadBooks)
+  const getRangeBounds = useBookStore((s) => s.getRangeBounds)
+  const currentSentenceIndex = usePlayerStore((s) => s.currentSentenceIndex)
+  const playState = usePlayerStore((s) => s.playState)
+  const currentChapterIndex = usePlayerStore((s) => s.currentChapterIndex)
+  const setCurrentChapterIndex = usePlayerStore((s) => s.setCurrentChapterIndex)
+  const pageIndex = usePlayerStore((s) => s.pageIndex)
+  const setPageIndex = usePlayerStore((s) => s.setPageIndex)
+  const pageSize = usePlayerStore((s) => s.pageSize)
+  const voiceId = usePlayerStore((s) => s.voiceId)
+  const speed = usePlayerStore((s) => s.speed)
+  const fontSize = useSettingsStore((s) => s.settings.fontSize.body)
+  const titleFontSize = useSettingsStore((s) => s.settings.fontSize.title)
+  const addBookmark = useBookmarkStore((s) => s.addBookmark)
+  const toggleBookmark = useBookmarkStore((s) => s.toggleBookmark)
+  const bookmarks = useBookmarkStore((s) => s.bookmarks)
 
   const containerRef = useRef<HTMLDivElement>(null)
+  // active 句子行的 DOM 引用（由 SentenceRow ref 回调设置），替代 querySelector
+  const activeRowRef = useRef<HTMLDivElement | null>(null)
   const [chapterDropdownOpen, setChapterDropdownOpen] = useState(false)
   const [versionDropdownOpen, setVersionDropdownOpen] = useState(false)
   const [bookmarkAdding, setBookmarkAdding] = useState<number | null>(null)
@@ -200,6 +211,8 @@ export default function PlayerView({
   // === 搜索功能 ===
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  // 防抖后的查询词：只有它才驱动全文扫描，避免每敲一字就扫数十万句
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [searchMatches, setSearchMatches] = useState<number[]>([])
   const [searchCurrent, setSearchCurrent] = useState(0)
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -242,13 +255,13 @@ export default function PlayerView({
     return { start, end }
   }, [currentBook, sentences.length, hasChapters, currentChapterIndex, sentenceRange, pageIndex, pageSize])
 
-  // Auto-scroll to active sentence (respects toggle)
+  // Auto-scroll to active sentence — 用 ref 替代 querySelector，避免每句 DOM 查询
+  const setActiveRow = useCallback((el: HTMLDivElement | null) => {
+    activeRowRef.current = el
+  }, [])
   useEffect(() => {
-    if (autoScroll && containerRef.current) {
-      const el = containerRef.current.querySelector('[data-active]')
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      }
+    if (autoScroll && activeRowRef.current) {
+      activeRowRef.current.scrollIntoView({ behavior: 'auto', block: 'center' })
     }
   }, [currentSentenceIndex, autoScroll])
 
@@ -266,21 +279,27 @@ export default function PlayerView({
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
-  // === 搜索：计算匹配 ===
+  // === 搜索：输入防抖（250ms 内连续敲字不触发扫描） ===
   useEffect(() => {
-    if (!searchQuery.trim()) {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery), 250)
+    return () => clearTimeout(timer)
+  }, [searchQuery])
+
+  // === 搜索：计算匹配（只对防抖后的查询词全文扫描） ===
+  useEffect(() => {
+    if (!debouncedQuery.trim()) {
       setSearchMatches([])
       setSearchCurrent(0)
       return
     }
-    const q = searchQuery.trim().toLowerCase()
+    const q = debouncedQuery.trim().toLowerCase()
     const matches: number[] = []
     for (let i = 0; i < sentences.length; i++) {
       if (sentences[i].toLowerCase().includes(q)) matches.push(i)
     }
     setSearchMatches(matches)
     setSearchCurrent(0)
-  }, [searchQuery, sentences])
+  }, [debouncedQuery, sentences])
 
   // === 搜索：跳转到指定匹配 ===
   const goToMatch = useCallback(
@@ -591,7 +610,7 @@ export default function PlayerView({
 
   if (!currentBook || sentences.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-gray-400 dark:text-gray-500">
+      <div className="flex-1 flex flex-col items-center justify-center text-gray-400 bg-gray-100 dark:bg-gray-800 dark:text-gray-500">
         <BookOpen className="w-16 h-16 mb-4 opacity-40" />
         <p className="text-lg">请从书架选择一本书开始阅读</p>
         <p className="text-sm mt-2">或拖拽文件到书架导入</p>
@@ -630,7 +649,7 @@ export default function PlayerView({
               <BookOpen className="w-4 h-4 flex-shrink-0 text-primary" />
               <span
                 className="hidden md:inline truncate font-medium text-sm"
-                style={{ fontSize: `${Math.min(settings.fontSize.title, 15)}px` }}
+                style={{ fontSize: `${Math.min(titleFontSize, 15)}px` }}
               >
                 {currentChapter?.title || currentBook.title || '全文'}
               </span>
@@ -871,30 +890,61 @@ export default function PlayerView({
             </button>
           </div>
         )}
-        {sentences.slice(bounds.start, bounds.end).map((sentence, i) => {
-          const index = bounds.start + i
-          return (
-            <SentenceRow
-              key={index}
-              sentence={sentence}
-              index={index}
-              isActive={index === currentSentenceIndex}
-              isPlaying={playState === 'playing'}
-              isTtsSkipped={isSentenceTtsSkipped(currentBook, index)}
-              bookmarked={bookmarkedSet.has(index)}
-              bookmarkAdding={bookmarkAdding === index}
-              bookmarkInput={bookmarkInput}
-              fontSize={settings.fontSize.body}
-              onSentenceClick={handleSentenceClick}
-              onCopy={handleCopySentence}
-              onBookmarkToggle={handleBookmarkToggle}
-              onBookmarkAdd={handleAddBookmark}
-              onBookmarkSubmit={submitBookmark}
-              onBookmarkCancel={handleBookmarkCancel}
-              onBookmarkInputChange={handleBookmarkInputChange}
-            />
-          )
-        })}
+        {(() => {
+          // 大章窗口渲染：只挂当前句附近 DOM，减少长章卡顿（仍可点击窗口内句子）
+          const WINDOW = 120
+          const rangeLen = bounds.end - bounds.start
+          const useWindow = rangeLen > WINDOW * 2
+          const focus = Math.max(bounds.start, Math.min(bounds.end - 1, currentSentenceIndex))
+          const winStart = useWindow
+            ? Math.max(bounds.start, focus - WINDOW)
+            : bounds.start
+          const winEnd = useWindow
+            ? Math.min(bounds.end, focus + WINDOW + 1)
+            : bounds.end
+          const rows: ReactNode[] = []
+          if (useWindow && winStart > bounds.start) {
+            rows.push(
+              <div key="win-head" className="text-center py-2 text-[11px] text-gray-400">
+                … 上方还有 {winStart - bounds.start} 句（滚动/跳转时会展开窗口）
+              </div>
+            )
+          }
+          for (let index = winStart; index < winEnd; index++) {
+            const sentence = sentences[index]
+            if (sentence === undefined) continue
+            rows.push(
+              <SentenceRow
+                key={index}
+                sentence={sentence}
+                index={index}
+                isActive={index === currentSentenceIndex}
+                isPlaying={playState === 'playing'}
+                isTtsSkipped={isSentenceTtsSkipped(currentBook, index)}
+                bookmarked={bookmarkedSet.has(index)}
+                bookmarkAdding={bookmarkAdding === index}
+                bookmarkInput={bookmarkInput}
+                fontSize={fontSize}
+                onSentenceClick={handleSentenceClick}
+                onCopy={handleCopySentence}
+                onBookmarkToggle={handleBookmarkToggle}
+                onBookmarkAdd={handleAddBookmark}
+                onBookmarkSubmit={submitBookmark}
+                onBookmarkCancel={handleBookmarkCancel}
+                onBookmarkInputChange={handleBookmarkInputChange}
+                activeRowRef={setActiveRow}
+              />
+            )
+          }
+          if (useWindow && winEnd < bounds.end) {
+            rows.push(
+              <div key="win-tail" className="text-center py-2 text-[11px] text-gray-400">
+                … 下方还有 {bounds.end - winEnd} 句
+              </div>
+            )
+          }
+          return rows
+        })()}
 
         {/* End of page/chapter: show appropriate message */}
         {currentSentenceIndex === bounds.end - 1 && playState !== 'idle' && (

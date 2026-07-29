@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { usePlayerStore } from '../stores/playerStore'
 import { useBookStore } from '../stores/bookStore'
 import { useSettingsStore } from '../stores/settingsStore'
@@ -67,22 +67,22 @@ interface TTSResult {
  * - playFrom returns on empty-window (prevents no-op bug)
  */
 export function useTTS({ showToast }: UseTTSOptions) {
-  const {
-    currentSentenceIndex,
-    speed,
-    volume,
-    isMuted,
-    voiceId,
-    useSystemTTS,
-    setPlayState,
-    setCurrentSentenceIndex,
-    setUseSystemTTS,
-    setCurrentAudio,
-    setRawSpeechActive
-  } = usePlayerStore()
+  // 使用 selector 避免订阅整个 store（timeMap/pageIndex 等变化不应触发重渲染）
+  const currentSentenceIndex = usePlayerStore((s) => s.currentSentenceIndex)
+  const speed = usePlayerStore((s) => s.speed)
+  const volume = usePlayerStore((s) => s.volume)
+  const isMuted = usePlayerStore((s) => s.isMuted)
+  const voiceId = usePlayerStore((s) => s.voiceId)
+  const useSystemTTS = usePlayerStore((s) => s.useSystemTTS)
+  const setPlayState = usePlayerStore((s) => s.setPlayState)
+  const setCurrentSentenceIndex = usePlayerStore((s) => s.setCurrentSentenceIndex)
+  const setUseSystemTTS = usePlayerStore((s) => s.setUseSystemTTS)
+  const setCurrentAudio = usePlayerStore((s) => s.setCurrentAudio)
+  const setRawSpeechActive = usePlayerStore((s) => s.setRawSpeechActive)
 
-  const { sentences, currentBook } = useBookStore()
-  const { settings } = useSettingsStore()
+  const sentences = useBookStore((s) => s.sentences)
+  const currentBook = useBookStore((s) => s.currentBook)
+  const settings = useSettingsStore((s) => s.settings)
 
   // Refs to always have fresh values in callbacks
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -105,7 +105,9 @@ export function useTTS({ showToast }: UseTTSOptions) {
   // 预缓存追踪：记录哪句已经后台合成了
   const prefetchSet = useRef(new Set<number>())
   // 内存级预取缓存：idx → { audio, audioFormat }，播放时直接取用跳过 IPC
+  // Map 按插入序迭代，超出上限时删最旧条目（简易 LRU）
   const prefetchCache = useRef(new Map<number, { audio: string; audioFormat?: string }>())
+  const PREFETCH_CACHE_MAX = 50
   // 当前 blob URL（切换 src 时释放旧的）
   const currentBlobUrl = useRef<string | null>(null)
 
@@ -113,6 +115,20 @@ export function useTTS({ showToast }: UseTTSOptions) {
   const PREFETCH_CONCURRENCY = 2
   const prefetchActiveRef = useRef(0)
   const prefetchQueueRef = useRef<Array<() => void>>([])
+  /** 预取世代：仅在清空预取时递增，句间 genId 变化不影响已在途的预取写入 */
+  const prefetchEpochRef = useRef(0)
+
+  const setPrefetchCacheEntry = useCallback((idx: number, value: { audio: string; audioFormat?: string }) => {
+    const cache = prefetchCache.current
+    if (cache.has(idx)) cache.delete(idx)
+    cache.set(idx, value)
+    while (cache.size > PREFETCH_CACHE_MAX) {
+      const oldest = cache.keys().next().value
+      if (oldest === undefined) break
+      cache.delete(oldest)
+      prefetchSet.current.delete(oldest)
+    }
+  }, [])
 
   const drainPrefetchQueue = useCallback(() => {
     while (prefetchActiveRef.current < PREFETCH_CONCURRENCY && prefetchQueueRef.current.length > 0) {
@@ -120,6 +136,15 @@ export function useTTS({ showToast }: UseTTSOptions) {
       prefetchActiveRef.current++
       task()
     }
+  }, [])
+
+  /** 音色/语速/引擎变化或停播时丢弃预取（参数不一致的音频不可复用） */
+  const invalidatePrefetch = useCallback(() => {
+    prefetchEpochRef.current++
+    prefetchQueueRef.current = []
+    prefetchSet.current.clear()
+    prefetchCache.current.clear()
+    prefetchActiveRef.current = 0
   }, [])
 
   // Generation token: incremented on every new play/stop to cancel stale in-flight requests
@@ -141,11 +166,21 @@ export function useTTS({ showToast }: UseTTSOptions) {
   // playerStore 中的 ttsEngine（离线按钮等会改，不一定同步 settings）
   const playerTtsEngine = usePlayerStore((s) => s.ttsEngine)
 
-  // Sync refs
-  useEffect(() => { speedRef.current = speed }, [speed])
+  // Sync refs；音色/语速/引擎变化时作废预取缓存
+  useEffect(() => {
+    if (speedRef.current !== speed) {
+      speedRef.current = speed
+      invalidatePrefetch()
+    }
+  }, [speed, invalidatePrefetch])
   useEffect(() => { volumeRef.current = volume }, [volume])
   useEffect(() => { isMutedRef.current = isMuted }, [isMuted])
-  useEffect(() => { voiceIdRef.current = voiceId }, [voiceId])
+  useEffect(() => {
+    if (voiceIdRef.current !== voiceId) {
+      voiceIdRef.current = voiceId
+      invalidatePrefetch()
+    }
+  }, [voiceId, invalidatePrefetch])
   useEffect(() => { useSystemTTSRef.current = useSystemTTS }, [useSystemTTS])
   useEffect(() => {
     sentencesRef.current = sentences
@@ -158,14 +193,19 @@ export function useTTS({ showToast }: UseTTSOptions) {
   useEffect(() => {
     // 优先 settings 持久化引擎；离线按钮改的是 playerStore.ttsEngine
     const fromSettings = settings.ttsEngine
+    let next: string
     if (fromSettings && fromSettings !== 'system') {
-      engineIdRef.current = fromSettings
+      next = fromSettings
     } else if (playerTtsEngine && playerTtsEngine !== 'system') {
-      engineIdRef.current = playerTtsEngine
+      next = playerTtsEngine
     } else {
-      engineIdRef.current = fromSettings || playerTtsEngine || 'edge'
+      next = fromSettings || playerTtsEngine || 'edge'
     }
-  }, [settings.ttsEngine, playerTtsEngine])
+    if (engineIdRef.current !== next) {
+      engineIdRef.current = next
+      invalidatePrefetch()
+    }
+  }, [settings.ttsEngine, playerTtsEngine, invalidatePrefetch])
 
   // --- Atomic index setter ---
   // Every write to currentSentenceIndex MUST go through this to keep ref + store in sync.
@@ -174,29 +214,40 @@ export function useTTS({ showToast }: UseTTSOptions) {
     setCurrentSentenceIndex(idx)
   }, [setCurrentSentenceIndex])
 
-  // Stop all current playback AND cancel all in-flight TTS requests
-  const stopPlayback = useCallback(() => {
-    genIdRef.current++  // Invalidate all in-flight generation tokens
-    // 清空预取队列，避免切书/停止后仍占用并发与带宽
-    prefetchQueueRef.current = []
-    prefetchSet.current.clear()
-    prefetchCache.current.clear()
-    prefetchActiveRef.current = 0
-    if (audioRef.current) {
-      audioRef.current.pause()
-      audioRef.current.removeAttribute('src')
-      audioRef.current.load()  // 释放解码资源
-      setCurrentAudio(null)
-    }
-    if (currentBlobUrl.current) {
-      try { URL.revokeObjectURL(currentBlobUrl.current) } catch { /* ignore */ }
-      currentBlobUrl.current = null
-    }
-    if (utteranceRef.current) {
-      window.speechSynthesis.cancel()
-      utteranceRef.current = null
-    }
-  }, [setCurrentAudio])
+  /**
+   * 停止当前音频。
+   * - clearPrefetch=false：句间前进时保留内存预取缓存（否则每句都要重新合成，卡顿主因）
+   * - clearPrefetch=true：暂停/停止/切书/改音色语速时清空预取
+   */
+  const stopPlayback = useCallback(
+    (opts?: { clearPrefetch?: boolean }) => {
+      const clearPrefetch = opts?.clearPrefetch !== false
+      genIdRef.current++ // Invalidate all in-flight generation tokens
+      if (clearPrefetch) {
+        // 清空预取队列，避免切书/停止后仍占用并发与带宽
+        invalidatePrefetch()
+      }
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current.removeAttribute('src')
+        audioRef.current.load() // 释放解码资源
+        setCurrentAudio(null)
+      }
+      if (currentBlobUrl.current) {
+        try {
+          URL.revokeObjectURL(currentBlobUrl.current)
+        } catch {
+          /* ignore */
+        }
+        currentBlobUrl.current = null
+      }
+      if (utteranceRef.current) {
+        window.speechSynthesis.cancel()
+        utteranceRef.current = null
+      }
+    },
+    [setCurrentAudio, invalidatePrefetch]
+  )
 
   // Play a specific sentence by GLOBAL index.
   const playSentence = useCallback(
@@ -230,8 +281,8 @@ export function useTTS({ showToast }: UseTTSOptions) {
       const sentIndex = target
       setCurrentIndex(target)
 
-      // Stop existing playback + cancel stale in-flight requests
-      stopPlayback()
+      // 句间前进：只停当前音频，保留预取缓存（旧逻辑 clear 导致每句都重新合成）
+      stopPlayback({ clearPrefetch: false })
 
       // Acquire fresh generation token AFTER stopPlayback (stopPlayback itself bumps genId)
       const myGen = genIdRef.current
@@ -244,6 +295,7 @@ export function useTTS({ showToast }: UseTTSOptions) {
           const cached = prefetchCache.current.get(sentIndex)
           if (cached) {
             prefetchCache.current.delete(sentIndex)
+            prefetchSet.current.delete(sentIndex)
             result = { success: true, audio: cached.audio, audioFormat: cached.audioFormat as 'mp3' | 'wav' }
           } else {
             result = (await window.api?.ttsSynthesize(
@@ -297,10 +349,10 @@ export function useTTS({ showToast }: UseTTSOptions) {
             audioRef.current = audio
             setCurrentAudio(audio)
 
-            // === 预缓存后续句子（并发池 + 5句窗口，结果存内存） ===
+            // === 预缓存后续句子（并发池 + 8句窗口，结果存内存） ===
             const curBounds = useBookStore.getState().getRangeBounds()
             const curSents = sentencesRef.current
-            const PREFETCH_WINDOW = 5
+            const PREFETCH_WINDOW = 8
             const prefetchIndices = getPlayablePrefetchIndices(
               curSents,
               currentBookRef.current,
@@ -308,9 +360,11 @@ export function useTTS({ showToast }: UseTTSOptions) {
               curBounds,
               PREFETCH_WINDOW
             )
+            const prefetchEpoch = prefetchEpochRef.current
             for (const idx of prefetchIndices) {
-              if (prefetchSet.current.has(idx)) continue
+              if (prefetchSet.current.has(idx) || prefetchCache.current.has(idx)) continue
               const t = curSents[idx]
+              if (!t) continue
               prefetchSet.current.add(idx)
               const task = () => {
                 window.api!.ttsSynthesize(
@@ -318,8 +372,11 @@ export function useTTS({ showToast }: UseTTSOptions) {
                   1.0,
                   engineIdRef.current
                 ).then((r: TTSResult) => {
-                  if (r?.success && r.audio) {
-                    prefetchCache.current.set(idx, { audio: r.audio, audioFormat: r.audioFormat })
+                  // 用 prefetchEpoch 而非 genId：句间前进会 bump genId，但预取应继续写入
+                  if (r?.success && r.audio && prefetchEpoch === prefetchEpochRef.current) {
+                    setPrefetchCacheEntry(idx, { audio: r.audio, audioFormat: r.audioFormat })
+                  } else {
+                    prefetchSet.current.delete(idx)
                   }
                 }).catch(() => {
                   prefetchSet.current.delete(idx)
@@ -388,8 +445,12 @@ export function useTTS({ showToast }: UseTTSOptions) {
         playWithSystemTTS(text, sentIndex, myGen)
       }
     },
-    [setCurrentIndex, setPlayState, setUseSystemTTS, setCurrentAudio, showToast, stopPlayback]
+    [setCurrentIndex, setPlayState, setUseSystemTTS, setCurrentAudio, showToast, stopPlayback, setPrefetchCacheEntry]
   )
+
+  // Ref to break circular dependency: playSentence → playWithSystemTTS → playSentence
+  const playSentenceRef = useRef(playSentence)
+  playSentenceRef.current = playSentence
 
   // Play using Web Speech API (system TTS)
   const playWithSystemTTS = useCallback(
@@ -428,7 +489,7 @@ export function useTTS({ showToast }: UseTTSOptions) {
         const elapsed = performance.now() - startTime
         usePlayerStore.getState().updateTimeMapEntry(index, Math.round(elapsed))
         if (isPlayingRef.current) {
-          playSentence(currentIndexRef.current + 1)
+          playSentenceRef.current(currentIndexRef.current + 1)
         }
       }
 
@@ -436,14 +497,14 @@ export function useTTS({ showToast }: UseTTSOptions) {
         if (gen !== genIdRef.current) return
         console.error('Speech synthesis error:', event)
         if (isPlayingRef.current) {
-          playSentence(currentIndexRef.current + 1)
+          playSentenceRef.current(currentIndexRef.current + 1)
         }
       }
 
       utteranceRef.current = utterance
       window.speechSynthesis.speak(utterance)
     },
-    [showToast, setPlayState, playSentence]
+    [showToast, setPlayState]
   )
 
   const playRawWithSystemTTS = useCallback(
@@ -503,9 +564,11 @@ export function useTTS({ showToast }: UseTTSOptions) {
         }
 
         const binary = atob(result.audio)
-        const bytes = new Uint8Array(binary.length)
-        for (let index = 0; index < binary.length; index += 1) {
-          bytes[index] = binary.charCodeAt(index)
+        const len = binary.length
+        const bytes = new Uint8Array(len)
+        for (let i = 0; i < len; i += 8192) {
+          const end = Math.min(i + 8192, len)
+          for (let j = i; j < end; j++) bytes[j] = binary.charCodeAt(j)
         }
         const blobUrl = URL.createObjectURL(
           new Blob([bytes], {
@@ -799,16 +862,19 @@ export function useTTS({ showToast }: UseTTSOptions) {
     useSystemTTSRef.current = false
   }, [setUseSystemTTS])
 
-  return {
-    play,
-    pause,
-    stop,
-    prevSentence,
-    nextSentence,
-    seekTo,
-    playFrom,
-    speakRaw,
-    stopRaw,
-    resetToQwenTTS
-  }
+  return useMemo(
+    () => ({
+      play,
+      pause,
+      stop,
+      prevSentence,
+      nextSentence,
+      seekTo,
+      playFrom,
+      speakRaw,
+      stopRaw,
+      resetToQwenTTS
+    }),
+    [play, pause, stop, prevSentence, nextSentence, seekTo, playFrom, speakRaw, stopRaw, resetToQwenTTS]
+  )
 }

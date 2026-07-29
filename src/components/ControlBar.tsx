@@ -52,23 +52,21 @@ export default function ControlBar({
   onSkipChapter,
   showToast
 }: ControlBarProps) {
-  const {
-    playState,
-    pageIndex,
-    pageSize,
-    currentChapterIndex,
-    speed,
-    volume,
-    isMuted,
-    setSpeed,
-    setVolume,
-    toggleMute,
-    ttsEngine,
-    useSystemTTS,
-    setUseSystemTTS
-  } = usePlayerStore()
-  const { currentBook } = useBookStore()
-  const { settings } = useSettingsStore()
+  const playState = usePlayerStore((s) => s.playState)
+  const pageIndex = usePlayerStore((s) => s.pageIndex)
+  const pageSize = usePlayerStore((s) => s.pageSize)
+  const currentChapterIndex = usePlayerStore((s) => s.currentChapterIndex)
+  const speed = usePlayerStore((s) => s.speed)
+  const volume = usePlayerStore((s) => s.volume)
+  const isMuted = usePlayerStore((s) => s.isMuted)
+  const setSpeed = usePlayerStore((s) => s.setSpeed)
+  const setVolume = usePlayerStore((s) => s.setVolume)
+  const toggleMute = usePlayerStore((s) => s.toggleMute)
+  const ttsEngine = usePlayerStore((s) => s.ttsEngine)
+  const useSystemTTS = usePlayerStore((s) => s.useSystemTTS)
+  const setUseSystemTTS = usePlayerStore((s) => s.setUseSystemTTS)
+  const currentBook = useBookStore((s) => s.currentBook)
+  const settings = useSettingsStore((s) => s.settings)
 
   const hasChapters = (currentBook?.chapters?.length || 0) > 1
   const canPrevChapter = hasChapters ? currentChapterIndex > 0 : pageIndex > 0

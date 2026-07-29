@@ -429,3 +429,11 @@ export function generateCoverDataUrl(
 
   return canvas.toDataURL('image/png')
 }
+
+/**
+ * 磁盘封面协议 URL（主进程 ting-cover 协议直读 PNG，不经 base64/IPC）。
+ * 渲染层优先用此地址；404 时再回退生成。
+ */
+export function coverProtocolUrl(bookId: string): string {
+  return `ting-cover://x/${encodeURIComponent(bookId)}`
+}

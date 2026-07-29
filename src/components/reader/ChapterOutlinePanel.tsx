@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, Loader2, PanelLeftClose, PanelLeftOpen, Pencil, RotateCcw, RotateCw } from 'lucide-react'
+import { ArrowDown, Check, Loader2, PanelLeftClose, PanelLeftOpen, Pencil, RotateCcw, RotateCw } from 'lucide-react'
 import type { ChapterOutlineRecord, ChapterOutlineSection } from '../../global'
 import type { StructuredChapter } from '../../global'
 import { chapterDisplayTitle } from '../../utils/bookData'
@@ -24,6 +24,8 @@ interface ChapterOutlinePanelProps {
   chapterOriginalTitle?: string
   chapterCustomTitle?: string
 }
+
+type OutlineViewMode = 'outline' | 'relation'
 
 function displaySectionTitle(section: ChapterOutlineSection): string {
   return section.customTitle?.trim() || section.originalTitle
@@ -77,6 +79,7 @@ export default function ChapterOutlinePanel({
   const [editingChapter, setEditingChapter] = useState(false)
   const [editingSectionId, setEditingSectionId] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
+  const [viewMode, setViewMode] = useState<OutlineViewMode>('outline')
   const timerRef = useRef<ReturnType<typeof setInterval>>()
 
   useEffect(() => {
@@ -116,8 +119,40 @@ export default function ChapterOutlinePanel({
   const progressPct = Math.max(0, Math.min(100, progress ?? (generating ? 8 : 0)))
   const busy = generating
 
+  const panelWidth = viewMode === 'relation' ? 'w-72' : 'w-56'
+
   return (
-    <aside className="flex h-full w-56 flex-shrink-0 flex-col border-r border-gray-200 bg-white dark:border-dark-border dark:bg-dark-surface">
+    <aside className={`flex h-full ${panelWidth} flex-shrink-0 flex-col border-r border-gray-200 bg-white dark:border-dark-border dark:bg-dark-surface`}>
+      {/* Tab bar */}
+      <div className="flex min-h-9 items-center gap-0 border-b border-gray-200 dark:border-dark-border">
+        <button
+          type="button"
+          className={cn(
+            'flex-1 py-2 text-[11px] font-medium transition-colors',
+            viewMode === 'outline'
+              ? 'border-b-2 border-primary text-primary'
+              : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+          )}
+          onClick={() => setViewMode('outline')}
+        >
+          大纲
+        </button>
+        <button
+          type="button"
+          className={cn(
+            'flex-1 py-2 text-[11px] font-medium transition-colors',
+            viewMode === 'relation'
+              ? 'border-b-2 border-primary text-primary'
+              : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+          )}
+          onClick={() => setViewMode('relation')}
+        >
+          关系纵览
+        </button>
+        <button type="button" className="icon-btn h-7 w-7 mx-0.5" title="收起本章大纲" onClick={() => onCollapsedChange?.(true)}><PanelLeftClose className="h-3 w-3" /></button>
+      </div>
+
+      {/* Chapter title + edit row */}
       <div className="flex min-h-10 items-center gap-1 border-b border-gray-200 px-2 dark:border-dark-border">
         {editingChapter ? (
           <InlineTitleEditor value={title} onSave={(value) => { onRenameChapter(value); setEditingChapter(false) }} onCancel={() => setEditingChapter(false)} />
@@ -126,7 +161,6 @@ export default function ChapterOutlinePanel({
         )}
         {!editingChapter && <button type="button" className="icon-btn h-6 w-6" title="编辑章节名" onClick={() => setEditingChapter(true)}><Pencil className="h-3 w-3" /></button>}
         {chapterCustomTitle && <button type="button" className="icon-btn h-6 w-6" title="恢复原章节名" onClick={onRestoreChapter}><RotateCcw className="h-3 w-3" /></button>}
-        <button type="button" className="icon-btn h-6 w-6" title="收起本章大纲" onClick={() => onCollapsedChange?.(true)}><PanelLeftClose className="h-3 w-3" /></button>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
@@ -168,74 +202,124 @@ export default function ChapterOutlinePanel({
           </div>
         )}
         {record?.sections.length ? (
-          <nav className="min-h-0 flex-1 overflow-y-auto py-1.5" aria-label="本章小节大纲">
-            {record.sections.map((section, index) => (
-              <div key={section.id} className="group flex items-start gap-1 px-2 py-0.5">
-                {editingSectionId === section.id ? (
-                  <InlineTitleEditor
-                    value={displaySectionTitle(section)}
-                    onSave={(value) => {
-                      const trimmed = value.trim()
-                      if (!trimmed) return
-                      onUpdateRecord({
-                        ...record,
-                        sections: record.sections.map((item) =>
-                          item.id === section.id
-                            ? { ...item, customTitle: trimmed === item.originalTitle ? undefined : trimmed }
-                            : item
-                        )
-                      })
-                      setEditingSectionId(null)
-                    }}
-                    onCancel={() => setEditingSectionId(null)}
-                  />
-                ) : (
+          viewMode === 'outline' ? (
+            <nav className="min-h-0 flex-1 overflow-y-auto py-1.5" aria-label="本章小节大纲">
+              {record.sections.map((section, index) => (
+                <div key={section.id} className="group flex items-start gap-1 px-2 py-0.5">
+                  {editingSectionId === section.id ? (
+                    <InlineTitleEditor
+                      value={displaySectionTitle(section)}
+                      onSave={(value) => {
+                        const trimmed = value.trim()
+                        if (!trimmed) return
+                        onUpdateRecord({
+                          ...record,
+                          sections: record.sections.map((item) =>
+                            item.id === section.id
+                              ? { ...item, customTitle: trimmed === item.originalTitle ? undefined : trimmed }
+                              : item
+                          )
+                        })
+                        setEditingSectionId(null)
+                      }}
+                      onCancel={() => setEditingSectionId(null)}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className={cn(
+                        'min-w-0 flex-1 py-1 text-left',
+                        index === activeSectionIndex ? 'text-primary' : 'text-gray-600 dark:text-gray-300'
+                      )}
+                      onClick={() => onSelectSection(section.startOffset)}
+                    >
+                      <span className="block truncate text-[11px] leading-tight">{displaySectionTitle(section)}</span>
+                      {section.point && (
+                        <span className="mt-0.5 block line-clamp-2 text-[9px] leading-snug text-gray-400">
+                          {section.point}
+                        </span>
+                      )}
+                    </button>
+                  )}
+                  {!editingSectionId && record.status === 'generated' && (
+                    <button
+                      type="button"
+                      className="icon-btn h-5 w-5 opacity-0 transition-opacity group-hover:opacity-100"
+                      title="编辑小节标题"
+                      onClick={() => setEditingSectionId(section.id)}
+                    >
+                      <Pencil className="h-2.5 w-2.5" />
+                    </button>
+                  )}
+                  {section.customTitle && !editingSectionId && (
+                    <button
+                      type="button"
+                      className="icon-btn h-5 w-5 opacity-0 transition-opacity group-hover:opacity-100"
+                      title="恢复原小节标题"
+                      onClick={() =>
+                        onUpdateRecord({
+                          ...record,
+                          sections: record.sections.map((item) =>
+                            item.id === section.id ? { ...item, customTitle: undefined } : item
+                          )
+                        })
+                      }
+                    >
+                      <RotateCcw className="h-2.5 w-2.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </nav>
+          ) : (
+            /* 关系纵览：小节卡片 + 箭头连线 */
+            <nav className="min-h-0 flex-1 overflow-y-auto px-3 py-2" aria-label="本章小节关系纵览">
+              {record.sections.map((section, index) => (
+                <div key={section.id}>
                   <button
                     type="button"
                     className={cn(
-                      'min-w-0 flex-1 py-1 text-left',
-                      index === activeSectionIndex ? 'text-primary' : 'text-gray-600 dark:text-gray-300'
+                      'w-full rounded-lg border px-3 py-2.5 text-left transition-colors',
+                      index === activeSectionIndex
+                        ? 'border-primary/40 bg-primary/5'
+                        : 'border-gray-200 bg-gray-50/50 dark:border-dark-border dark:bg-white/3'
                     )}
                     onClick={() => onSelectSection(section.startOffset)}
                   >
-                    <span className="block truncate text-[11px] leading-tight">{displaySectionTitle(section)}</span>
-                    {section.point && (
-                      <span className="mt-0.5 block line-clamp-2 text-[9px] leading-snug text-gray-400">
-                        {section.point}
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn(
+                        'flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-[9px] font-semibold',
+                        index === activeSectionIndex ? 'bg-primary text-white' : 'bg-gray-300 text-gray-600 dark:bg-gray-600 dark:text-gray-300'
+                      )}>
+                        {index + 1}
                       </span>
+                      <span className={cn(
+                        'text-xs font-medium leading-snug',
+                        index === activeSectionIndex ? 'text-primary' : 'text-gray-700 dark:text-gray-200'
+                      )}>
+                        {displaySectionTitle(section)}
+                      </span>
+                    </div>
+                    {section.summary && (
+                      <p className="mt-1.5 text-[10px] leading-relaxed text-gray-500 dark:text-gray-400">
+                        {section.summary}
+                      </p>
+                    )}
+                    {!section.summary && section.point && (
+                      <p className="mt-1 text-[9px] leading-snug text-gray-400">
+                        {section.point}
+                      </p>
                     )}
                   </button>
-                )}
-                {!editingSectionId && record.status === 'generated' && (
-                  <button
-                    type="button"
-                    className="icon-btn h-5 w-5 opacity-0 transition-opacity group-hover:opacity-100"
-                    title="编辑小节标题"
-                    onClick={() => setEditingSectionId(section.id)}
-                  >
-                    <Pencil className="h-2.5 w-2.5" />
-                  </button>
-                )}
-                {section.customTitle && !editingSectionId && (
-                  <button
-                    type="button"
-                    className="icon-btn h-5 w-5 opacity-0 transition-opacity group-hover:opacity-100"
-                    title="恢复原小节标题"
-                    onClick={() =>
-                      onUpdateRecord({
-                        ...record,
-                        sections: record.sections.map((item) =>
-                          item.id === section.id ? { ...item, customTitle: undefined } : item
-                        )
-                      })
-                    }
-                  >
-                    <RotateCcw className="h-2.5 w-2.5" />
-                  </button>
-                )}
-              </div>
-            ))}
-          </nav>
+                  {index < record.sections.length - 1 && (
+                    <div className="flex justify-center py-0.5">
+                      <ArrowDown className="h-3.5 w-3.5 text-gray-300 dark:text-gray-600" />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </nav>
+          )
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-[10px] text-gray-400">
             {loading ? (

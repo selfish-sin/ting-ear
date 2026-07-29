@@ -1,7 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { ChapterOutlineGenerateRequest } from '../../../src/global'
-import { chapterDisplayTitle, chapterKey, normalizeBookCollection } from '../../../src/utils/bookData'
+import { chapterDisplayTitle, chapterKey } from '../../../src/utils/bookData'
+import { LibraryStorage } from '../library-storage'
 
 export interface CanonicalOutlineInput {
   bookId: string
@@ -15,16 +14,13 @@ export function resolveCanonicalOutlineInput(
   dataDir: string,
   request: Pick<ChapterOutlineGenerateRequest, 'bookId' | 'chapterIndex' | 'chapterKey'>
 ): { input?: CanonicalOutlineInput; error?: string } {
-  if (!existsSync(join(dataDir, 'books.json'))) return { error: 'book data not found' }
-
-  let raw: unknown
+  let book
   try {
-    raw = JSON.parse(readFileSync(join(dataDir, 'books.json'), 'utf8'))
+    const storage = new LibraryStorage(() => dataDir)
+    book = storage.loadAll().find((item) => item.id === request.bookId)
   } catch {
     return { error: 'book data is invalid' }
   }
-
-  const book = normalizeBookCollection(raw).find((item) => item.id === request.bookId)
   if (!book) return { error: 'book not found' }
   if (!Number.isInteger(request.chapterIndex) || request.chapterIndex < 0 || request.chapterIndex >= book.chapters.length) {
     return { error: 'chapter not found' }

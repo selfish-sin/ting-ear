@@ -8,19 +8,25 @@ import { getDataDir } from './fileHandlers'
 
 const MAX_HISTORY_ENTRIES = 2000
 
+/** 内存缓存：避免每次 IPC 调用都读盘 */
+let historyCache: HistoryEntry[] | null = null
+
 function getHistoryFile(): string {
   return join(getDataDir(), 'history.json')
 }
 
 function loadHistory(): HistoryEntry[] {
+  if (historyCache !== null) return historyCache
   try {
     if (existsSync(getHistoryFile())) {
-      return JSON.parse(readFileSync(getHistoryFile(), 'utf-8'))
+      historyCache = JSON.parse(readFileSync(getHistoryFile(), 'utf-8'))
+      return historyCache!
     }
   } catch {
     // corrupted
   }
-  return []
+  historyCache = []
+  return historyCache
 }
 
 function saveHistory(history: HistoryEntry[]): void {
@@ -28,6 +34,7 @@ function saveHistory(history: HistoryEntry[]): void {
   if (history.length > MAX_HISTORY_ENTRIES) {
     history = history.slice(history.length - MAX_HISTORY_ENTRIES)
   }
+  historyCache = history
   const filePath = getHistoryFile()
   const tmpPath = `${filePath}.tmp`
   writeFileSync(tmpPath, JSON.stringify(history, null, 2), 'utf-8')

@@ -337,3 +337,14 @@ input[type='range']::-webkit-slider-thumb:hover {
     transition-duration: 0.01ms !important;
   }
 }
+
+/*
+ * 正文段落虚拟化：让浏览器跳过屏外段落的布局与绘制。
+ * content-visibility:auto 类似"只渲染看得见的部分"，但不卸载 DOM，
+ * 因此对 AI 阅读这种段落高度不一的场景零侵入，也不需要引第三方虚拟列表库。
+ * contain-intrinsic-size 给屏外块一个估算占位高度，保持滚动条稳定不跳。
+ */
+.reader-block-virtual {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}

@@ -12,6 +12,7 @@ import {
   ChevronsRight
 } from 'lucide-react'
 import { useBookStore } from '../stores/bookStore'
+import iconUrl from '../assets/icon.ico'
 
 interface SideNavProps {
   currentView: string
@@ -31,18 +32,18 @@ const navItems = [
 ] as const
 
 export default function SideNav({ currentView, onViewChange, onOpenSettings }: SideNavProps) {
-  const { currentBook } = useBookStore()
+  const currentBookId = useBookStore((s) => s.currentBook?.id)
   const [expanded, setExpanded] = useState(false)
 
   const handleNavClick = useCallback(
     (view: 'shelf' | 'player' | 'bookmarks' | 'history' | 'logs' | 'quicktext' | 'textclean') => {
-      if (view === 'player' && !currentBook) {
+      if (view === 'player' && !currentBookId) {
         onViewChange('shelf')
       } else {
         onViewChange(view)
       }
     },
-    [currentBook, onViewChange]
+    [currentBookId, onViewChange]
   )
 
   return (
@@ -51,9 +52,7 @@ export default function SideNav({ currentView, onViewChange, onOpenSettings }: S
     >
       {/* Logo */}
       <div className="px-2 pt-3 pb-2 flex items-center gap-2 justify-center" style={expanded ? { justifyContent: 'flex-start', paddingLeft: '0.625rem' } : undefined}>
-        <div className="w-8 h-8 rounded-xl bg-primary flex items-center justify-center shadow-sm shrink-0">
-          <span className="text-white text-sm font-bold">听</span>
-        </div>
+        <img src={iconUrl} alt="听伴" className="w-8 h-8 rounded-xl shrink-0" />
         {expanded && (
           <span className="font-semibold text-sm text-gray-800 dark:text-gray-100 leading-tight truncate">听伴</span>
         )}
@@ -64,7 +63,7 @@ export default function SideNav({ currentView, onViewChange, onOpenSettings }: S
         {navItems.map((item) => {
           const Icon = item.icon
           const isActive = currentView === item.id
-          const disabled = item.id === 'player' && !currentBook
+          const disabled = item.id === 'player' && !currentBookId
           return (
             <button
               key={item.id}

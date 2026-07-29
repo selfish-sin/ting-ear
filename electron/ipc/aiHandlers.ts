@@ -2,25 +2,28 @@ import { ipcMain } from 'electron'
 import type { AiChatPayload, AiLlmSettings, BookData, ChapterOutlineGenerateRequest, ChapterOutlineRecord } from '../../src/global'
 import type { LogService } from '../services/log-service'
 import type { SettingsService } from '../services/settings-service'
-import { getDataDir } from './fileHandlers'
+import { getDataDir, getIngestScheduler } from './fileHandlers'
 import { mergeAiSettings, resolveEngine } from '../services/ai/ai-config'
 import { JsonAiHistoryRepository } from '../services/ai/ai-history'
 import { AiService } from '../services/ai/ai-service'
 import { NmemBridge } from '../services/ai/nmem-bridge'
-import { IngestService } from '../services/ai/ingest-service'
 import { OutlineGenerator } from '../services/ai/outline-generator'
-import { calculateMinimumSections, isShortChapter } from '../services/ai/outline-generator'
 import { ChapterOutlineRepository } from '../services/ai/outline-repository'
-import { outlineGenerationQueue } from '../services/ai/outline-queue'
 import { normalizeBookData } from '../../src/utils/bookData'
 import { hashSentences } from '../../src/utils/contentHash'
 import { listModels } from '../services/ai/llm-caller'
 import { resolveCanonicalOutlineInput } from '../services/ai/outline-input'
+import {
+  generateChapterOutlineRecord,
+  runOutlineBatch,
+  cancelOutlineBatch,
+  isOutlineBatchRunning
+} from '../services/ai/outline-batch'
+import { LibraryStorage } from '../services/library-storage'
 
 export function registerAiHandlers(settingsService: SettingsService, logService: LogService): void {
   const history = new JsonAiHistoryRepository(getDataDir)
   const nmem = new NmemBridge(() => mergeAiSettings(settingsService.get().ai).nmem)
-  const ingest = new IngestService(nmem)
   const service = new AiService({
     getSettings: () => mergeAiSettings(settingsService.get().ai),
     history,
@@ -56,6 +59,14 @@ export function registerAiHandlers(settingsService: SettingsService, logService:
     history.deleteConversation(bookId, convId)
     return { success: true }
   })
+  ipcMain.handle('ai:conv:rename', (_event, bookId: string, convId: string, title: string) => {
+    const ok = history.renameConversation(bookId, convId, title)
+    return ok ? { success: true } : { success: false, error: '重命名失败' }
+  })
+  ipcMain.handle('ai:conv:set-active', (_event, bookId: string, convId: string) => {
+    const ok = history.setActiveConversation(bookId, convId)
+    return { success: ok }
+  })
 
   ipcMain.handle('ai:nmem:status', async (_event, force = false) => {
     try {
@@ -64,6 +75,22 @@ export function registerAiHandlers(settingsService: SettingsService, logService:
       return {
         status: 'offline' as const,
         checkedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+  })
+
+  /** 单本书是否已同步到知识库（本地 ingest-status，不打网络） */
+  ipcMain.handle('ai:nmem:book-status', async (_event, bookId: string) => {
+    const scheduler = getIngestScheduler()
+    if (!scheduler || !bookId) {
+      return { status: 'none' as const }
+    }
+    try {
+      return await scheduler.getBookIngestStatus(bookId)
+    } catch (error) {
+      return {
+        status: 'none' as const,
         error: error instanceof Error ? error.message : String(error)
       }
     }
@@ -87,14 +114,19 @@ export function registerAiHandlers(settingsService: SettingsService, logService:
   ipcMain.handle('ai:nmem:ingest', async (_event, value: BookData) => {
     const book = normalizeBookData(value)
     if (!book) return { success: false, error: '书籍数据无效' }
+    // 统一走共享 IngestScheduler：享有 per-book in-flight 锁 + contentHash 去重 + 状态写入，
+    // 不再裸调 IngestService.ingestBook（那会绕过状态文件导致重复堆源）
+    const scheduler = getIngestScheduler()
+    if (!scheduler) {
+      return { success: false, error: '知识库调度器未就绪，请稍后重试' }
+    }
     try {
-      // 整本一次上传（不再按章拆分，避免 MDM 重复堆源）
-      const result = await ingest.ingestBook(book)
+      const ok = await scheduler.tryIngest(book)
       logService.info(
         'AI',
-        `知识库整本导入完成: ${book.title}，提交 ${result.ingested}，跳过 ${result.skipped}`
+        `知识库整本导入: 《${book.title}》${ok ? '完成' : '失败（将在连接后自动重试）'}`
       )
-      return { success: true, ...result }
+      return { success: ok, ingested: ok ? 1 : 0, skipped: 0 }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       logService.error('AI', `知识库导入失败: ${message}`)
@@ -119,7 +151,6 @@ export function registerAiHandlers(settingsService: SettingsService, logService:
     getSettings: () => resolveEngine(mergeAiSettings(settingsService.get().ai), 'outline'),
     getOutlineSystemPrompt: () => mergeAiSettings(settingsService.get().ai).chat.outlineSystemPrompt,
     getDataDir,
-    cache: false,
     onProgress: (chapterIndex, total) => {
       logService.info('AI', `大纲生成进度: ${chapterIndex + 1}/${total}`)
     },
@@ -181,51 +212,51 @@ export function registerAiHandlers(settingsService: SettingsService, logService:
     const resolved = resolveCanonicalOutlineInput(getDataDir(), request)
     if (!resolved.input) return { success: false, error: resolved.error }
     const input = resolved.input
-    const contentHash = hashSentences(input.sentences)
-    const previous = getOutlineRepository().load(input.bookId, input.chapterKey, contentHash)
-    // 用户点「重新生成」时 force=true，必须真正重跑；否则可直接返回缓存
-    if (
-      !force &&
-      (previous?.status === 'generated' || previous?.status === 'short_chapter')
-    ) {
-      return { success: true, record: previous }
-    }
     try {
-      const engineConfig = resolveEngine(mergeAiSettings(settingsService.get().ai), 'outline')
-      logService.info('AI', `大纲引擎: ${engineConfig.baseUrl} | 模型: ${engineConfig.model}`)
-      const outline = await outlineGenerationQueue.enqueue(() => outlineGen.generateChapter(
-        input.bookId,
-        input.sentences,
-        [{ title: input.chapterTitle, startIndex: 0, sentenceCount: input.sentences.length }],
-        0
-      ))
-      if (outline.error) {
-        logService.error('AI', `大纲生成失败: ${outline.error}`)
-        return { success: false, error: outline.error }
+      const result = await generateChapterOutlineRecord(getDataDir, outlineGen, input, force)
+      if (result.status === 'failed') {
+        logService.error('AI', `大纲生成失败: ${result.error ?? 'unknown'}`)
+        return { success: false, error: result.error }
       }
-      const record: ChapterOutlineRecord = {
-        bookId: input.bookId,
-        chapterKey: input.chapterKey,
-        chapterIndex: input.chapterIndex,
-        contentHash,
-        status: isShortChapter(input.sentences.length) ? 'short_chapter' : 'generated',
-        minimumSections: calculateMinimumSections(input.sentences.length),
-        sections: outline.sections.map((section, index) => ({
-          id: `${request.chapterKey}-${contentHash}-${index}`,
-          originalTitle: section.title,
-          point: section.point,
-          startOffset: section.startOffset
-        })),
-        generatedAt: new Date().toISOString()
+      if (result.record) {
+        logService.info('AI', `大纲生成完成: ${input.bookId} 第${input.chapterIndex + 1}章，${result.record.sections.length}节`)
       }
-      getOutlineRepository().save(record)
-      logService.info('AI', `大纲生成完成: ${request.bookId} 第${request.chapterIndex + 1}章，${record.sections.length}节`)
-      return { success: true, record }
+      return { success: true, record: result.record }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       logService.error('AI', `大纲生成失败: ${message}`)
       return { success: false, error: message }
     }
+  })
+
+  ipcMain.handle('ai:outline:regenerate-all', (event, rawPayload?: unknown) => {
+    if (isOutlineBatchRunning()) {
+      return { accepted: false, reason: 'already-running' }
+    }
+    const force = Boolean(rawPayload && typeof rawPayload === 'object' && (rawPayload as { force?: unknown }).force)
+    const storage = new LibraryStorage(getDataDir)
+    const bookTotal = storage.loadAll().filter((b) => Array.isArray(b.chapters) && b.chapters.length > 0).length
+
+    void runOutlineBatch({
+      getDataDir,
+      generator: outlineGen,
+      force,
+      onProgress: (progress) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('ai:outline:batch-progress', progress)
+        }
+      }
+    })
+
+    return { accepted: true, bookTotal }
+  })
+
+  ipcMain.handle('ai:outline:cancel-batch', () => {
+    if (isOutlineBatchRunning()) {
+      cancelOutlineBatch()
+      return { cancelled: true }
+    }
+    return { cancelled: false }
   })
 
   ipcMain.handle('ai:outline:legacy-generate', async (_event, book: BookData, chapterIndex: number) => {

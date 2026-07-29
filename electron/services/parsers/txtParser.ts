@@ -1,17 +1,14 @@
 import { readFileSync } from 'fs'
 import { basename } from 'path'
 import { preprocessText, splitSentences, sanitizeControlChars } from './textPreprocessor'
-import { refineChapters } from './chapterBuilder'
-
-// TXT 多为小说，章节由"第X章"等标题界定；归一化下限放低以尊重作者分章，仅合并极小片段
-const TXT_MIN_SENTENCES = 40
-const TXT_MAX_SENTENCES = 900
+import { buildChaptersByMode, type Boundary } from './chapterBuilder'
 
 interface ParseResult {
   title: string
   author: string
   sentences: string[]
   chapters: Array<{ title: string; startIndex: number; sentenceCount: number }>
+  sourceBoundaries?: Boundary[]
 }
 
 /**
@@ -159,16 +156,15 @@ export function parseTxt(filePath: string): ParseResult {
     })
   }
 
-  return {
-    title,
-    author,
-    sentences,
-    chapters:
-      sentences.length > 0
-        ? refineChapters(sentences.length, chapters, {
-            minSentences: TXT_MIN_SENTENCES,
-            maxSentences: TXT_MAX_SENTENCES
-          })
-        : [{ title: '全文', startIndex: 0, sentenceCount: sentences.length }]
-  }
+  // 导入只存「原始」切法：保留标题边界，仅切超长章；35~400 合并留给预选页。
+  const hasDetectedChapters = chapters.length > 1
+  const sourceBoundaries = hasDetectedChapters
+    ? chapters.map((c) => ({ title: c.title, sentenceIndex: c.startIndex }))
+    : []
+  const finalChapters =
+    sentences.length > 0
+      ? buildChaptersByMode(sentences.length, sourceBoundaries, 'original')
+      : [{ title: '全文', startIndex: 0, sentenceCount: sentences.length }]
+
+  return { title, author, sentences, chapters: finalChapters, sourceBoundaries }
 }

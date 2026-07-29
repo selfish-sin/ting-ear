@@ -1,8 +1,9 @@
 import { BrowserWindow } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 import { getDataDir } from '../ipc/fileHandlers'
+import { atomicWriteFile } from '../utils/atomicWrite'
 
 export interface LogEntry {
   id: string
@@ -16,6 +17,9 @@ export interface LogEntry {
 
 const MAX_LOG_ENTRIES = 5000
 const TRIM_TO = 2500
+/** 批量写盘：攒条数或到时 flush，避免每条日志全量 stringify */
+const FLUSH_INTERVAL_MS = 1500
+const FLUSH_EVERY_N = 20
 
 export class LogService {
   private static mainWindow: BrowserWindow | null = null
@@ -26,10 +30,21 @@ export class LogService {
   }
 
   private logs: LogEntry[] = []
+  private dirty = false
+  private flushTimer: ReturnType<typeof setTimeout> | null = null
+  private pendingSinceFlush = 0
 
   constructor() {
+    // 延迟加载：不阻塞启动关键路径
+    // logs.json 只在第一次写入或 getLogs() 调用时按需加载
+  }
+
+  private ensureLoaded(): void {
+    if (this._loaded) return
+    this._loaded = true
     this.load()
   }
+  private _loaded = false
 
   private getLogFile(): string {
     return join(getDataDir(), 'logs.json')
@@ -57,6 +72,8 @@ export class LogService {
 
   /** 数据目录切换后重新从新路径加载 */
   reloadFromDisk(): void {
+    this._loaded = true // 标记已加载，跳过懒加载
+    this.flushSync()
     try {
       this.ensureDir()
       const logFile = this.getLogFile()
@@ -69,17 +86,38 @@ export class LogService {
     }
   }
 
-  private save(): void {
+  private scheduleFlush(): void {
+    this.dirty = true
+    this.pendingSinceFlush += 1
+    if (this.pendingSinceFlush >= FLUSH_EVERY_N) {
+      this.flushSync()
+      return
+    }
+    if (this.flushTimer) return
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null
+      this.flushSync()
+    }, FLUSH_INTERVAL_MS)
+  }
+
+  /** 立即落盘（退出/切目录/清空时调用） */
+  flushSync(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+    if (!this.dirty && this.pendingSinceFlush === 0) {
+      // 仍允许强制写空列表等场景：clear 会先改 logs 再 flush
+    }
     try {
       this.ensureDir()
-      // Trim logs if exceeding max
       if (this.logs.length > MAX_LOG_ENTRIES) {
         this.logs = this.logs.slice(this.logs.length - TRIM_TO)
       }
       const logFile = this.getLogFile()
-      const tmpPath = `${logFile}.tmp`
-      writeFileSync(tmpPath, JSON.stringify(this.logs, null, 2), 'utf-8')
-      renameSync(tmpPath, logFile)
+      atomicWriteFile(logFile, JSON.stringify(this.logs))
+      this.dirty = false
+      this.pendingSinceFlush = 0
     } catch (error) {
       console.error('Failed to save logs:', error)
     }
@@ -92,6 +130,7 @@ export class LogService {
     details: string | null = null,
     context: Record<string, unknown> = {}
   ): void {
+    this.ensureLoaded()
     const entry: LogEntry = {
       id: uuidv4(),
       timestamp: new Date().toISOString(),
@@ -102,10 +141,12 @@ export class LogService {
       context
     }
     this.logs.push(entry)
-    this.save()
+    this.scheduleFlush()
 
-    // Push to renderer for real-time log view
-    LogService.mainWindow?.webContents.send('log:new-entry', entry)
+    // DEBUG 不推渲染进程：TTS 合成等高频 debug 会刷 IPC，导致界面卡顿/未响应
+    if (level !== 'DEBUG') {
+      LogService.mainWindow?.webContents.send('log:new-entry', entry)
+    }
 
     // Print to console (short format like batch_ocr)
     const ts = new Date(entry.timestamp)
@@ -139,12 +180,14 @@ export class LogService {
   }
 
   getLogs(): LogEntry[] {
+    this.ensureLoaded()
     return this.logs
   }
 
   clearLogs(): void {
     this.logs = []
-    this.save()
+    this.dirty = true
+    this.flushSync()
   }
 
   /** 当前日志目录（随 getDataDir 变化） */

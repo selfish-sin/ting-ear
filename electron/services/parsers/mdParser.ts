@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 import { sanitizeControlChars } from './textPreprocessor'
-import { deriveSentences, deriveChapters } from './structureBuilder'
+import { deriveSentences, deriveChapters, regroupStructuredChapters } from './structureBuilder'
 import { hashSentences } from '../../../src/utils/contentHash'
 import type { BookData, StructuredChapter, StructureMeta } from '../../../src/global'
 
@@ -219,8 +219,14 @@ export function parseMarkdown(filePath: string): BookData {
   const structure = parseMarkdownToStructure(content)
   const allSentences = deriveSentences(structure)
 
-  // 从 structure 派生章节（保留原始标题层级）
-  const finalChapters = deriveChapters(structure)
+  // 原料边界 = MD 标题结构；入库默认 original（仅切超长）
+  const sourceBoundaries = deriveChapters(structure).map((c) => ({
+    title: c.title,
+    sentenceIndex: c.startIndex
+  }))
+  const refined = regroupStructuredChapters(structure, { mode: 'original' })
+  const finalStructure = refined.structure
+  const finalChapters = refined.chapters
 
   // Extract title from first chapter or filename
   let title = structure[0]?.title || ''
@@ -241,13 +247,14 @@ export function parseMarkdown(filePath: string): BookData {
     format: 'md',
     sentences: allSentences,
     chapters: finalChapters,
+    sourceBoundaries,
     currentChapterIndex: 0,
     currentSentenceIndex: 0,
     progressPercent: 0,
     isCompleted: false,
     addedAt: new Date().toISOString(),
     lastReadAt: new Date().toISOString(),
-    structure,
+    structure: finalStructure,
     structureMeta
   }
 }

@@ -133,4 +133,58 @@ test('validates user titles without silently truncating rename input', () => {
   assert.equal(normalizeBookTitle('长'.repeat(BOOK_TITLE_MAX_LENGTH + 1)), null)
 })
 
+test('trusted path keeps structure without rehashing and skips pseudo rebuild', () => {
+  const sentences = Array.from({ length: 200 }, (_, i) => `句子${i}。内容足够长通过校验。`)
+  const chapters = [
+    { title: '第一章', startIndex: 0, sentenceCount: 100 },
+    { title: '第二章', startIndex: 100, sentenceCount: 100 }
+  ]
+  const structure = chapters.map((c) => ({
+    title: c.title,
+    level: 1,
+    blocks: [
+      {
+        blockId: `b-${c.startIndex}`,
+        type: 'paragraph' as const,
+        text: sentences[c.startIndex],
+        ttsSkip: false,
+        sentenceRange: [c.startIndex, c.startIndex + c.sentenceCount] as [number, number]
+      }
+    ],
+    sentenceRange: [c.startIndex, c.startIndex + c.sentenceCount] as [number, number]
+  }))
+  // 故意错误的 hash：trusted 仍应接受形状合法的 structure
+  const book = normalizeBookData(
+    {
+      id: 'trusted-1',
+      title: '大书',
+      author: '作者',
+      filePath: 'a.txt',
+      format: 'txt',
+      sentences,
+      chapters,
+      currentSentenceIndex: 0,
+      currentChapterIndex: 0,
+      progressPercent: 0,
+      isCompleted: false,
+      addedAt: '2026-01-01T00:00:00.000Z',
+      lastReadAt: '2026-01-01T00:00:00.000Z',
+      structure,
+      structureMeta: {
+        schemaVersion: 1 as const,
+        contentHash: 'deadbeefdeadbeef',
+        sourceFormat: 'txt'
+      }
+    },
+    { trusted: true, contentHash: 'deadbeefdeadbeef' }
+  )
+  assert.ok(book)
+  assert.equal(book.sentences.length, 200)
+  assert.equal(book.structure?.length, 2)
+  assert.equal(book.structureMeta?.contentHash, 'deadbeefdeadbeef')
+  // 二次 normalize 应命中缓存（同一对象）
+  const again = normalizeBookData(book, { trusted: true })
+  assert.equal(again, book)
+})
+
 console.log(`Book data result: ${passed} passed`)

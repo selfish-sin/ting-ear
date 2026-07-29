@@ -112,16 +112,12 @@ export class EdgeAdapter implements ITTSAdapter {
     if (voiceId && !isValid) {
       console.info(`[Edge] voice "${voiceId}" not found in Edge list, falling back to ${voice}`)
     }
-    console.info(`[Edge] synthesize: textLen=${text.length} voice=${voice} speed=${speed.toFixed(1)}`)
-
     // === 检查本地缓存 ===
     const cacheKey = this.getCacheKey(text, voice, speed)
     const cachePath = join(this.cacheDir, `${cacheKey}.mp3`)
     if (existsSync(cachePath)) {
-      console.info(`[Edge] cache hit: ${cacheKey}`)
       try {
         const buf = readFileSync(cachePath)
-        console.info(`[Edge] cached audio: ${buf.length} bytes`)
         return { success: true, audio: buf.toString('base64') }
       } catch {
         // cache file corrupted → fall through to live synthesis

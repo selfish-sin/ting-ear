@@ -47,6 +47,8 @@ class FakeNmem {
   sources = new Map<string, NmemSourceInfo>()
   nextId = 1
   offline = false
+  /** 可选的阻塞 gate：设置后 ingestContent 会等待它 resolve，用于模拟慢速上传制造并发窗口 */
+  blockIngest: Promise<void> | null = null
 
   async checkHealth() {
     if (this.offline) throw new Error('offline')
@@ -59,13 +61,10 @@ class FakeNmem {
     sourceType: string
   }): Promise<NmemIngestResult> {
     if (this.offline) throw new Error('offline')
+    if (this.blockIngest) await this.blockIngest
     this.calls.push(input)
-    // 同名同内容视为重复
-    for (const [id, info] of this.sources) {
-      if (info.name === input.name) {
-        return { sourceId: id, isDuplicate: true }
-      }
-    }
+    // 真实 nmem 不按 name 去重（ai-now/sources 已证实同 bookId 存在多份），
+    // 每次都创建新 source；去重由 IngestScheduler 删旧源 + dedupeSources 负责
     const id = `src-${this.nextId++}`
     this.sources.set(id, { id, name: input.name, status: 'ready' })
     return { sourceId: id, isDuplicate: false }
@@ -79,6 +78,17 @@ class FakeNmem {
     return [...this.sources.values()]
   }
 
+  deleted: string[] = []
+
+  async deleteSource(sourceId: string): Promise<boolean> {
+    if (this.sources.has(sourceId)) {
+      this.sources.delete(sourceId)
+      this.deleted.push(sourceId)
+      return true
+    }
+    return false
+  }
+
   async search(): Promise<never[]> {
     return []
   }
@@ -88,7 +98,7 @@ async function main(): Promise<void> {
   console.log('\nWhole-book MDM ingest')
 
   const book = makeBook()
-  assert.equal(bookSourceName(book), '[bookId=book-1] 测试之书')
+  assert.equal(bookSourceName(book), '测试之书 [bookId=book-1]')
   assert.equal(bookFullContent(book), book.sentences.join('\n'))
   assert.equal(bookContentHash(book), contentHash(book.sentences.join('\n')))
   console.log('  ok builds stable whole-book source name and content hash')
@@ -99,7 +109,7 @@ async function main(): Promise<void> {
     const ingest = new IngestService(nmem as unknown as NmemBridge)
     const state = await ingest.ingestWholeBook(book)
     assert.equal(nmem.calls.length, 1)
-    assert.equal(nmem.calls[0].name, '[bookId=book-1] 测试之书')
+    assert.equal(nmem.calls[0].name, '测试之书 [bookId=book-1]')
     assert.equal(nmem.calls[0].content, book.sentences.join('\n'))
     assert.equal(state.status, 'searchable')
     assert.ok(state.sourceId)
@@ -190,7 +200,7 @@ async function main(): Promise<void> {
         () => [book],
         () => undefined
       )
-      const loaded = scheduler.loadStatus()['book-1']
+      const loaded = (await scheduler.loadStatus())['book-1']
       assert.ok(isLegacyChapterState(loaded))
       assert.equal(await scheduler.tryIngest(book), true)
       assert.equal(nmem.calls.length, 1)
@@ -201,7 +211,100 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log('Whole-book MDM ingest result: 6 passed')
+  // 并发竞态：同一本书双线并发（导入即时线 + 探针定时线）只上传一次
+  {
+    const root = mkdtempSync(join(tmpdir(), 'ting-ear-ingest-race-'))
+    try {
+      const nmem = new FakeNmem()
+      const ingest = new IngestService(nmem as unknown as NmemBridge)
+      const scheduler = new IngestScheduler(
+        () => root,
+        nmem as unknown as NmemBridge,
+        ingest,
+        () => [book],
+        () => undefined
+      )
+
+      // 用 gate 卡住首次上传，制造 tryIngest 双线并发的竞态窗口
+      let releaseGate: () => void = () => {}
+      nmem.blockIngest = new Promise<void>((resolve) => {
+        releaseGate = resolve
+      })
+
+      // 两条线同时发起（模拟「导书即时 tryIngest」与「30s 探针 catchUp」并发）
+      const p1 = scheduler.tryIngest(book)
+      const p2 = scheduler.tryIngest(book)
+      releaseGate()
+      const [r1, r2] = await Promise.all([p1, p2])
+      assert.equal(r1, true)
+      assert.equal(r2, true)
+      assert.equal(nmem.calls.length, 1, 'concurrent tryIngest must not double-upload')
+
+      // 状态已写入，再次调用应跳过，不再上传
+      assert.equal(await scheduler.tryIngest(book), true)
+      assert.equal(nmem.calls.length, 1, 'post-upload tryIngest must skip')
+      console.log('  ok per-book in-flight lock prevents concurrent double upload')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  // 去重：同 bookId 的多个历史遗留 source 只保留 1 个
+  {
+    const root = mkdtempSync(join(tmpdir(), 'ting-ear-ingest-dedupe-'))
+    try {
+      const nmem = new FakeNmem()
+      const ingest = new IngestService(nmem as unknown as NmemBridge)
+      const scheduler = new IngestScheduler(
+        () => root,
+        nmem as unknown as NmemBridge,
+        ingest,
+        () => [book],
+        () => undefined
+      )
+      // 模拟历史遗留：同 bookId 3 个重复 source
+      nmem.sources.set('dup-1', { id: 'dup-1', name: '[bookId=book-1] 测试之书', status: 'ready' })
+      nmem.sources.set('dup-2', { id: 'dup-2', name: '[bookId=book-1] 测试之书', status: 'ready' })
+      nmem.sources.set('dup-3', { id: 'dup-3', name: '[bookId=book-1] 测试之书', status: 'ready' })
+      const result = await scheduler.dedupeSources()
+      assert.equal(result.removed, 2)
+      assert.equal(result.kept, 1)
+      assert.equal(nmem.sources.size, 1, 'only one source remains after dedupe')
+      console.log('  ok dedupe keeps one source per bookId and removes duplicates')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  // 内容变化重传时先删除旧 source，确保知识库只有一份
+  {
+    const root = mkdtempSync(join(tmpdir(), 'ting-ear-ingest-replace-'))
+    try {
+      const nmem = new FakeNmem()
+      const ingest = new IngestService(nmem as unknown as NmemBridge)
+      const scheduler = new IngestScheduler(
+        () => root,
+        nmem as unknown as NmemBridge,
+        ingest,
+        () => [book],
+        () => undefined
+      )
+      // 首次导入
+      assert.equal(await scheduler.tryIngest(book), true)
+      assert.equal(nmem.deleted.length, 0, 'no deletion on first ingest')
+
+      // 内容变化后重传：应先删旧源再上传新源
+      const bookV2 = makeBook({ sentences: ['全新的第一句内容。', '全新的第二句内容。'] })
+      assert.equal(await scheduler.tryIngest(bookV2), true)
+      assert.ok(nmem.deleted.length >= 1, 'old source must be deleted before re-upload')
+      assert.equal(nmem.calls.length, 2, 're-upload happens once for changed content')
+      console.log('  ok re-upload deletes old source first, keeping only one copy')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  console.log('Whole-book MDM ingest result: 9 passed')
 }
 
 void main()

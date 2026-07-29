@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { preprocessText, splitSentences, sanitizeControlChars } from './textPreprocessor'
 import { basename, extname } from 'path'
 import { deriveChapters, deriveSentences, regroupStructuredChapters } from './structureBuilder'
+import { buildPseudoChapterTitle, chaptersToBoundaries } from './chapterBuilder'
 import { hashSentences } from '../../../src/utils/contentHash'
 import type { Block, StructuredChapter, StructureMeta } from '../../../src/global'
 
@@ -52,6 +53,7 @@ interface ParseResult {
   author: string
   sentences: string[]
   chapters: Array<{ title: string; startIndex: number; sentenceCount: number }>
+  sourceBoundaries?: Array<{ title: string; sentenceIndex: number }>
   coverDataUrl?: string
   structure?: StructuredChapter[]
   structureMeta?: StructureMeta
@@ -659,7 +661,8 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
     if (segments.length > 0) {
       for (const seg of segments) processSegment(seg.title, seg.html)
     } else {
-      processSegment(`第${chapterCounter + 1}章`, rawHtml)
+      // 该 spine 文件无目录锚点命中 → 走「第N部分」兜底，不再凭空造「第N章」假标题
+      processSegment(buildPseudoChapterTitle(chapterCounter + 1), rawHtml)
     }
 
     const fileStructure = structure.slice(fileStructureStart)
@@ -673,18 +676,26 @@ export async function parseEpub(filePath: string, _cacheDir: string): Promise<Pa
     throw new Error('无法从 EPUB 中提取文本内容。文件可能已损坏或使用了不支持的格式。')
   }
 
-  const chapters = deriveChapters(structure)
+  // 原料边界 = TOC 原始章节；导入默认 original（仅切超长，不做 35 合并）
+  const sourceBoundaries = chaptersToBoundaries(deriveChapters(structure))
+  const refined =
+    structure.length > 0
+      ? regroupStructuredChapters(structure, { mode: 'original' })
+      : { structure, chapters: deriveChapters(structure) }
+
+  const chapters =
+    refined.chapters.length > 0
+      ? refined.chapters
+      : [{ title: '全文', startIndex: 0, sentenceCount: allSentences.length }]
 
   return {
     title,
     author: author || '未知作者',
     sentences: allSentences,
-    chapters:
-      chapters.length > 0
-        ? chapters
-        : [{ title: '全文', startIndex: 0, sentenceCount: allSentences.length }],
+    chapters,
+    sourceBoundaries,
     coverDataUrl,
-    structure,
+    structure: refined.structure,
     structureMeta: {
       schemaVersion: 1,
       contentHash: hashSentences(allSentences),

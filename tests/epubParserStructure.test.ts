@@ -69,6 +69,11 @@ async function verifyGlobalRanges(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'ting-ear-epub-structure-'))
   try {
   const epubPath = join(root, 'two-chapters.epub')
+  // 每章需要 ≥ CHAPTER_MIN_SENTENCES(35) 句，否则会被 min 合并为 1 章
+  const makeChapterHtml = (heading: string, prefix: string): string => {
+    const paras = Array.from({ length: 40 }, (_, i) => `<p>${prefix}正文第${i + 1}句。</p>`).join('')
+    return `<html><body><h1>${heading}</h1>${paras}</body></html>`
+  }
   const zip = new AdmZip()
   zip.addFile(
     'META-INF/container.xml',
@@ -90,11 +95,11 @@ async function verifyGlobalRanges(): Promise<void> {
   )
   zip.addFile(
     'OEBPS/chapter-1.xhtml',
-    Buffer.from('<html><body><h1>第一章</h1><p>第一章正文。</p></body></html>')
+    Buffer.from(makeChapterHtml('第一章', '一'))
   )
   zip.addFile(
     'OEBPS/chapter-2.xhtml',
-    Buffer.from('<html><body><h1>第二章</h1><p>第二章正文。</p></body></html>')
+    Buffer.from(makeChapterHtml('第二章', '二'))
   )
   zip.writeZip(epubPath)
 
@@ -141,8 +146,17 @@ async function verifyPackageXmlAttributeVariants(): Promise<void> {
           <spine><itemref linear='yes' idref='one'/><itemref idref='two' linear='yes'/></spine>
         </package>`)
     )
-    zip.addFile('OPS/one.xhtml', Buffer.from('<html><body><p>First chapter.</p></body></html>'))
-    zip.addFile('OPS/two.xhtml', Buffer.from('<html><body><p>Second chapter.</p></body></html>'))
+    // 每章 ≥ CHAPTER_MIN_SENTENCES(35) 句，避免被 min 合并；首段保留原文本用于断言
+    const fillParas = (prefix: string): string =>
+      Array.from({ length: 40 }, (_, i) => `<p>${prefix} 填充句 ${i + 1}。</p>`).join('')
+    zip.addFile(
+      'OPS/one.xhtml',
+      Buffer.from(`<html><body><p>First chapter.</p>${fillParas('一')}</body></html>`)
+    )
+    zip.addFile(
+      'OPS/two.xhtml',
+      Buffer.from(`<html><body><p>Second chapter.</p>${fillParas('二')}</body></html>`)
+    )
     zip.writeZip(epubPath)
 
     const parsed = await parseEpub(epubPath, root)
@@ -193,7 +207,16 @@ async function verifyDenseTocRegrouping(): Promise<void> {
 
     const parsed = await parseEpub(epubPath, root)
     assert.ok(parsed.structure)
-    assert.ok(parsed.structure.length >= 2 && parsed.structure.length <= 5, `expected regrouped chapters, got ${parsed.structure.length}`)
+    // 导入默认 original：保留 TOC 粒度（不过 min35 合并），合并留给预选页。
+    // 420 个锚点应基本都保留；sourceBoundaries 记录原料。
+    assert.ok(
+      parsed.structure.length >= 100,
+      `expected dense original TOC chapters, got ${parsed.structure.length}`
+    )
+    assert.ok(
+      (parsed.sourceBoundaries?.length ?? 0) >= 100,
+      'sourceBoundaries should capture raw TOC anchors'
+    )
     assert.ok(parsed.structure.some((chapter) => chapter.blocks.some((block) => block.type === 'heading')))
     assert.deepEqual(
       parsed.chapters.map((chapter) => [chapter.startIndex, chapter.sentenceCount]),
@@ -201,7 +224,7 @@ async function verifyDenseTocRegrouping(): Promise<void> {
     )
     assert.equal(parsed.structure[0].sentenceRange[0], 0)
     assert.equal(parsed.structure.at(-1)?.sentenceRange[1], parsed.sentences.length)
-    console.log('  ok regroups dense TOC anchors into reader-sized chapters')
+    console.log('  ok keeps dense TOC anchors in original import mode')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

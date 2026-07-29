@@ -26,14 +26,8 @@ export function registerTtsHandlers(
             voice,
             textLength: text.length
           })
-        } else {
-          logService.debug('TTS', `合成成功: ${result.engineUsed}`, {
-            engineId: engineId || engineManager.getActiveEngineId(),
-            voice,
-            textLength: text.length,
-            audioFormat: result.audioFormat
-          })
         }
+        // 成功路径不再写日志：句句 debug 会拖慢主进程并刷盘
         return result
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)

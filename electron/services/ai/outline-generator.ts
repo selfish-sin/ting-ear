@@ -1,6 +1,3 @@
-import { createHash } from 'crypto'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
-import { join } from 'path'
 import type { AiLlmSettings } from '../../../src/global'
 import { AiServiceError, streamChat } from './llm-caller'
 
@@ -10,6 +7,8 @@ export interface OutlineSection {
   startOffset: number
   /** 该段核心论点/主张（一两句话） */
   point?: string
+  /** 一句话描述本节在总纲中的论证角色：做什么、思想张力、论证结构 */
+  summary?: string
 }
 
 export interface ChapterOutline {
@@ -35,15 +34,10 @@ export function calculateMinimumSections(sentenceCount: number): number {
   return Math.min(12, Math.max(2, Math.ceil(Math.max(0, sentenceCount) / 40)))
 }
 
-interface OutlineCache {
-  version: number
-  contentHash: string
-  generatedAt: string
-  chapters: ChapterOutline[]
-}
-
-/** 缓存格式版本——升级时旧缓存自动失效 */
-const CACHE_VERSION = 2
+/**
+ * 大纲落盘缓存已统一到 outline-repository（OUTLINE_CACHE_VERSION=4）。
+ * 本模块只负责 LLM 生成；不再维护第二套整书 CACHE_VERSION 缓存。
+ */
 
 /** 默认大纲提示词（设置可覆盖）；强制简体中文 + 逻辑先后 */
 export const DEFAULT_OUTLINE_SYSTEM_PROMPT = `你是文本结构分析助手。根据一章中带编号的句子，把「本部分」划分成有逻辑先后关系的论述小节。
@@ -51,10 +45,10 @@ export const DEFAULT_OUTLINE_SYSTEM_PROMPT = `你是文本结构分析助手。�
 规则：
 - 只返回 2～4 个小节（最多 4 个）
 - 各小节必须按论述推进排序（如：背景→展开→转折→结论），前后有逻辑承接，禁止无序主题堆砌
-- title、point 必须使用简体中文（专有名词可保留原文并配中文）
-- title ≤10 个汉字；point 可选，≤20 字
+- title、point、summary 必须使用简体中文（专有名词可保留原文并配中文）
+- title ≤10 个汉字；point 可选，≤20 字；summary 必填，≤30 字，用一句话说明该小节在整体论证中的角色（它在做什么、思想张力在哪、论证结构上的承上启下关系）
 - 只输出完整 JSON 数组，不要 markdown、不要解释：
-[{"title":"...","startOffset":0,"point":"..."}]
+[{"title":"...","startOffset":0,"point":"...","summary":"..."}]
 - startOffset = 括号中的绝对句号，如 [26] → 26
 - 必须闭合每个字符串/对象和最外层数组 ]，禁止半截 JSON`
 
@@ -65,34 +59,6 @@ const CHUNK_SIZE = 5000
 const CHUNK_OVERLAP = 300
 /** 输出 token 上限（短 JSON 足够；过大时部分供应商反而易截断） */
 const OUTLINE_MAX_TOKENS = 2048
-
-function hashContent(sentences: string[]): string {
-  return createHash('sha256').update(sentences.join('\n')).digest('hex').slice(0, 16)
-}
-
-function cachePath(dataDir: string, bookId: string): string {
-  const dir = join(dataDir, 'outlines')
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  return join(dir, `${bookId}.json`)
-}
-
-export function loadCachedOutline(dataDir: string, bookId: string, contentHash: string): ChapterOutline[] | null {
-  const path = cachePath(dataDir, bookId)
-  if (!existsSync(path)) return null
-  try {
-    const cache: OutlineCache = JSON.parse(readFileSync(path, 'utf-8'))
-    if (cache.version !== CACHE_VERSION) return null
-    if (cache.contentHash !== contentHash) return null
-    return cache.chapters
-  } catch {
-    return null
-  }
-}
-
-function saveCachedOutline(dataDir: string, bookId: string, contentHash: string, chapters: ChapterOutline[]): void {
-  const cache: OutlineCache = { version: CACHE_VERSION, contentHash, generatedAt: new Date().toISOString(), chapters }
-  writeFileSync(cachePath(dataDir, bookId), JSON.stringify(cache, null, 2), 'utf-8')
-}
 
 /** 收集流式响应为完整文本 */
 async function collectStream(
@@ -194,15 +160,23 @@ function normalizeSectionItem(item: {
   title?: unknown
   startOffset?: unknown
   point?: unknown
+  summary?: unknown
 }): OutlineSection | null {
   if (typeof item.title !== 'string' || item.startOffset == null) return null
   const startOffset = Math.floor(Number(item.startOffset))
   if (!Number.isFinite(startOffset)) return null
-  return {
+  const section: OutlineSection = {
     title: String(item.title).trim(),
-    startOffset,
-    point: typeof item.point === 'string' && item.point.trim() ? item.point.trim() : undefined
+    startOffset
   }
+  // 仅在有值时写入可选字段，避免 summary: undefined 导致 deepEqual / 序列化噪音
+  if (typeof item.point === 'string' && item.point.trim()) {
+    section.point = item.point.trim()
+  }
+  if (typeof item.summary === 'string' && item.summary.trim()) {
+    section.summary = item.summary.trim()
+  }
+  return section
 }
 
 /**
@@ -222,6 +196,7 @@ export function salvageOutlineObjects(raw: string): OutlineSection[] {
         title?: unknown
         startOffset?: unknown
         point?: unknown
+        summary?: unknown
       }
       const section = normalizeSectionItem(parsed)
       if (section && section.title) sections.push(section)
@@ -250,6 +225,7 @@ export function parseOutlineSections(raw: string): OutlineSection[] {
           title?: unknown
           startOffset?: unknown
           point?: unknown
+          summary?: unknown
         }>
         if (Array.isArray(parsed)) {
           const sections = parsed
@@ -506,7 +482,6 @@ export interface OutlineGeneratorOptions {
   getDataDir: () => string
   /** 可配置大纲 system 提示词（默认中文逻辑链） */
   getOutlineSystemPrompt?: () => string
-  cache?: boolean
   onProgress?: (chapterIndex: number, total: number) => void
   log?: (level: 'info' | 'error', message: string) => void
 }
@@ -519,7 +494,10 @@ export class OutlineGenerator {
     return custom || OUTLINE_PROMPT
   }
 
-  /** 生成单章大纲（带缓存） */
+  /**
+   * 生成单章大纲（纯 LLM，不落盘）。
+   * 缓存读写由 outline-repository / generateChapterOutlineRecord 统一负责。
+   */
   async generateChapter(
     bookId: string,
     sentences: string[],
@@ -527,19 +505,8 @@ export class OutlineGenerator {
     chapterIndex: number,
     signal?: AbortSignal
   ): Promise<ChapterOutline> {
-    const { getSettings, getDataDir, log } = this.options
-    const useCache = this.options.cache !== false
-    const contentHash = hashContent(sentences)
-    const dataDir = getDataDir()
-
-    // 尝试从缓存中取该章
-    if (useCache) {
-      const cached = loadCachedOutline(dataDir, bookId, contentHash)
-      if (cached) {
-        const hit = cached.find((c) => c.chapterIndex === chapterIndex)
-        if (hit && !hit.error) return hit
-      }
-    }
+    const { getSettings, log } = this.options
+    void bookId // 保留参数以兼容调用方签名与日志上下文
 
     const chapter = chapters[chapterIndex]
     if (!chapter) return { chapterIndex, sections: [{ title: '未知章节', startOffset: 0 }], error: '章节不存在' }
@@ -633,15 +600,6 @@ export class OutlineGenerator {
         sections: [{ title: chapter.title, startOffset: 0 }],
         error: err instanceof Error ? err.message : '生成失败'
       }
-    }
-
-    // 增量写入缓存
-    if (useCache && !signal?.aborted) {
-      const existing = loadCachedOutline(dataDir, bookId, contentHash) || []
-      const updated = existing.filter((c) => c.chapterIndex !== chapterIndex)
-      updated.push(result)
-      updated.sort((a, b) => a.chapterIndex - b.chapterIndex)
-      saveCachedOutline(dataDir, bookId, contentHash, updated)
     }
 
     return result

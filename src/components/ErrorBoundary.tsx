@@ -18,7 +18,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    this.setState({ componentStack: info.componentStack })
+    this.setState({ componentStack: info.componentStack ?? null })
     console.error('[ErrorBoundary] uncaught render error:', error, info.componentStack)
   }
 

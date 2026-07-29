@@ -1,10 +1,11 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync } from 'fs'
 import type { AppSettings, FloatingBallSettings } from '../../src/global'
 import { DEFAULT_CLEAN_RULES } from '../../src/cleanRules'
 import { DEFAULT_SHORTCUTS, normalizeShortcuts } from '../../src/shortcuts'
 import { mergeAiSettings } from './ai/ai-config'
+import { atomicWriteFile } from '../utils/atomicWrite'
 
 const defaultFloatingBall: FloatingBallSettings = {
   enabled: true,
@@ -31,7 +32,7 @@ const defaultSettings: AppSettings = {
   voiceId: 'zh-CN-XiaoxiaoNeural',
   defaultSpeed: 1.0,
   defaultVolume: 0.8,
-  windowAlwaysOnTop: true,
+  windowAlwaysOnTop: false,
   windowOpacity: 0.95,
   floatingBallEnabled: true,
   floatingBall: { ...defaultFloatingBall },
@@ -122,9 +123,10 @@ export class SettingsService {
       ai: mergeAiSettings(settings.ai ?? this.settings.ai)
     }
     try {
-      writeFileSync(this.settingsFile, JSON.stringify(this.settings, null, 2), 'utf-8')
+      atomicWriteFile(this.settingsFile, JSON.stringify(this.settings, null, 2))
     } catch (error) {
       console.error('Failed to save settings:', error)
+      throw error
     }
     return this.settings
   }
@@ -143,5 +145,42 @@ export class SettingsService {
 
   getCleanRules() {
     return this.settings.cleanRules ?? DEFAULT_CLEAN_RULES
+  }
+
+  /** 导出可迁移的设置包（含 API Key；用户应自行保管） */
+  exportBundle(): {
+    version: 1
+    exportedAt: string
+    settings: AppSettings
+  } {
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      settings: { ...this.settings }
+    }
+  }
+
+  /** 从导出包合并导入（保留当前 dataDir，避免误切目录） */
+  async importBundle(raw: unknown): Promise<{ success: boolean; error?: string }> {
+    try {
+      if (!raw || typeof raw !== 'object') {
+        return { success: false, error: '设置包格式无效' }
+      }
+      const bundle = raw as { version?: unknown; settings?: unknown }
+      const incoming =
+        bundle.settings && typeof bundle.settings === 'object'
+          ? (bundle.settings as Partial<AppSettings>)
+          : (raw as Partial<AppSettings>)
+      const keepDataDir = this.settings.dataDir
+      const keepHistory = this.settings.dataDirHistory
+      await this.save({
+        ...incoming,
+        dataDir: keepDataDir,
+        dataDirHistory: keepHistory
+      })
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
   }
 }

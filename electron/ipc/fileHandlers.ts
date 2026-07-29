@@ -1,5 +1,6 @@
 import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync, unlinkSync, readdirSync, statSync, copyFileSync } from 'fs'
+import { writeFile, rename, copyFile, stat as fsStat } from 'fs/promises'
 import { join, resolve } from 'path'
 import { app } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
@@ -24,14 +25,24 @@ import {
   normalizeBookCollection,
   normalizeBookData,
   normalizeChapters,
-  normalizeSentences
+  normalizeSentences,
+  resolveSourceBoundaries
 } from '../../src/utils/bookData'
 import { generatePseudoStructure, validateStructure } from '../services/parsers/structureBuilder'
+import {
+  buildChaptersByMode,
+  chaptersToBoundaries,
+  type Boundary,
+  type ChapterMode
+} from '../services/parsers/chapterBuilder'
 import { hashSentences } from '../../src/utils/contentHash'
 import { mergeAiSettings } from '../services/ai/ai-config'
 import { NmemBridge } from '../services/ai/nmem-bridge'
 import { IngestService } from '../services/ai/ingest-service'
 import { IngestScheduler } from '../services/ai/ingest-scheduler'
+import { LibraryStorage } from '../services/library-storage'
+import { atomicWriteFile } from '../utils/atomicWrite'
+import { isBookId, isSettingsPartial } from '../utils/ipcValidate'
 
 /** 递归复制目录 */
 function copyDirRecursive(src: string, dest: string): void {
@@ -53,6 +64,22 @@ function copyDirRecursive(src: string, dest: string): void {
 
 /** 自定义数据目录路径（由 settings.dataDir 设置，为空时回退到默认路径） */
 let customDataDir: string | null = null
+
+/** 共享的知识库导入调度器实例（registerFileHandlers 时创建，供其它 handler 复用，统一去重入口） */
+let ingestSchedulerInstance: IngestScheduler | null = null
+
+/** 共享的书架存储实例（退出前 flush 进度用） */
+let libraryStorageInstance: LibraryStorage | null = null
+
+/** 获取共享的 IngestScheduler（aiHandlers 等模块复用，避免再开一条无去重的裸上传线） */
+export function getIngestScheduler(): IngestScheduler | null {
+  return ingestSchedulerInstance
+}
+
+/** 进程退出前同步落盘未写回的阅读进度（防抖窗口内的最后数据） */
+export function flushLibraryProgressOnQuit(): void {
+  libraryStorageInstance?.flushProgressSync()
+}
 
 /** 设置自定义数据目录（供 SettingsService 在加载配置后调用） */
 export function setCustomDataDir(dir: string | null): void {
@@ -93,33 +120,134 @@ function loadJsonFile<T>(filename: string, fallback: T): T {
   return fallback
 }
 
-function saveJsonFile(filename: string, data: unknown): void {
+async function saveJsonFile(filename: string, data: unknown, pretty = true): Promise<void> {
   const filePath = join(getDataDir(), filename)
   // 原子写入：先写同目录临时文件，再 rename 覆盖目标。
   // 写一半崩溃时目标文件保持完整，避免 books.json 被截断后书架变空。
   const tmpPath = `${filePath}.tmp`
-  writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
-  renameSync(tmpPath, filePath)
+  // books.json 可达数十 MB：紧凑序列化显著降低 stringify/写盘耗时与体积
+  const payload =
+    filename === 'books.json' || filename.endsWith('.book.json') || filename === 'library-index.json' || filename === 'progress.json'
+      ? JSON.stringify(data)
+      : pretty
+        ? JSON.stringify(data, null, 2)
+        : JSON.stringify(data)
+
+  // 覆盖 books.json 前保留滚动备份（最多 3 份），防止再次空写/损坏丢书
+  if (filename === 'books.json' && existsSync(filePath)) {
+    try {
+      const fileStat = await fsStat(filePath)
+      if (fileStat.size > 10) {
+        const bak1 = `${filePath}.bak`
+        const bak2 = `${filePath}.bak.1`
+        const bak3 = `${filePath}.bak.2`
+        if (existsSync(bak2)) {
+          try { await copyFile(bak2, bak3) } catch { /* ignore */ }
+        }
+        if (existsSync(bak1)) {
+          try { await copyFile(bak1, bak2) } catch { /* ignore */ }
+        }
+        await copyFile(filePath, bak1)
+      }
+    } catch {
+      /* 备份失败不阻断主写入 */
+    }
+  }
+
+  await writeFile(tmpPath, payload, 'utf-8')
+  await rename(tmpPath, filePath)
 }
 
 const SUPPORTED_EXTENSIONS = ['epub', 'txt', 'pdf', 'docx', 'md', 'html', 'htm', 'mobi', 'azw', 'azw3', 'prc']
+
+interface ParsedBookFile {
+  title: string
+  author: string
+  sentences: string[]
+  chapters: Array<{ title: string; startIndex: number; sentenceCount: number }>
+  sourceBoundaries?: Boundary[]
+  epubCoverDataUrl?: string
+  structure?: import('../../src/global').StructuredChapter[]
+  structureMeta?: import('../../src/global').StructureMeta
+}
+
+/** 解析结果统一补全 sourceBoundaries + original 默认章节 */
+function finalizeParsedChapters(parsed: ParsedBookFile): ParsedBookFile {
+  const sentences = parsed.sentences || []
+  const sourceBoundaries: Boundary[] =
+    parsed.sourceBoundaries && parsed.sourceBoundaries.length > 0
+      ? parsed.sourceBoundaries
+      : chaptersToBoundaries(parsed.chapters || [])
+  const chapters = normalizeChapters(
+    buildChaptersByMode(sentences.length, sourceBoundaries, 'original'),
+    sentences.length
+  )
+  return { ...parsed, sentences, chapters, sourceBoundaries }
+}
+
+/** 按扩展名分发到对应 parser（file:import 与 book:reparse 共用） */
+async function parseBookFile(filePath: string, ext: string): Promise<ParsedBookFile> {
+  let parsed: ParsedBookFile
+  if (ext === 'epub') {
+    const r = await parseEpub(filePath, getCacheDir())
+    parsed = {
+      title: r.title,
+      author: r.author,
+      sentences: r.sentences,
+      chapters: r.chapters,
+      sourceBoundaries: r.sourceBoundaries,
+      epubCoverDataUrl: r.coverDataUrl,
+      structure: r.structure,
+      structureMeta: r.structureMeta
+    }
+  } else if (ext === 'txt') {
+    parsed = { ...parseTxt(filePath) }
+  } else if (ext === 'pdf') {
+    parsed = { ...(await parsePdf(filePath)) }
+  } else if (ext === 'docx') {
+    parsed = { ...(await parseDocx(filePath)) }
+  } else if (ext === 'md') {
+    const r = parseMarkdown(filePath)
+    parsed = {
+      title: r.title,
+      author: r.author,
+      sentences: r.sentences,
+      chapters: r.chapters,
+      sourceBoundaries: r.sourceBoundaries,
+      structure: r.structure,
+      structureMeta: r.structureMeta
+    }
+  } else if (ext === 'html' || ext === 'htm') {
+    parsed = { ...parseHtml(filePath) }
+  } else if (ext === 'mobi' || ext === 'azw' || ext === 'azw3' || ext === 'prc') {
+    parsed = { ...(await parseMobi(filePath, getCacheDir())) }
+  } else {
+    throw new Error(`不支持的格式: ${ext}`)
+  }
+  return finalizeParsedChapters(parsed)
+}
 
 export function registerFileHandlers(
   logService: LogService,
   settingsService: SettingsService,
   engineManager: EngineManager
 ): void {
+  const libraryStorage = new LibraryStorage(getDataDir)
+  libraryStorageInstance = libraryStorage
   const nmem = new NmemBridge(() => mergeAiSettings(settingsService.get().ai).nmem)
   const ingestService = new IngestService(nmem)
 
-  // 从 bookStore 获取当前所有书（通过 loadJsonFile 读 books.json）
-  const ingestScheduler = new IngestScheduler(
+  // 从分片书架加载全部书（供 ingest 探针使用）
+  ingestSchedulerInstance = new IngestScheduler(
     getDataDir,
     nmem,
     ingestService,
-    () => loadJsonFile<BookData[]>('books.json', []),
-    (level, msg) => level === 'info' ? logService.info('AI', msg) : logService.error('AI', msg)
+    () => libraryStorage.loadAll(),
+    (level, msg) => level === 'info' ? logService.info('AI', msg) : logService.error('AI', msg),
+    // 轻量索引：探针先用指纹预筛，稳态下不再每 30s 全量加载全文
+    () => libraryStorage.loadBookIndex()
   )
+  const ingestScheduler = ingestSchedulerInstance
 
   // 启动探针（autoIngest 开启时生效）
   if (mergeAiSettings(settingsService.get().ai).nmem.autoIngest) {
@@ -152,6 +280,19 @@ export function registerFileHandlers(
     }
   })
 
+  // === 知识库去重：删除同一本书的多余 source，确保每本只有一份 ===
+  ipcMain.handle('ai:nmem:dedupe', async () => {
+    try {
+      const result = await ingestScheduler.dedupeSources()
+      logService.info('AI', `知识库去重: 删除 ${result.removed} 个重复源，保留 ${result.kept} 本`)
+      return { success: true, ...result }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logService.error('AI', `知识库去重失败: ${message}`)
+      return { success: false, error: message }
+    }
+  })
+
   // === Open file dialog ===
   ipcMain.handle('file:select', async (): Promise<string[] | null> => {
     const win = BrowserWindow.getFocusedWindow()
@@ -178,7 +319,7 @@ export function registerFileHandlers(
   })
 
   // === Import a book file ===
-  ipcMain.handle('file:import', async (_event, filePath: string) => {
+  ipcMain.handle('file:import', async (event, filePath: string) => {
     const ext = filePath.split('.').pop()?.toLowerCase()
     if (!ext || !SUPPORTED_EXTENSIONS.includes(ext)) {
       return {
@@ -187,70 +328,33 @@ export function registerFileHandlers(
       }
     }
 
+    const emitProgress = (phase: string, detail?: string) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('file:import-progress', { filePath, phase, detail, format: ext })
+      }
+    }
+
     // 导入时应用用户在「设置 → 清洗」中的规则（与手动清洗同一套）
     setActiveCleanRules(settingsService.getCleanRules())
     try {
-      let title = ''
-      let author = '未知作者'
-      let sentences: string[] = []
-      let chapters: Array<{ title: string; startIndex: number; sentenceCount: number }> = []
-      let epubCoverDataUrl: string | undefined
-      let parsedStructure: import('../../src/global').StructuredChapter[] | undefined
-      let parsedStructureMeta: import('../../src/global').StructureMeta | undefined
+      emitProgress('parsing', `正在解析 ${ext.toUpperCase()}…`)
+      const parsed = await parseBookFile(filePath, ext)
+      const title = parsed.title
+      const author = parsed.author || '未知作者'
+      const epubCoverDataUrl = parsed.epubCoverDataUrl
+      const parsedStructure = parsed.structure
+      const parsedStructureMeta = parsed.structureMeta
 
-      if (ext === 'epub') {
-        const result = await parseEpub(filePath, getCacheDir())
-        title = result.title
-        author = result.author
-        sentences = result.sentences
-        chapters = result.chapters
-        epubCoverDataUrl = result.coverDataUrl
-        parsedStructure = result.structure
-        parsedStructureMeta = result.structureMeta
-      } else if (ext === 'txt') {
-        const result = parseTxt(filePath)
-        title = result.title
-        author = result.author
-        sentences = result.sentences
-        chapters = result.chapters
-      } else if (ext === 'pdf') {
-        const result = await parsePdf(filePath)
-        title = result.title
-        author = result.author
-        sentences = result.sentences
-        chapters = result.chapters
-      } else if (ext === 'docx') {
-        const result = await parseDocx(filePath)
-        title = result.title
-        author = result.author
-        sentences = result.sentences
-        chapters = result.chapters
-      } else if (ext === 'md') {
-        const result = parseMarkdown(filePath)
-        title = result.title
-        author = result.author
-        sentences = result.sentences
-        chapters = result.chapters
-        parsedStructure = result.structure
-        parsedStructureMeta = result.structureMeta
-      } else if (ext === 'html' || ext === 'htm') {
-        const result = parseHtml(filePath)
-        title = result.title
-        author = result.author
-        sentences = result.sentences
-        chapters = result.chapters
-      } else if (ext === 'mobi' || ext === 'azw' || ext === 'azw3' || ext === 'prc') {
-        const result = await parseMobi(filePath, getCacheDir())
-        title = result.title
-        author = result.author
-        sentences = result.sentences
-        chapters = result.chapters
-      }
-
-      sentences = normalizeSentences(sentences)
-      chapters = normalizeChapters(chapters, sentences.length)
+      emitProgress('normalizing', '正在分句与结构化…')
+      const sentences = normalizeSentences(parsed.sentences)
+      const chapters = normalizeChapters(parsed.chapters, sentences.length)
+      const sourceBoundaries = parsed.sourceBoundaries || chaptersToBoundaries(chapters)
       if (sentences.length === 0) {
-        return { success: false, error: '无法提取文本内容，请确认文件未损坏' }
+        const emptyHint =
+          ext === 'pdf'
+            ? '无法提取文本内容。扫描版 PDF 仅有图片层，请先 OCR 或改用文字版 PDF/EPUB/TXT'
+            : '无法提取文本内容，请确认文件未损坏'
+        return { success: false, error: emptyHint }
       }
 
       // === 结构化处理 ===
@@ -263,67 +367,74 @@ export function registerFileHandlers(
         finalStructureMeta = pseudo.structureMeta
       }
 
-      // Check for existing book with same path
-      const existingBooks = normalizeBookCollection(loadJsonFile<unknown>('books.json', []))
-      const existingIdx = existingBooks.findIndex((b) => b.filePath === filePath)
+      // Check for existing book with same path（轻量查 index，不读全部书文件）
+      emitProgress('saving', '正在写入书架…')
+      const existingEntry = libraryStorage.findByFilePath(filePath)
+      // 仅在同路径已存在时才读旧书；新书跳过磁盘读
+      const existingBook = existingEntry ? libraryStorage.loadSingleBook(existingEntry.id) : null
 
-      // Preserve progress if updating an existing book
-      const existingBook = existingIdx >= 0 ? existingBooks[existingIdx] : null
-
+      // 哈希只算一次；旧书优先用 structureMeta.contentHash，避免再扫一遍全文
       const incomingContentHash = hashSentences(sentences)
       const existingStructureValid = existingBook ? validateStructure(existingBook) : false
+      const existingHash =
+        existingBook?.structureMeta?.contentHash ||
+        (existingBook ? hashSentences(existingBook.sentences) : null)
 
       // 正文是否实质变化：比较全文稳定哈希，避免后文变化却错误沿用旧结构。
-      const contentChanged =
-        !existingBook ||
-        hashSentences(existingBook.sentences) !== incomingContentHash
+      const contentChanged = !existingBook || existingHash !== incomingContentHash
 
-      const book = normalizeBookData({
-        ...existingBook,
-        id: existingBook?.id || uuidv4(),
-        title: existingBook?.title || title,
-        originalTitle: title,
-        author,
-        filePath,
-        format: ext,
-        sentences,
-        chapters,
-        currentChapterIndex: existingBook?.currentChapterIndex ?? 0,
-        currentSentenceIndex: existingBook?.currentSentenceIndex ?? 0,
-        progressPercent: existingBook?.progressPercent ?? 0,
-        isCompleted: existingBook?.isCompleted ?? false,
-        addedAt: existingBook?.addedAt || new Date().toISOString(),
-        lastReadAt: new Date().toISOString(),
-        bookmarks: existingBook?.bookmarks || [],
-        // 重导入且正文变了：用新正文作为原文，并丢弃失效的清洗版本
-        originalSentences: contentChanged ? sentences : (existingBook?.originalSentences ?? sentences),
-        editHistory: contentChanged ? undefined : existingBook?.editHistory,
-        timeMap: contentChanged ? undefined : existingBook?.timeMap,
-        // 结构化：内容变了用新 structure，没变且旧 structure 有效则沿用
-        structure:
-          !contentChanged && existingStructureValid
-            ? existingBook?.structure
-            : finalStructure,
-        structureMeta:
-          !contentChanged && existingStructureValid
-            ? existingBook?.structureMeta
-            : finalStructureMeta
-      })
+      const structureMetaForSave =
+        !contentChanged && existingStructureValid
+          ? existingBook?.structureMeta
+          : finalStructureMeta
+            ? { ...finalStructureMeta, contentHash: incomingContentHash, schemaVersion: 1 as const }
+            : {
+                schemaVersion: 1 as const,
+                contentHash: incomingContentHash,
+                sourceFormat: ext
+              }
+
+      // 传入已算 contentHash，避免 normalize 内再扫一遍全文
+      const book = normalizeBookData(
+        {
+          ...existingBook,
+          id: existingBook?.id || uuidv4(),
+          title: existingBook?.title || title,
+          originalTitle: title,
+          author,
+          filePath,
+          format: ext,
+          sentences,
+          chapters,
+          sourceBoundaries,
+          // 导入默认「原始」切法；用户在预选页可改合并并写库
+          chapterMode: 'original' as const,
+          currentChapterIndex: existingBook?.currentChapterIndex ?? 0,
+          currentSentenceIndex: existingBook?.currentSentenceIndex ?? 0,
+          progressPercent: existingBook?.progressPercent ?? 0,
+          isCompleted: existingBook?.isCompleted ?? false,
+          addedAt: existingBook?.addedAt || new Date().toISOString(),
+          lastReadAt: new Date().toISOString(),
+          bookmarks: existingBook?.bookmarks || [],
+          // 重导入且正文变了：用新正文作为原文，并丢弃失效的清洗版本
+          originalSentences: contentChanged ? sentences : (existingBook?.originalSentences ?? sentences),
+          editHistory: contentChanged ? undefined : existingBook?.editHistory,
+          timeMap: contentChanged ? undefined : existingBook?.timeMap,
+          // 结构化：内容变了用新 structure，没变且旧 structure 有效则沿用
+          structure:
+            !contentChanged && existingStructureValid
+              ? existingBook?.structure
+              : finalStructure,
+          structureMeta: structureMetaForSave
+        },
+        { contentHash: incomingContentHash }
+      )
 
       if (!book) {
         return { success: false, error: '解析结果不包含可朗读的有效文本' }
       }
 
-      if (existingIdx >= 0) {
-        existingBooks[existingIdx] = book
-      } else {
-        existingBooks.push(book)
-      }
-
-      saveJsonFile('books.json', existingBooks)
-      logService.info('Parser', `成功导入书籍：《${title}》(${ext}, ${sentences.length}句)`)
-
-      // 保存 EPUB 内嵌封面（仅新书或无自定义封面时覆盖）
+      // 封面先写好再一次性落盘，避免 saveSingleBook 两次
       if (epubCoverDataUrl && book.coverSource !== 'custom') {
         try {
           const coversDir = join(getDataDir(), 'covers')
@@ -333,17 +444,25 @@ export function registerFileHandlers(
           writeFileSync(coverPath, Buffer.from(base64, 'base64'))
           book.coverPath = coverPath
           book.coverSource = 'auto'
-          // 同步更新 books.json 中的封面路径
-          if (existingIdx >= 0) existingBooks[existingIdx] = book
-          else existingBooks[existingBooks.length - 1] = book
-          saveJsonFile('books.json', existingBooks)
         } catch {
           // 封面保存失败不影响导入
         }
       }
 
+      libraryStorage.saveSingleBook(book)
+      logService.info('Parser', `成功导入书籍：《${title}》(${ext}, ${sentences.length}句)`)
+
+      // 后台 ingest，不阻塞导入返回
       autoIngestBook(book)
-      return { success: true, book }
+      emitProgress('done', `导入完成：${sentences.length} 句`)
+      // PDF 仅文字层：句数极少时提示可能是扫描件
+      const warning =
+        ext === 'pdf' && sentences.length < 20
+          ? 'PDF 仅支持文字层。若内容很少或乱码，可能是扫描版，请先 OCR 或改用 EPUB/TXT'
+          : ext === 'pdf'
+            ? '提示：PDF 仅提取文字层，扫描版图片页不会识别'
+            : undefined
+      return { success: true, book, warning }
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error)
       logService.error('Parser', `导入失败: ${errMsg}`, errMsg)
@@ -353,14 +472,31 @@ export function registerFileHandlers(
     }
   })
 
-  // === Save all books (multi-book array) ===
+  // === Save all books（分片：进度小文件 + 按需写单书） ===
   ipcMain.handle('file:saveProgress', async (_event, data: unknown) => {
     try {
-      const books = normalizeBookCollection(data)
-      if (!Array.isArray(data) || books.length !== data.length) {
-        return { success: false, error: '书架数据包含无效文章，未执行保存' }
+      if (!Array.isArray(data)) {
+        return { success: false, error: '书架数据无效' }
       }
-      saveJsonFile('books.json', books)
+      // 致命保护：禁止用空数组覆盖已有非空书架
+      if (data.length === 0 && libraryStorage.hasNonEmptyLibrary()) {
+        logService.error('Storage', '拒绝用空数组覆盖非空书架（分片库保护）')
+        return { success: false, error: '拒绝清空书架：空数组覆盖保护' }
+      }
+      // 轻量结构校验：确保每本书至少有 id 和 sentences（渲染层已规范化过）
+      const validBooks = data.filter(
+        (b: unknown): b is BookData =>
+          typeof b === 'object' && b !== null && typeof (b as BookData).id === 'string' && Array.isArray((b as BookData).sentences)
+      )
+      if (validBooks.length !== data.length) {
+        logService.warn('Storage', `书架数据包含 ${data.length - validBooks.length} 本无效文章，已过滤`)
+      }
+      // 跳过 normalizeBookCollection：渲染层 persistBooks 传入的数据已规范化
+      const result = libraryStorage.saveLibrary(validBooks, true)
+      logService.info(
+        'Storage',
+        `书架已保存：${validBooks.length} 本（重写 ${result.writtenBooks}，跳过 ${result.skippedBooks}）`
+      )
       return { success: true }
     } catch (error) {
       logService.error('Storage', `保存进度失败: ${String(error)}`)
@@ -368,26 +504,94 @@ export function registerFileHandlers(
     }
   })
 
-  // === Load all books ===
-  ipcMain.handle('file:loadProgress', async () => {
-    const raw = loadJsonFile<unknown>('books.json', [])
-    const books = normalizeBookCollection(raw)
-    if (Array.isArray(raw) && books.length !== raw.length) {
-      logService.warn('Storage', `已跳过 ${raw.length - books.length} 条无效书籍数据`)
-    }
+  // === 仅保存进度（轻量：只收 progress 字段，合并写入 progress.json，不碰单书全文） ===
+  ipcMain.handle('file:saveProgressOnly', async (_event, data: unknown) => {
     try {
-      if (JSON.stringify(raw) !== JSON.stringify(books)) saveJsonFile('books.json', books)
+      if (!Array.isArray(data)) {
+        return { success: false, error: '进度数据无效' }
+      }
+      const records = data
+        .filter(
+          (item): item is {
+            id: string
+            currentSentenceIndex?: number
+            currentChapterIndex?: number
+            progressPercent?: number
+            lastReadAt?: string
+            isCompleted?: boolean
+            timeMap?: number[]
+          } =>
+            typeof item === 'object' &&
+            item !== null &&
+            typeof (item as { id?: unknown }).id === 'string' &&
+            (item as { id: string }).id.trim().length > 0
+        )
+        .map((item) => ({
+          id: item.id.trim(),
+          currentSentenceIndex: item.currentSentenceIndex,
+          currentChapterIndex: item.currentChapterIndex,
+          progressPercent: item.progressPercent,
+          lastReadAt: item.lastReadAt,
+          isCompleted: item.isCompleted,
+          timeMap: Array.isArray(item.timeMap) ? item.timeMap : undefined
+        }))
+      if (records.length === 0) {
+        return { success: false, error: '进度数据无效' }
+      }
+      libraryStorage.mergeBooksProgress(records)
+      return { success: true }
     } catch (error) {
-      logService.warn('Storage', `修复后的书架数据暂未写回: ${String(error)}`)
+      logService.error('Storage', `保存进度失败: ${String(error)}`)
+      return { success: false, error: '保存进度失败' }
     }
-    return books
+  })
+
+  // === Load all books（自动从 books.json 迁移到 library/） ===
+  ipcMain.handle('file:loadProgress', async () => {
+    try {
+      const books = libraryStorage.loadAll()
+      logService.info('Storage', `已加载书架 ${books.length} 本（layout=${libraryStorage.hasLibraryLayout() ? 'library' : 'legacy'}）`)
+      return books
+    } catch (error) {
+      logService.error('Storage', `加载书架失败: ${String(error)}`)
+      return []
+    }
+  })
+
+  // === 轻量书架：只读 index+progress，不碰单书文件（启动加速） ===
+  ipcMain.handle('file:loadShelf', async () => {
+    try {
+      const shelf = libraryStorage.loadShelf()
+      logService.info('Storage', `已加载书架元数据 ${shelf.length} 本（轻量模式）`)
+      return shelf
+    } catch (error) {
+      logService.error('Storage', `加载书架元数据失败: ${String(error)}`)
+      return []
+    }
+  })
+
+  // === 按需加载单本书完整数据 ===
+  ipcMain.handle('file:loadBookData', async (_event, bookId: string) => {
+    if (!isBookId(bookId)) return null
+    try {
+      const book = libraryStorage.loadSingleBook(bookId)
+      if (!book) {
+        logService.error('Storage', `加载书籍失败: ${bookId}`)
+        return null
+      }
+      logService.info('Storage', `已加载书籍: ${book.title}`)
+      return book
+    } catch (error) {
+      logService.error('Storage', `加载书籍失败 ${bookId}: ${String(error)}`)
+      return null
+    }
   })
 
   // === Save and load custom albums ===
   ipcMain.handle('album:save', async (_event, data: unknown) => {
     try {
       const albums = validateAlbums(data)
-      saveJsonFile('albums.json', albums)
+      await saveJsonFile('albums.json', albums)
       return { success: true }
     } catch (error) {
       logService.error('Storage', `保存专辑失败: ${String(error)}`)
@@ -407,15 +611,20 @@ export function registerFileHandlers(
   // === Save settings ===
   ipcMain.handle('file:saveSettings', async (_event, settings: unknown) => {
     try {
-      const partial = settings as Record<string, unknown>
+      if (!isSettingsPartial(settings)) {
+        return { success: false, error: '设置数据格式无效' }
+      }
+      const partial = settings
       await settingsService.save(partial)
       // 数据目录变更时立即生效（无需等重启再读 books 路径）
       if (typeof partial.dataDir === 'string') {
         setCustomDataDir(partial.dataDir || null)
         logService.reloadFromDisk()
       }
+      return { success: true }
     } catch (error) {
       logService.error('Storage', `保存设置失败: ${String(error)}`)
+      return { success: false, error: String(error) }
     }
   })
 
@@ -424,12 +633,54 @@ export function registerFileHandlers(
     return settingsService.get()
   })
 
+  // === 设置导出/导入（换机迁移；不含数据目录切换） ===
+  ipcMain.handle('settings:export', async () => {
+    try {
+      const win = BrowserWindow.getFocusedWindow()
+      if (!win) return { success: false, error: '无活动窗口' }
+      const bundle = settingsService.exportBundle()
+      const result = await dialog.showSaveDialog(win, {
+        title: '导出设置',
+        defaultPath: `ting-ear-settings-${new Date().toISOString().slice(0, 10)}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+      if (result.canceled || !result.filePath) return { success: false, error: '已取消' }
+      atomicWriteFile(result.filePath, JSON.stringify(bundle, null, 2))
+      logService.info('Storage', `设置已导出: ${result.filePath}`)
+      return { success: true, filePath: result.filePath }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('settings:import', async () => {
+    try {
+      const win = BrowserWindow.getFocusedWindow()
+      if (!win) return { success: false, error: '无活动窗口' }
+      const open = await dialog.showOpenDialog(win, {
+        title: '导入设置',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+      if (open.canceled || !open.filePaths[0]) return { success: false, error: '已取消' }
+      const raw = JSON.parse(readFileSync(open.filePaths[0], 'utf-8'))
+      const result = await settingsService.importBundle(raw)
+      if (result.success) {
+        logService.info('Storage', `设置已导入: ${open.filePaths[0]}`)
+      }
+      return result
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
+  })
+
   // === Delete a book ===
   ipcMain.handle('file:deleteBook', async (_event, bookId: string) => {
+    if (!isBookId(bookId)) {
+      return { success: false, error: '书籍 ID 无效' }
+    }
     try {
-      const books = loadJsonFile<BookData[]>('books.json', [])
-      const filtered = books.filter((b) => b.id !== bookId)
-      saveJsonFile('books.json', filtered)
+      libraryStorage.deleteBook(bookId)
       try {
         const albums = validateAlbums(loadJsonFile<unknown>('albums.json', []))
         const cleanedAlbums = albums.map((album) => ({
@@ -441,7 +692,7 @@ export function registerFileHandlers(
         if (
           cleanedAlbums.some((album, index) => album.items.length !== albums[index].items.length)
         ) {
-          saveJsonFile(
+          await saveJsonFile(
             'albums.json',
             cleanedAlbums.map((album, index) =>
               album.items.length !== albums[index].items.length
@@ -458,7 +709,7 @@ export function registerFileHandlers(
       if (existsSync(bookmarkFile)) {
         const bookmarks = JSON.parse(readFileSync(bookmarkFile, 'utf-8'))
         const filteredBookmarks = bookmarks.filter((b: { bookId: string }) => b.bookId !== bookId)
-        saveJsonFile('bookmarks.json', filteredBookmarks)
+        await saveJsonFile('bookmarks.json', filteredBookmarks)
       }
       logService.info('Storage', `删除书籍: ${bookId}`)
       return { success: true }
@@ -501,11 +752,9 @@ export function registerFileHandlers(
   ipcMain.handle('book:reprocess', async (_event, bookId: string) => {
     setActiveCleanRules(settingsService.getCleanRules())
     try {
-      const books = normalizeBookCollection(loadJsonFile<unknown>('books.json', []))
-      const idx = books.findIndex((b) => b.id === bookId)
-      if (idx < 0) return { success: false, error: '书籍不存在' }
+      const book = libraryStorage.loadSingleBook(bookId)
+      if (!book) return { success: false, error: '书籍不存在' }
 
-      const book = books[idx]
       const oldSentenceCount = book.sentences.length
       // Join all sentences, preprocess, re-split
       const joined = book.sentences.join('\n')
@@ -576,8 +825,7 @@ export function registerFileHandlers(
       if (!updatedBook) {
         return { success: false, error: '处理结果无效，已保留原书内容' }
       }
-      books[idx] = updatedBook
-      saveJsonFile('books.json', books)
+      libraryStorage.saveSingleBook(updatedBook)
 
       logService.info(
         'Parser',
@@ -590,6 +838,141 @@ export function registerFileHandlers(
       setActiveCleanRules(null)
     }
   })
+
+  // === Reparse / 迁移分章（默认 original）===
+  // 优先从原文件重解析拿书签边界；否则用存库 sourceBoundaries / 旧章节反推。
+  const reparseOneBook = async (
+    bookId: string,
+    mode: ChapterMode = 'original'
+  ): Promise<{ success: boolean; book?: BookData; error?: string }> => {
+    setActiveCleanRules(settingsService.getCleanRules())
+    try {
+      const book = libraryStorage.loadSingleBook(bookId)
+      if (!book) return { success: false, error: '书籍不存在' }
+
+      let sentences: string[]
+      let sourceBoundaries: Boundary[]
+      let chapters: Array<{ title: string; startIndex: number; sentenceCount: number }>
+      let finalStructure = book.structure
+      let finalStructureMeta = book.structureMeta
+      let parsedTitle: string | undefined
+      let parsedAuthor: string | undefined
+
+      const ext = book.filePath?.split('.').pop()?.toLowerCase()
+      const canReparseFromFile =
+        !!book.filePath && !!ext && SUPPORTED_EXTENSIONS.includes(ext) && existsSync(book.filePath)
+
+      if (canReparseFromFile) {
+        const parsed = await parseBookFile(book.filePath!, ext!)
+        sentences = normalizeSentences(parsed.sentences)
+        sourceBoundaries = parsed.sourceBoundaries || chaptersToBoundaries(parsed.chapters)
+        chapters = normalizeChapters(
+          buildChaptersByMode(sentences.length, sourceBoundaries, mode),
+          sentences.length
+        )
+        parsedTitle = parsed.title
+        parsedAuthor = parsed.author
+        if (parsed.structure && mode === 'original') {
+          finalStructure = parsed.structure
+          finalStructureMeta = parsed.structureMeta
+        } else {
+          const pseudo = generatePseudoStructure(sentences, chapters)
+          finalStructure = pseudo.structure
+          finalStructureMeta = pseudo.structureMeta
+        }
+      } else {
+        sentences = book.sentences
+        sourceBoundaries = resolveSourceBoundaries(book)
+        chapters = normalizeChapters(
+          buildChaptersByMode(sentences.length, sourceBoundaries, mode),
+          sentences.length
+        )
+        parsedTitle = book.originalTitle || book.title
+        parsedAuthor = book.author
+        const pseudo = generatePseudoStructure(sentences, chapters)
+        finalStructure = pseudo.structure
+        finalStructureMeta = pseudo.structureMeta
+      }
+
+      if (sentences.length === 0) {
+        return { success: false, error: '无法提取文本内容，已保留原书数据' }
+      }
+
+      const contentChanged = hashSentences(book.sentences) !== hashSentences(sentences)
+      const newSentenceIndex = Math.min(book.currentSentenceIndex ?? 0, Math.max(0, sentences.length - 1))
+      let newChapterIndex = 0
+      for (let i = 0; i < chapters.length; i++) {
+        if (chapters[i].startIndex <= newSentenceIndex) newChapterIndex = i
+        else break
+      }
+
+      const updatedBook = normalizeBookData({
+        ...book,
+        originalTitle: parsedTitle,
+        author: parsedAuthor || book.author,
+        sentences,
+        chapters,
+        sourceBoundaries,
+        chapterMode: mode,
+        structure: finalStructure,
+        structureMeta: finalStructureMeta,
+        currentSentenceIndex: newSentenceIndex,
+        currentChapterIndex: newChapterIndex,
+        originalSentences: contentChanged ? sentences : (book.originalSentences ?? sentences),
+        editHistory: contentChanged ? undefined : book.editHistory,
+        timeMap: contentChanged ? undefined : book.timeMap
+      })
+      if (!updatedBook) {
+        return { success: false, error: '解析结果无效，已保留原书数据' }
+      }
+
+      const sourceLabel = canReparseFromFile ? '原文件' : '存库边界'
+      libraryStorage.saveSingleBook(updatedBook)
+      logService.info(
+        'Parser',
+        `迁移分章：《${book.title}》(${book.chapters.length}章 → ${chapters.length}章, ${mode}, ${sourceLabel})`
+      )
+      return { success: true, book: updatedBook }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      const stack = error instanceof Error ? error.stack : ''
+      console.error(`[book:reparse] ${msg}`, stack)
+      logService.error('Parser', `迁移分章失败: ${msg}`)
+      return { success: false, error: msg }
+    } finally {
+      setActiveCleanRules(null)
+    }
+  }
+
+  ipcMain.handle(
+    'book:reparse',
+    async (_event, bookId: string, options?: { mode?: ChapterMode; splitOversized?: boolean }) => {
+      // 兼容旧参数 splitOversized：忽略，统一走 mode（默认 original）
+      const mode: ChapterMode = options?.mode === 'merged' ? 'merged' : 'original'
+      return reparseOneBook(bookId, mode)
+    }
+  )
+
+  // 一键迁移全部旧书 → original 重切入库
+  ipcMain.handle('book:migrate-all-chapters', async () => {
+    try {
+      const books = libraryStorage.loadAll()
+      let done = 0
+      let failed = 0
+      for (const b of books) {
+        const result = await reparseOneBook(b.id, 'original')
+        if (result.success) done++
+        else failed++
+      }
+      logService.info('Parser', `全书分章迁移完成：成功 ${done}，失败 ${failed}，共 ${books.length}`)
+      return { success: true, done, failed, total: books.length }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      logService.error('Parser', `全书分章迁移失败: ${msg}`)
+      return { success: false, error: msg }
+    }
+  })
+
   function getCoversDir(): string {
     const coversDir = join(getDataDir(), 'covers')
     if (!existsSync(coversDir)) {
@@ -868,11 +1251,20 @@ export function registerFileHandlers(
         }
       }
 
+      const clearLibrary = () => {
+        emptyJson('books.json')
+        emptyJson('progress.json')
+        if (existsSync(join(dir, 'library'))) {
+          rmSync(join(dir, 'library'), { recursive: true, force: true })
+        }
+        if (existsSync(join(dir, 'covers'))) {
+          rmSync(join(dir, 'covers'), { recursive: true, force: true })
+        }
+      }
+
       switch (type) {
         case 'books':
-          emptyJson('books.json')
-          if (existsSync(join(dir, 'covers')))
-            rmSync(join(dir, 'covers'), { recursive: true, force: true })
+          clearLibrary()
           break
         case 'history':
           emptyJson('history.json')
@@ -887,10 +1279,18 @@ export function registerFileHandlers(
           emptyJson('bookmarks.json')
           break
         case 'all':
-          for (const f of ['books.json', 'history.json', 'logs.json', 'bookmarks.json', 'albums.json', 'ai-history.json']) {
+          for (const f of [
+            'books.json',
+            'progress.json',
+            'history.json',
+            'logs.json',
+            'bookmarks.json',
+            'albums.json',
+            'ai-history.json'
+          ]) {
             emptyJson(f)
           }
-          for (const d of ['covers', 'cache', 'outlines']) {
+          for (const d of ['covers', 'cache', 'outlines', 'library']) {
             if (existsSync(join(dir, d))) rmSync(join(dir, d), { recursive: true, force: true })
           }
           removeAudioCaches()

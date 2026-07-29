@@ -9,10 +9,9 @@ import { basename } from 'path'
 import { statSync, readFileSync } from 'fs'
 import { preprocessText, splitSentences } from './textPreprocessor'
 import {
-  buildChapters,
+  buildChaptersByMode,
   detectHeadingBoundaries,
-  type Boundary,
-  type BuiltChapter
+  type Boundary
 } from './chapterBuilder'
 
 interface ParseResult {
@@ -20,14 +19,11 @@ interface ParseResult {
   author: string
   sentences: string[]
   chapters: Array<{ title: string; startIndex: number; sentenceCount: number }>
+  sourceBoundaries?: Boundary[]
 }
 
 const MAX_PDF_FILE_SIZE = 200 * 1024 * 1024
 const PARSE_TIMEOUT_MS = 120_000
-
-// PDF 书签通常粒度较细（甚至一页一个），归一化时用较大的下限收拢
-const PDF_MIN_SENTENCES = 200
-const PDF_MAX_SENTENCES = 600
 
 // pdf.js 文档句柄的最小结构（仅标注用到的成员）
 interface PdfJsDoc {
@@ -216,26 +212,17 @@ export async function parsePdf(filePath: string): Promise<ParseResult> {
         // 无书签或读取失败，走退路
       }
 
-      let chapters: BuiltChapter[]
+      // 导入只存原始切法；合并规则留给预选页
+      let sourceBoundaries: Boundary[] = []
       if (boundaries.length >= 2) {
-        // 有书签：按书签分章 + 归一化收拢
-        chapters = buildChapters(allSentences.length, boundaries, {
-          minSentences: PDF_MIN_SENTENCES,
-          maxSentences: PDF_MAX_SENTENCES
-        })
+        sourceBoundaries = boundaries
       } else {
-        // 无书签：先试正文标题识别
         const headingBounds = detectHeadingBoundaries(allSentences)
-        chapters =
-          headingBounds.length >= 2
-            ? buildChapters(allSentences.length, headingBounds, {
-                minSentences: PDF_MIN_SENTENCES,
-                maxSentences: PDF_MAX_SENTENCES
-              })
-            : buildChapters(allSentences.length, [], { pseudoChunkSize: 400 })
+        if (headingBounds.length >= 2) sourceBoundaries = headingBounds
       }
+      const chapters = buildChaptersByMode(allSentences.length, sourceBoundaries, 'original')
 
-      return { title, author, sentences: allSentences, chapters }
+      return { title, author, sentences: allSentences, chapters, sourceBoundaries }
     } finally {
       if (doc.destroy) {
         try {

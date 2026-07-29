@@ -23,12 +23,14 @@ export default function RetrievalCard({ status, sources, error }: RetrievalCardP
       )}
       <span>
         {isSearching
-          ? '正在检索书内内容'
+          ? '正在检索书内内容…'
           : hasError
-            ? error || '书内检索失败，已使用普通对话'
+            ? error || '书内检索失败，已改用本章正文与对话历史'
             : status === 'offline'
               ? '知识库未连接，已跳过书内检索'
-              : `找到 ${sources.length} 条书内来源`}
+              : sources.length > 0
+                ? `找到 ${sources.length} 条书内来源`
+                : '未找到相关书内片段（若本书未同步知识库属正常；仍可用本章正文回答）'}
       </span>
     </div>
   )

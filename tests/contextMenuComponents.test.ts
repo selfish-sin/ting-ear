@@ -62,14 +62,19 @@ function run(): void {
     join(process.cwd(), 'src/components/BookShelf.tsx'),
     'utf8'
   )
-  assert.match(bookshelfSource, /\.\/ui\/ContextMenu/)
-  assert.equal(
-    bookshelfSource.match(/aria-label="更多书籍操作"/g)?.length,
-    2,
-    'grid and list views should both expose book action triggers'
+  const gridCardSource = readFileSync(
+    join(process.cwd(), 'src/components/bookshelf/BookGridCard.tsx'),
+    'utf8'
   )
+  const listRowSource = readFileSync(
+    join(process.cwd(), 'src/components/bookshelf/BookListRow.tsx'),
+    'utf8'
+  )
+  assert.match(bookshelfSource, /\.\/ui\/ContextMenu/)
+  assert.match(gridCardSource, /aria-label="更多书籍操作"/)
+  assert.match(listRowSource, /aria-label="更多书籍操作"/)
   assert.doesNotMatch(
-    bookshelfSource,
+    bookshelfSource + gridCardSource + listRowSource,
     /className="fixed z-50 bg-white\/95/,
     'the raw fixed-coordinate bookshelf menu should be removed'
   )

@@ -11,8 +11,6 @@ import {
   LayoutGrid,
   List,
   FileText,
-  CheckSquare,
-  Square,
   Star,
   X,
   Download,
@@ -23,9 +21,9 @@ import {
   ChevronUp,
   ChevronDown,
   Minus,
-  ListChecks,
-  MoreHorizontal
+  ListChecks
 } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
 import { useBookStore } from '../stores/bookStore'
 import { useAlbumStore } from '../stores/albumStore'
 import { useBookmarkStore } from '../stores/bookmarkStore'
@@ -33,7 +31,8 @@ import {
   generateCoverDataUrl,
   computeCoverHash,
   getStoredCoverHash,
-  setStoredCoverHash
+  setStoredCoverHash,
+  coverProtocolUrl
 } from '../utils/coverGenerator'
 import { ALBUM_TITLE_MAX_LENGTH } from '../utils/albumUtils'
 import { BOOK_TITLE_MAX_LENGTH, normalizeBookTitle } from '../utils/bookData'
@@ -55,50 +54,22 @@ interface BookShelfProps {
 type SortBy = 'recent' | 'added' | 'title'
 type ViewMode = 'grid' | 'list'
 
-// 书架缩放：1(最小) ~ 5(最大)，默认 3
-const SHELF_SCALE_MIN = 1
-const SHELF_SCALE_MAX = 5
-const SHELF_SCALE_DEFAULT = 3
-const SHELF_SCALE_KEY = 'ting-ear-shelf-scale'
-
-// scale → 网格列数映射（越大列越少 = 封面越大）
-const SCALE_TO_COLS: Record<number, string> = {
-  1: 'grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 xl:grid-cols-8',
-  2: 'grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6',
-  3: 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5',
-  4: 'grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3',
-  5: 'grid-cols-1 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-2',
-}
-const SCALE_TO_GAP: Record<number, string> = {
-  1: 'gap-2',
-  2: 'gap-3',
-  3: 'gap-4',
-  4: 'gap-5',
-  5: 'gap-6',
-}
-const SCALE_TO_PAD: Record<number, string> = {
-  1: 'p-1.5',
-  2: 'p-2',
-  3: 'p-3',
-  4: 'p-4',
-  5: 'p-5',
-}
-// scale → 标题字体
-const SCALE_TO_TITLE: Record<number, string> = {
-  1: 'text-[11px]',
-  2: 'text-xs',
-  3: 'text-sm',
-  4: 'text-base',
-  5: 'text-lg',
-}
-// scale → 作者/进度字体
-const SCALE_TO_META: Record<number, string> = {
-  1: 'text-[9px]',
-  2: 'text-[10px]',
-  3: 'text-xs',
-  4: 'text-sm',
-  5: 'text-sm',
-}
+import ContinueReadingCard from './bookshelf/ContinueReadingCard'
+import BatchActionBar from './bookshelf/BatchActionBar'
+import BookGridCard from './bookshelf/BookGridCard'
+import BookListRow from './bookshelf/BookListRow'
+import {
+  SHELF_SCALE_MIN,
+  SHELF_SCALE_MAX,
+  SHELF_SCALE_DEFAULT,
+  SHELF_SCALE_KEY,
+  shelfGridClassName
+} from './bookshelf/shelfScale'
+import {
+  VIRTUALIZE_THRESHOLD,
+  VirtualBookGrid,
+  VirtualBookList
+} from './bookshelf/VirtualBookShelf'
 
 type AlbumEditor =
   { mode: 'create'; parentId: string | null } | { mode: 'rename'; album: CustomAlbum }
@@ -110,7 +81,13 @@ export default function BookShelf({
   onCleanText,
   showToast
 }: BookShelfProps) {
-  const { books, removeBook, renameBook, isLoading, loadBooks } = useBookStore()
+  const { books, isLoading, loadingMessage } = useBookStore(
+    useShallow((s) => ({ books: s.books, isLoading: s.isLoading, loadingMessage: s.loadingMessage }))
+  )
+  // Actions are stable refs — read via getState(), no subscription needed
+  const removeBook = useBookStore.getState().removeBook
+  const renameBook = useBookStore.getState().renameBook
+  const loadBooks = useBookStore.getState().loadBooks
   const {
     albums,
     activeAlbumId,
@@ -156,6 +133,8 @@ export default function BookShelf({
 
   // Multi-select
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [reparseProgress, setReparseProgress] = useState<{ done: number; total: number } | null>(null)
+  const [reprocessProgress, setReprocessProgress] = useState<{ done: number; total: number } | null>(null)
   // Favorites (persisted in localStorage)
   const [favorites, setFavorites] = useState<Set<string>>(() => {
     try {
@@ -170,89 +149,98 @@ export default function BookShelf({
     localStorage.setItem('ting-ear-favorites', JSON.stringify([...favorites]))
   }, [favorites])
 
-  // Load covers as data URLs.
-  // 优先从磁盘缓存读取已有封面；仅在标题/作者变化或无缓存时才重新生成。
+  /**
+   * 封面加载（启动加速）：
+   * 1) 默认用 ting-cover 协议直读磁盘 PNG（零 base64 IPC）
+   * 2) 仅对「标题/作者变了」或「协议 404」的书才生成
+   * 3) 依赖 coverKey 而非整个 books，进度刷新不会重跑
+   */
+  const coverKey = useMemo(
+    () =>
+      books
+        .map((b) => `${b.id}\t${b.title}\t${b.author}\t${b.coverPath || ''}\t${b.coverSource || ''}`)
+        .join('\n'),
+    [books]
+  )
+
+  // 协议 URL 立即可用；生成结果覆盖到 coverUrls
+  const resolveCoverSrc = useCallback(
+    (book: BookData): string => {
+      return coverUrls[book.id] || coverProtocolUrl(book.id)
+    },
+    [coverUrls]
+  )
+
+  // 缺失封面：懒生成（img onError 或空闲批处理）
+  const missingCoverIdsRef = useRef<Set<string>>(new Set())
+  const ensureCover = useCallback(async (book: BookData) => {
+    if (missingCoverIdsRef.current.has(book.id)) return
+    // custom 且已有 path：协议应能加载，失败再生成
+    const currentHash = computeCoverHash(book.title, book.author)
+    const storedHash = getStoredCoverHash(book.id)
+    // 哈希一致且非强制缺失时不重生成（协议 404 仍会走这里）
+    if (storedHash === currentHash && book.coverPath) {
+      // 已有匹配哈希，但协议失败 → 仍尝试读一次 dataUrl 兜底
+      try {
+        const dataUrl = await window.api?.getCoverDataUrl(book.id)
+        if (dataUrl) {
+          setCoverUrls((prev) => (prev[book.id] === dataUrl ? prev : { ...prev, [book.id]: dataUrl }))
+          return
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    missingCoverIdsRef.current.add(book.id)
+    try {
+      const dataUrl = generateCoverDataUrl(book.title, book.author)
+      await window.api?.saveCover(book.id, dataUrl)
+      setStoredCoverHash(book.id, currentHash)
+      setCoverUrls((prev) => ({ ...prev, [book.id]: dataUrl }))
+    } catch {
+      missingCoverIdsRef.current.delete(book.id)
+    }
+  }, [])
+
+  // 空闲时检查「标题变了」的 auto 封面，批量重生（不阻塞首屏）
   useEffect(() => {
     let cancelled = false
-    const load = async () => {
-      // 第一轮：快速加载所有已缓存封面（并行）
-      const cachedResults = await Promise.all(
-        books.map(async (book) => {
-          // custom 封面：直接从磁盘读取
-          if (book.coverSource === 'custom' && book.coverPath) {
-            const dataUrl = await window.api?.getCoverDataUrl(book.id)
-            return { book, dataUrl: dataUrl || null, needRegen: !dataUrl }
-          }
-          // auto 封面：先尝试从磁盘读取已有封面
-          const dataUrl = await window.api?.getCoverDataUrl(book.id)
-          if (dataUrl) {
-            // 检查哈希是否匹配当前标题/作者
-            const currentHash = computeCoverHash(book.title, book.author)
-            const storedHash = getStoredCoverHash(book.id)
-            if (storedHash === null) {
-              // 无历史哈希（如 EPUB 提取的封面），直接沿用并记录哈希
-              setStoredCoverHash(book.id, currentHash)
-              return { book, dataUrl, needRegen: false }
-            }
-            if (storedHash === currentHash) {
-              // 哈希匹配，封面仍然有效，无需重新生成
-              return { book, dataUrl, needRegen: false }
-            }
-            // 哈希不匹配，需要重新生成
-            return { book, dataUrl, needRegen: true }
-          }
-          // 磁盘无封面，需要生成
-          return { book, dataUrl: null, needRegen: true }
-        })
-      )
-
+    const run = () => {
       if (cancelled) return
-
-      // 先展示所有已获取的封面（快速首屏）
-      const quickUrls: Record<string, string> = {}
-      for (const { book, dataUrl } of cachedResults) {
-        if (dataUrl) quickUrls[book.id] = dataUrl
-      }
-      setCoverUrls(quickUrls)
-
-      // 第二轮：仅对需要重新生成的封面执行生成（并行）
-      const regenBooks = cachedResults.filter((r) => r.needRegen)
-      if (regenBooks.length === 0) return
-
-      const regenResults = await Promise.all(
-        regenBooks.map(async ({ book }) => {
-          const dataUrl = generateCoverDataUrl(book.title, book.author)
-          const res = await window.api?.saveCover(book.id, dataUrl)
-          // 更新哈希缓存
-          setStoredCoverHash(book.id, computeCoverHash(book.title, book.author))
-          // 若 book 无 coverPath，补充路径信息
-          if (!book.coverPath && res?.success && res.coverPath) {
-            useBookStore.getState().updateBook({
-              ...book,
-              coverPath: res.coverPath,
-              coverSource: 'auto'
-            })
-          }
-          return { bookId: book.id, dataUrl }
-        })
-      )
-
-      if (cancelled) return
-
-      // 合并新生成的封面到已有 coverUrls
-      setCoverUrls((prev) => {
-        const next = { ...prev }
-        for (const { bookId, dataUrl } of regenResults) {
-          next[bookId] = dataUrl
+      const needRegen = books.filter((book) => {
+        if (book.coverSource === 'custom') return false
+        const currentHash = computeCoverHash(book.title, book.author)
+        const stored = getStoredCoverHash(book.id)
+        // 无历史哈希：沿用磁盘协议图，只记哈希
+        if (stored === null) {
+          setStoredCoverHash(book.id, currentHash)
+          return false
         }
-        return next
+        return stored !== currentHash
       })
+      if (needRegen.length === 0) return
+      // 串行少量并发，避免启动抢 CPU
+      void (async () => {
+        for (const book of needRegen) {
+          if (cancelled) return
+          await ensureCover(book)
+          await new Promise((r) => setTimeout(r, 0))
+        }
+      })()
     }
-    load()
+    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number })
+      .requestIdleCallback
+    const id = ric ? ric(run, { timeout: 2500 }) : window.setTimeout(run, 400)
     return () => {
       cancelled = true
+      if (ric && typeof id === 'number') {
+        const cancel = (window as unknown as { cancelIdleCallback?: (n: number) => void }).cancelIdleCallback
+        cancel?.(id)
+      } else {
+        clearTimeout(id as number)
+      }
     }
-  }, [books])
+  }, [coverKey, books, ensureCover])
 
   useEffect(() => {
     loadAlbums()
@@ -377,6 +365,7 @@ export default function BookShelf({
   const handleBatchReprocess = useCallback(async () => {
     const ids = [...selectedIds]
     if (ids.length === 0) return
+    setReprocessProgress({ done: 0, total: ids.length })
     let done = 0
     for (const id of ids) {
       try {
@@ -385,11 +374,62 @@ export default function BookShelf({
       } catch {
         // skip
       }
+      setReprocessProgress({ done: done + 1, total: ids.length })
+      await new Promise(r => setTimeout(r, 0))
     }
+    setReprocessProgress(null)
     setSelectedIds(new Set())
     await loadBooks()
     showToast('success', `已清理 ${done}/${ids.length} 本书`)
   }, [selectedIds, loadBooks, showToast])
+
+  /** 批量迁移：选中书按 original 重切（旧书一键升级） */
+  const handleBatchReparse = useCallback(async () => {
+    const ids = [...selectedIds]
+    if (ids.length === 0) return
+    setReparseProgress({ done: 0, total: ids.length })
+    let done = 0
+    let failed = 0
+    for (const id of ids) {
+      try {
+        const result = await window.api?.reparseBook(id, { mode: 'original' })
+        if (result?.success) done++
+        else failed++
+      } catch {
+        failed++
+      }
+      setReparseProgress({ done: done + failed, total: ids.length })
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    setReparseProgress(null)
+    setSelectedIds(new Set())
+    await loadBooks()
+    if (failed > 0) showToast('warning', `已迁移分章 ${done}/${ids.length} 本，${failed} 本失败`)
+    else showToast('success', `已按「原始」规则迁移 ${done} 本书的章节`)
+  }, [selectedIds, loadBooks, showToast])
+
+  /** 一键迁移书架全部旧书 */
+  const handleMigrateAllChapters = useCallback(async () => {
+    try {
+      showToast('info', '正在按新规则迁移全部分章…')
+      setReparseProgress({ done: 0, total: 1 })
+      const result = await window.api?.migrateAllChapters()
+      setReparseProgress(null)
+      await loadBooks()
+      if (result?.success) {
+        showToast(
+          'success',
+          `分章迁移完成：成功 ${result.done ?? 0}/${result.total ?? 0}` +
+            (result.failed ? `，失败 ${result.failed}` : '')
+        )
+      } else {
+        showToast('error', result?.error || '迁移失败')
+      }
+    } catch (error) {
+      setReparseProgress(null)
+      showToast('error', `迁移失败: ${String(error)}`)
+    }
+  }, [loadBooks, showToast])
 
   const handleBatchExportBookmarks = useCallback(async () => {
     const ids = [...selectedIds]
@@ -412,7 +452,12 @@ export default function BookShelf({
   const handleExportAudio = useCallback(
     async (book: BookData) => {
       setContextMenu(null)
-      if (!book.sentences || book.sentences.length === 0) {
+      // stub（轻量书架）：按需加载完整数据
+      let fullBook: BookData | null = book.sentences.length > 0 || (book.sentenceCount ?? 0) === 0 ? book : null
+      if (!fullBook) {
+        fullBook = await useBookStore.getState().loadFullBook(book.id)
+      }
+      if (!fullBook || !fullBook.sentences || fullBook.sentences.length === 0) {
         showToast('warning', '该书无文本内容')
         return
       }
@@ -420,17 +465,17 @@ export default function BookShelf({
 
       const settings = (await window.api?.loadSettings()) as { voiceId?: string; ttsEngine?: string } | null
       const result = await window.api?.exportAudio({
-        sentences: book.sentences,
+        sentences: fullBook.sentences,
         voiceId: settings?.voiceId || 'zh-CN-XiaoxiaoNeural',
         speed: 1.0,
         startIndex: 0,
-        endIndex: book.sentences.length,
-        defaultName: book.title,
+        endIndex: fullBook.sentences.length,
+        defaultName: fullBook.title,
         engineId: settings?.ttsEngine && settings.ttsEngine !== 'system' ? settings.ttsEngine : 'edge'
       })
 
       if (result?.success) {
-        showToast('success', `《${book.title}》音频导出完成`)
+        showToast('success', `《${fullBook.title}》音频导出完成`)
       } else if (result?.error !== '取消导出') {
         showToast('error', result?.error || '导出失败')
       }
@@ -442,30 +487,37 @@ export default function BookShelf({
   const handleBatchExportAudio = useCallback(async () => {
     const ids = [...selectedIds]
     if (ids.length === 0) return
-    const targetBooks = books.filter(
-      (b) => ids.includes(b.id) && b.sentences && b.sentences.length > 0
+    // 用 sentenceCount 判断（兼容 stub），先选候选
+    const candidates = books.filter(
+      (b) => ids.includes(b.id) && (b.sentenceCount || b.sentences.length) > 0
     )
-    if (targetBooks.length === 0) {
+    if (candidates.length === 0) {
       showToast('warning', '所选书籍无文本内容')
       return
     }
     let done = 0
-    for (const book of targetBooks) {
-      showToast('info', `正在导出《${book.title}》(${done + 1}/${targetBooks.length})...`)
+    for (const book of candidates) {
+      // stub: 按需加载完整数据
+      let fullBook = book.sentences.length > 0 ? book : null
+      if (!fullBook) {
+        fullBook = await useBookStore.getState().loadFullBook(book.id)
+      }
+      if (!fullBook || !fullBook.sentences || fullBook.sentences.length === 0) continue
+      showToast('info', `正在导出《${fullBook.title}》(${done + 1}/${candidates.length})...`)
       const settings = (await window.api?.loadSettings()) as { voiceId?: string; ttsEngine?: string } | null
       const result = await window.api?.exportAudio({
-        sentences: book.sentences,
+        sentences: fullBook.sentences,
         voiceId: settings?.voiceId || 'zh-CN-XiaoxiaoNeural',
         speed: 1.0,
         startIndex: 0,
-        endIndex: book.sentences.length,
-        defaultName: book.title,
+        endIndex: fullBook.sentences.length,
+        defaultName: fullBook.title,
         engineId: settings?.ttsEngine && settings.ttsEngine !== 'system' ? settings.ttsEngine : 'edge'
       })
       if (result?.success) done++
     }
     setSelectedIds(new Set())
-    if (done > 0) showToast('success', `已导出 ${done}/${targetBooks.length} 本书的音频`)
+    if (done > 0) showToast('success', `已导出 ${done}/${candidates.length} 本书的音频`)
     else showToast('warning', '所有导出均被取消或失败')
   }, [selectedIds, books, showToast])
 
@@ -753,52 +805,6 @@ export default function BookShelf({
     } catch (error) {
       showToast('error', `处理失败: ${String(error)}`)
     }
-  }
-
-  const badgeColors: Record<string, string> = {
-    epub: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
-    txt: 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300',
-    pdf: 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300',
-    docx: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300',
-    md: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300',
-    html: 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300',
-    htm: 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'
-  }
-
-  // ---- Shared checkbox component ----
-  const SelectCheckbox = ({ id }: { id: string }) => {
-    const isSelected = selectedIds.has(id)
-    return (
-      <button
-        onClick={(e) => toggleSelect(id, e)}
-        className={`absolute top-2 left-2 z-10 w-6 h-6 rounded flex items-center justify-center transition-all ${
-          isSelected
-            ? 'bg-primary text-white shadow-sm'
-            : 'bg-white/80 dark:bg-gray-800/80 text-gray-300 hover:text-primary hover:bg-white dark:hover:bg-gray-700'
-        }`}
-        title={isSelected ? '取消选择' : '选择'}
-      >
-        {isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
-      </button>
-    )
-  }
-
-  // ---- Shared star button ----
-  const StarButton = ({ id }: { id: string }) => {
-    const isFav = favorites.has(id)
-    return (
-      <button
-        onClick={(e) => toggleFavorite(id, e)}
-        className={`absolute bottom-2 right-2 z-10 w-6 h-6 rounded-full flex items-center justify-center transition-all ${
-          isFav
-            ? 'text-amber-400'
-            : 'text-gray-300 dark:text-gray-600 hover:text-amber-400 opacity-0 group-hover:opacity-100'
-        }`}
-        title={isFav ? '取消收藏' : '收藏'}
-      >
-        <Star className={`w-4 h-4 ${isFav ? 'fill-amber-400' : ''}`} />
-      </button>
-    )
   }
 
   const bookMenuGroups: ContextMenuGroup[] = contextMenu
@@ -1129,358 +1135,202 @@ export default function BookShelf({
             <span>添加内容</span>
           </button>
         )}
+
+        <span className="ml-auto text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap">
+          共 {displayBooks.length} 本
+        </span>
       </div>
 
-      {/* Batch action bar */}
-      {selectedCount > 0 && (
-        <div className="flex items-center gap-2 px-4 py-2 bg-primary/5 dark:bg-primary/10 border-b border-primary/20 flex-shrink-0 text-sm">
-          <span className="font-medium text-primary">
-            已选 <span className="text-base">{selectedCount}</span> 本
-          </span>
-          <div className="flex-1" />
-          <button
-            onClick={allSelected ? clearSelection : selectAll}
-            className="px-2 py-1 text-xs text-gray-600 dark:text-gray-300 hover:text-primary rounded hover:bg-primary/10 transition-colors"
-          >
-            {allSelected ? '取消全选' : '全选'}
-          </button>
-          <button
-            onClick={clearSelection}
-            className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors flex items-center gap-1"
-          >
-            <X className="w-3 h-3" /> 清空
-          </button>
-          <div className="w-px h-4 bg-gray-300 dark:bg-gray-600" />
-          <button
-            onClick={handleBatchReprocess}
-            className="px-2 py-1 text-xs text-gray-600 dark:text-gray-300 hover:text-primary rounded hover:bg-primary/10 transition-colors flex items-center gap-1"
-          >
-            <RefreshCw className="w-3 h-3" /> 批量清理
-          </button>
-          <button
-            onClick={handleBatchExportBookmarks}
-            className="px-2 py-1 text-xs text-gray-600 dark:text-gray-300 hover:text-primary rounded hover:bg-primary/10 transition-colors flex items-center gap-1"
-          >
-            <Upload className="w-3 h-3" /> 导出书签
-          </button>
-          <button
-            onClick={handleBatchExportAudio}
-            className="px-2 py-1 text-xs text-gray-600 dark:text-gray-300 hover:text-primary rounded hover:bg-primary/10 transition-colors flex items-center gap-1"
-          >
-            <Download className="w-3 h-3" /> 导出音频
-          </button>
-          <button
-            onClick={handleBatchDelete}
-            className="px-2 py-1 text-xs text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors flex items-center gap-1"
-          >
-            <Trash2 className="w-3 h-3" /> 删除
-          </button>
-        </div>
-      )}
+      <BatchActionBar
+        selectedCount={selectedCount}
+        allSelected={allSelected}
+        reprocessProgress={reprocessProgress}
+        reparseProgress={reparseProgress}
+        onSelectAll={selectAll}
+        onClearSelection={clearSelection}
+        onBatchReprocess={handleBatchReprocess}
+        onBatchReparse={handleBatchReparse}
+        onMigrateAllChapters={handleMigrateAllChapters}
+        onBatchExportBookmarks={handleBatchExportBookmarks}
+        onBatchExportAudio={handleBatchExportAudio}
+        onBatchDelete={handleBatchDelete}
+      />
 
-      {/* Book list / Empty state */}
-      <div className="flex-1 overflow-y-auto p-4">
-        {/* 继续阅读 — 最近阅读的书一键恢复 */}
-        {!activeAlbumId && lastReadBook && (
-          <div
-            className="mb-5 flex items-center gap-3.5 p-3.5 rounded-2xl border border-primary/20 bg-primary/[0.04] dark:bg-primary/[0.08] cursor-pointer hover:border-primary/40 hover:bg-primary/[0.07] dark:hover:bg-primary/[0.12] transition-all group/resume"
-            onClick={() => onOpenBook(lastReadBook)}
-          >
-            <div className="w-11 h-14 rounded-lg overflow-hidden flex-shrink-0 bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 shadow-sm ring-1 ring-black/[0.06] dark:ring-white/[0.08]">
-              {coverUrls[lastReadBook.id] ? (
-                <img src={coverUrls[lastReadBook.id]} alt="" className="w-full h-full object-cover" />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-lg font-bold text-primary/40">
-                  {lastReadBook.title.charAt(0)}
-                </div>
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-medium text-primary/70 bg-primary/10 px-1.5 py-0.5 rounded">继续阅读</span>
-                <span className="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">{lastReadBook.title}</span>
-              </div>
-              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 truncate">
-                {lastReadBook.chapters?.[lastReadBook.currentChapterIndex]?.title || `第 ${lastReadBook.currentChapterIndex + 1} 章`}
-                {' · '}
-                {Math.round(lastReadBook.progressPercent)}%
-              </p>
-              <div className="mt-1.5 h-1 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
-                <div className="h-full rounded-full bg-primary/70 transition-all" style={{ width: `${Math.min(100, lastReadBook.progressPercent)}%` }} />
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-gray-300 dark:text-gray-600 group-hover/resume:text-primary transition-colors flex-shrink-0" />
-          </div>
-        )}
+      {/* Book list / Empty state — 书多时虚拟滚动，避免一次挂载上百张卡片 */}
+      <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+        <div className="flex-shrink-0 px-4 pt-4">
+          {!activeAlbumId && lastReadBook && (
+            <ContinueReadingCard
+              book={lastReadBook}
+              coverUrl={resolveCoverSrc(lastReadBook)}
+              onOpen={onOpenBook}
+              onCoverError={ensureCover}
+            />
+          )}
 
-        {childAlbums.length > 0 && (
-          <div className="mb-5">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">子专辑</h3>
-              <span className="text-xs text-gray-400">{childAlbums.length} 个</span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {childAlbums.map((album) => (
-                <div
-                  key={album.id}
-                  className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900"
-                >
-                  <button
-                    onClick={() => openAlbum(album.id)}
-                    className="flex items-center gap-3 flex-1 min-w-0 text-left"
+          {childAlbums.length > 0 && (
+            <div className="mb-5">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">子专辑</h3>
+                <span className="text-xs text-gray-400">{childAlbums.length} 个</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {childAlbums.map((album) => (
+                  <div
+                    key={album.id}
+                    className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900"
                   >
-                    <Folder className="w-5 h-5 flex-shrink-0 text-primary" />
-                    <span
-                      className="truncate text-sm text-gray-700 dark:text-gray-200"
-                      title={album.title}
+                    <button
+                      onClick={() => openAlbum(album.id)}
+                      className="flex items-center gap-3 flex-1 min-w-0 text-left"
                     >
-                      {album.title}
-                    </span>
-                    <span className="text-xs text-gray-400 flex-shrink-0">
-                      {album.items.filter((item) => item.resourceType === 'book').length}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => handleRenameAlbum(album)}
-                    className="p-1 text-gray-400 hover:text-primary"
-                    title="编辑专辑标题"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => handleDeleteAlbum(album)}
-                    className="p-1 text-gray-400 hover:text-red-600"
-                    title="删除专辑"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                      <Folder className="w-5 h-5 flex-shrink-0 text-primary" />
+                      <span
+                        className="truncate text-sm text-gray-700 dark:text-gray-200"
+                        title={album.title}
+                      >
+                        {album.title}
+                      </span>
+                      <span className="text-xs text-gray-400 flex-shrink-0">
+                        {album.items.filter((item) => item.resourceType === 'book').length}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => handleRenameAlbum(album)}
+                      className="p-1 text-gray-400 hover:text-primary"
+                      title="编辑专辑标题"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleDeleteAlbum(album)}
+                      className="p-1 text-gray-400 hover:text-red-600"
+                      title="删除专辑"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 min-h-0 px-4 pb-4">
+          {displayBooks.length === 0 ? (
+            <div
+              className={`h-full flex flex-col items-center justify-center border-2 border-dashed rounded-3xl transition-all mx-1 ${
+                isDragOver
+                  ? 'border-primary bg-primary/5'
+                  : 'border-gray-200 dark:border-dark-border bg-white/40 dark:bg-dark-surface/40'
+              }`}
+            >
+              <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
+                <FileText className="w-8 h-8 text-primary/50" />
+              </div>
+              <h3 className="text-base font-semibold text-gray-600 dark:text-gray-300">书架还是空的</h3>
+              <p className="text-sm text-gray-400 dark:text-gray-500 mt-2 max-w-xs text-center leading-relaxed">
+                拖拽电子书到这里，或点击下方按钮导入
+              </p>
+              <button onClick={handleSelectFile} className="btn-primary mt-6 px-6 py-2.5">
+                <Upload className="w-4 h-4" />
+                <span>导入书籍</span>
+              </button>
+            </div>
+          ) : viewMode === 'grid' ? (
+            displayBooks.length >= VIRTUALIZE_THRESHOLD ? (
+              <VirtualBookGrid
+                books={displayBooks}
+                shelfScale={shelfScale}
+                gridClassName={shelfGridClassName(shelfScale)}
+                renderItem={(book) => (
+                  <BookGridCard
+                    key={book.id}
+                    book={book}
+                    shelfScale={shelfScale}
+                    coverUrl={resolveCoverSrc(book)}
+                    selected={selectedIds.has(book.id)}
+                    favorited={favorites.has(book.id)}
+                    multiSelectMode={selectedCount > 0}
+                    onToggleSelect={toggleSelect}
+                    onToggleFavorite={toggleFavorite}
+                    onOpen={onOpenBook}
+                    onUploadCover={handleUploadCover}
+                    onContextMenu={handleContextMenu}
+                    onMenuButtonClick={handleMenuButtonClick}
+                    onKeyDown={handleBookCardKeyDown}
+                    onCoverError={ensureCover}
+                  />
+                )}
+              />
+            ) : (
+              <div className={`h-full overflow-y-auto ${shelfGridClassName(shelfScale)} content-start`}>
+                {displayBooks.map((book) => (
+                  <BookGridCard
+                    key={book.id}
+                    book={book}
+                    shelfScale={shelfScale}
+                    coverUrl={resolveCoverSrc(book)}
+                    selected={selectedIds.has(book.id)}
+                    favorited={favorites.has(book.id)}
+                    multiSelectMode={selectedCount > 0}
+                    onToggleSelect={toggleSelect}
+                    onToggleFavorite={toggleFavorite}
+                    onOpen={onOpenBook}
+                    onUploadCover={handleUploadCover}
+                    onContextMenu={handleContextMenu}
+                    onMenuButtonClick={handleMenuButtonClick}
+                    onKeyDown={handleBookCardKeyDown}
+                    onCoverError={ensureCover}
+                  />
+                ))}
+              </div>
+            )
+          ) : displayBooks.length >= VIRTUALIZE_THRESHOLD ? (
+            <VirtualBookList
+              books={displayBooks}
+              renderItem={(book) => (
+                <BookListRow
+                  key={book.id}
+                  book={book}
+                  coverUrl={resolveCoverSrc(book)}
+                  selected={selectedIds.has(book.id)}
+                  favorited={favorites.has(book.id)}
+                  multiSelectMode={selectedCount > 0}
+                  onToggleSelect={toggleSelect}
+                  onToggleFavorite={toggleFavorite}
+                  onOpen={onOpenBook}
+                  onUploadCover={handleUploadCover}
+                  onContextMenu={handleContextMenu}
+                  onMenuButtonClick={handleMenuButtonClick}
+                  onKeyDown={handleBookCardKeyDown}
+                  onCoverError={ensureCover}
+                />
+              )}
+            />
+          ) : (
+            <div className="h-full overflow-y-auto flex flex-col gap-2">
+              {displayBooks.map((book) => (
+                <BookListRow
+                  key={book.id}
+                  book={book}
+                  coverUrl={resolveCoverSrc(book)}
+                  selected={selectedIds.has(book.id)}
+                  favorited={favorites.has(book.id)}
+                  multiSelectMode={selectedCount > 0}
+                  onToggleSelect={toggleSelect}
+                  onToggleFavorite={toggleFavorite}
+                  onOpen={onOpenBook}
+                  onUploadCover={handleUploadCover}
+                  onContextMenu={handleContextMenu}
+                  onMenuButtonClick={handleMenuButtonClick}
+                  onKeyDown={handleBookCardKeyDown}
+                  onCoverError={ensureCover}
+                />
               ))}
             </div>
-          </div>
-        )}
-
-        {displayBooks.length === 0 ? (
-          <div
-            className={`h-full flex flex-col items-center justify-center border-2 border-dashed rounded-3xl transition-all mx-1 ${
-              isDragOver
-                ? 'border-primary bg-primary/5'
-                : 'border-gray-200 dark:border-dark-border bg-white/40 dark:bg-dark-surface/40'
-            }`}
-          >
-            <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
-              <FileText className="w-8 h-8 text-primary/50" />
-            </div>
-            <h3 className="text-base font-semibold text-gray-600 dark:text-gray-300">书架还是空的</h3>
-            <p className="text-sm text-gray-400 dark:text-gray-500 mt-2 max-w-xs text-center leading-relaxed">
-              拖拽电子书到这里，或点击下方按钮导入
-            </p>
-            <button onClick={handleSelectFile} className="btn-primary mt-6 px-6 py-2.5">
-              <Upload className="w-4 h-4" />
-              <span>导入书籍</span>
-            </button>
-          </div>
-        ) : viewMode === 'grid' ? (
-          <div className={`grid ${SCALE_TO_COLS[shelfScale]} ${SCALE_TO_GAP[shelfScale]}`}>
-            {displayBooks.map((book) => (
-              <div
-                key={book.id}
-                onClick={() => {
-                  if (selectedCount > 0) {
-                    toggleSelect(book.id)
-                  }
-                }}
-                onContextMenu={(e) => handleContextMenu(e, book)}
-                onKeyDown={(e) => handleBookCardKeyDown(e, book)}
-                tabIndex={0}
-                className={`group relative cursor-pointer book-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${SCALE_TO_PAD[shelfScale]} ${
-                  selectedIds.has(book.id)
-                    ? 'border-primary/50 bg-primary/5 dark:bg-primary/10 ring-2 ring-primary/20'
-                    : ''
-                }`}
-              >
-                {/* Selection checkbox — always visible */}
-                <SelectCheckbox id={book.id} />
-                <button
-                  type="button"
-                  onClick={(e) => handleMenuButtonClick(e, book)}
-                  className="absolute left-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded bg-white/85 text-gray-500 opacity-70 shadow-sm transition hover:opacity-100 focus-visible:opacity-100 dark:bg-gray-800/85 dark:text-gray-300"
-                  aria-label="更多书籍操作"
-                  title="更多操作"
-                >
-                  <MoreHorizontal className="h-4 w-4" />
-                </button>
-                {/* Cover — 点击换封面 */}
-                <div
-                  className="w-full aspect-[3/4] rounded-xl bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 flex items-center justify-center mb-2.5 overflow-hidden relative group/cover cursor-pointer shadow-sm ring-1 ring-black/[0.06] dark:ring-white/[0.08]"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    handleUploadCover(book)
-                  }}
-                >
-                  {coverUrls[book.id] ? (
-                    <img
-                      src={coverUrls[book.id]}
-                      alt={book.title}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <span className="text-4xl font-bold text-primary/40 dark:text-primary/30">
-                      {book.title.charAt(0)}
-                    </span>
-                  )}
-                  {/* Hover overlay — visual only */}
-                  <div className="absolute inset-0 bg-black/0 group-hover/cover:bg-black/30 flex items-center justify-center opacity-0 group-hover/cover:opacity-100 transition-all pointer-events-none">
-                    <span className="text-white text-xs bg-black/50 px-2 py-1 rounded">
-                      更换封面
-                    </span>
-                  </div>
-                </div>
-                {/* Info — 点击进入预选页 */}
-                <div
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onOpenBook(book)
-                  }}
-                  className="cursor-pointer"
-                >
-                  <h4
-                    className={`${SCALE_TO_TITLE[shelfScale]} font-medium text-gray-800 dark:text-gray-100 truncate pr-6`}
-                    title={book.title}
-                  >
-                    {book.title}
-                  </h4>
-                  <p className={`${SCALE_TO_META[shelfScale]} text-gray-400 dark:text-gray-500 truncate`}>{book.author}</p>
-
-                  {/* Format badge */}
-                  <span
-                    className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded ${
-                      badgeColors[book.format] || 'bg-gray-100 text-gray-600'
-                    }`}
-                  >
-                    {book.format.toUpperCase()}
-                  </span>
-
-                  {/* Favorite star — hover visible, always if favorited */}
-                  <StarButton id={book.id} />
-
-                  {/* Progress */}
-                  <div className="mt-2">
-                    <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-primary rounded-full"
-                        style={{ width: `${book.progressPercent}%` }}
-                      />
-                    </div>
-                    <p className={`${SCALE_TO_META[shelfScale]} text-gray-400 dark:text-gray-500 mt-0.5`}>
-                      {book.progressPercent.toFixed(0)}% · {book.sentences.length}句
-                    </p>
-                  </div>
-                </div>{' '}
-                {/* close info wrapper grid */}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {displayBooks.map((book) => (
-              <div
-                key={book.id}
-                onClick={() => {
-                  if (selectedCount > 0) {
-                    toggleSelect(book.id)
-                  }
-                }}
-                onContextMenu={(e) => handleContextMenu(e, book)}
-                onKeyDown={(e) => handleBookCardKeyDown(e, book)}
-                tabIndex={0}
-                className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border transition-all cursor-pointer book-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
-                  selectedIds.has(book.id)
-                    ? 'border-primary bg-primary/5 dark:bg-primary/10'
-                    : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-dark-surface hover:shadow-md hover:border-primary/30'
-                }`}
-              >
-                {/* Checkbox */}
-                <SelectCheckbox id={book.id} />
-                {/* Mini cover — 点击换封面 */}
-                <div
-                  className="w-10 h-12 rounded bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center flex-shrink-0 overflow-hidden cursor-pointer"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    handleUploadCover(book)
-                  }}
-                >
-                  {coverUrls[book.id] ? (
-                    <img
-                      src={coverUrls[book.id]}
-                      alt={book.title}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <span className="text-sm font-bold text-primary/50">
-                      {book.title.charAt(0)}
-                    </span>
-                  )}
-                </div>
-                <div
-                  className="flex-1 min-w-0 cursor-pointer"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onOpenBook(book)
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <h4 className="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">
-                      {book.title}
-                    </h4>
-                    <span
-                      className={`text-[10px] px-1.5 py-0.5 rounded ${
-                        badgeColors[book.format] || 'bg-gray-100 text-gray-600'
-                      }`}
-                    >
-                      {book.format.toUpperCase()}
-                    </span>
-                  </div>
-                  <p className="text-xs text-gray-400 dark:text-gray-500 truncate">
-                    {book.author} · {book.sentences.length} 句
-                  </p>
-                </div>
-                {/* Favorite star in list view */}
-                <button
-                  onClick={(e) => toggleFavorite(book.id, e)}
-                  className={`flex-shrink-0 p-1 rounded ${
-                    favorites.has(book.id)
-                      ? 'text-amber-400'
-                      : 'text-gray-300 dark:text-gray-600 opacity-0 group-hover:opacity-100'
-                  }`}
-                  title={favorites.has(book.id) ? '取消收藏' : '收藏'}
-                >
-                  <Star className={`w-4 h-4 ${favorites.has(book.id) ? 'fill-amber-400' : ''}`} />
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => handleMenuButtonClick(e, book)}
-                  className="icon-btn-sm flex-shrink-0"
-                  aria-label="更多书籍操作"
-                  title="更多操作"
-                >
-                  <MoreHorizontal className="h-4 w-4" />
-                </button>
-                <div className="w-32 flex-shrink-0">
-                  <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-primary rounded-full"
-                      style={{ width: `${book.progressPercent}%` }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5 text-right">
-                    {book.progressPercent.toFixed(0)}%
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <ContextMenu
@@ -1668,12 +1518,12 @@ export default function BookShelf({
         </div>
       )}
 
-      {/* Loading overlay */}
-      {isLoading && (
-        <div className="fixed inset-0 bg-black/30 dark:bg-black/50 flex items-center justify-center z-40">
-          <div className="bg-white dark:bg-gray-800 rounded-xl p-6 shadow-2xl flex items-center gap-4">
-            <div className="w-8 h-8 border-3 border-primary border-t-transparent rounded-full animate-spin" />
-            <span className="text-gray-700 dark:text-gray-200">正在解析书籍…</span>
+      {/* 导入等操作的局部提示；全局打开书由 App LoadingOverlay 覆盖 */}
+      {isLoading && loadingMessage?.includes('解析') && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 dark:bg-black/50">
+          <div className="flex items-center gap-4 rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-800">
+            <div className="h-8 w-8 animate-spin rounded-full border-[3px] border-primary border-t-transparent" />
+            <span className="text-gray-700 dark:text-gray-200">{loadingMessage || '正在解析书籍…'}</span>
           </div>
         </div>
       )}

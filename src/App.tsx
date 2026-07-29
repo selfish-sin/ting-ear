@@ -4,10 +4,7 @@ import SideNav from './components/SideNav'
 import BookShelf from './components/BookShelf'
 import PlayerView from './components/PlayerView'
 import AiReaderView from './components/reader/AiReaderView'
-import AiPlaybackCapsule, {
-  shouldShowAiPlaybackCapsule,
-  shouldShowFullPlaybackBar
-} from './components/reader/AiPlaybackCapsule'
+import { shouldShowFullPlaybackBar } from './components/reader/AiPlaybackCapsule'
 import ControlBar from './components/ControlBar'
 import ProgressBar from './components/ProgressBar'
 import BookmarksView from './components/BookmarksView'
@@ -23,12 +20,13 @@ import {
   buildPseudoChapters,
   clampSentenceIndex,
   findChapterIndex,
+  generatePseudoStructure,
   loadPlayPref,
-  mergeSmallChapters,
   normalizeBookData,
   normalizeChapters,
   normalizeSentenceRange,
   normalizeSentences,
+  resolveSourceBoundaries,
   splitReadableSentences,
   validatePlayPref
 } from './utils/bookData'
@@ -55,48 +53,54 @@ import { useFloatingBallStore } from './stores/floatingBallStore'
 import { useQuickTextStore } from './stores/quickTextStore'
 import { useTextCleanStore } from './stores/textCleanStore'
 import { v4 as uuidv4 } from 'uuid'
-import type { BookData, ToastItem, Chapter } from './global'
+import type { BookData, ToastItem, Chapter, ChapterMode } from './global'
+import LoadingOverlay from './components/ui/LoadingOverlay'
+import { waitUntilUiSettled } from './utils/uiReady'
 
 export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  /** 启动首屏：settings + 书架加载完成前盖住卡顿 */
+  const [appBooting, setAppBooting] = useState(true)
   const [rangeSelectorData, setRangeSelectorData] = useState<{
     book: BookData
     initialPage?: 0 | 1
   } | null>(null)
   const [subtitleEnabled, setSubtitleEnabled] = useState(false)
 
-  const {
-    books,
-    currentBook,
-    setCurrentBook,
-    setSentences,
-    setChapters,
-    setCurrentView,
-    currentView,
-    readerMode,
-    setLoading,
-    loadBooks,
-    updateBookProgress,
-    setSentenceRange,
-    setCurrentVersionId
-  } = useBookStore()
+  // selector 订阅：避免 timeMap/pageIndex/books 进度写回触发整棵树重渲染
+  // books 进度字段会高频更新，App 只订阅长度用于 auto-resume，完整列表用 getState()
+  const booksLength = useBookStore((s) => s.books.length)
+  const currentBook = useBookStore((s) => s.currentBook)
+  const currentBookId = currentBook?.id
+  const currentView = useBookStore((s) => s.currentView)
+  const readerMode = useBookStore((s) => s.readerMode)
+  const setCurrentBook = useBookStore((s) => s.setCurrentBook)
+  const setSentences = useBookStore((s) => s.setSentences)
+  const setChapters = useBookStore((s) => s.setChapters)
+  const setCurrentView = useBookStore((s) => s.setCurrentView)
+  const setLoading = useBookStore((s) => s.setLoading)
+  const isLoading = useBookStore((s) => s.isLoading)
+  const loadingMessage = useBookStore((s) => s.loadingMessage)
+  const loadBooks = useBookStore((s) => s.loadBooks)
+  const updateBookAndPersist = useBookStore((s) => s.updateBookAndPersist)
+  const setSentenceRange = useBookStore((s) => s.setSentenceRange)
+  const setCurrentVersionId = useBookStore((s) => s.setCurrentVersionId)
 
-  const {
-    setTotalSentences,
-    setCurrentSentenceIndex,
-    setCurrentChapterIndex,
-    setSpeed,
-    setVolume,
-    setVoiceId,
-    playState,
-    rawSpeechActive,
-    currentSentenceIndex
-  } = usePlayerStore()
+  // playState 仅用于历史会话 effect；句索引不订阅到 App，避免每句整树重渲染
+  const playState = usePlayerStore((s) => s.playState)
+  const rawSpeechActive = usePlayerStore((s) => s.rawSpeechActive)
+  const setTotalSentences = usePlayerStore((s) => s.setTotalSentences)
+  const setCurrentSentenceIndex = usePlayerStore((s) => s.setCurrentSentenceIndex)
+  const setCurrentChapterIndex = usePlayerStore((s) => s.setCurrentChapterIndex)
+  const setSpeed = usePlayerStore((s) => s.setSpeed)
+  const setVolume = usePlayerStore((s) => s.setVolume)
+  const setVoiceId = usePlayerStore((s) => s.setVoiceId)
 
-  const { settings, loadSettings } = useSettingsStore()
-  const { loadLogs } = useLogStore()
-  const { loadHistory } = useHistoryStore()
+  const settings = useSettingsStore((s) => s.settings)
+  const loadSettings = useSettingsStore((s) => s.loadSettings)
+  const loadLogs = useLogStore((s) => s.loadLogs)
+  const loadHistory = useHistoryStore((s) => s.loadHistory)
 
   // === 播放器沉浸模式（正文区右上 fixed 悬浮开关；开启后隐藏顶/底栏） ===
   const [playerImmersive, setPlayerImmersive] = useState(false)
@@ -116,22 +120,35 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  // === Initialize ===
+  // === Initialize：数据加载完后仍保持启动遮罩，直到首屏真正画完 ===
   useEffect(() => {
-    const init = async () => {
-      await loadSettings()
-      await loadBooks()
-      await loadLogs()
-      await loadHistory()
-
-      // Sync player store from settings
-      const s = useSettingsStore.getState().settings
-      setSpeed(s.defaultSpeed)
-      setVolume(s.defaultVolume)
-      setVoiceId(s.voiceId)
+    let cancelled = false
+    const startedAt = performance.now()
+    ;(async () => {
+      try {
+        await Promise.all([loadSettings(), loadBooks()])
+        if (cancelled) return
+        const s = useSettingsStore.getState().settings
+        setSpeed(s.defaultSpeed)
+        setVolume(s.defaultVolume)
+        setVoiceId(s.voiceId)
+        // 书架 React 渲染/虚拟列表布局可能仍卡主线程 —— 遮罩盖到绘制完成
+        await waitUntilUiSettled({ minMs: 800, frames: 4, startedAt })
+      } finally {
+        if (!cancelled) setAppBooting(false)
+      }
+    })()
+    return () => {
+      cancelled = true
     }
-    init()
-  }, [loadSettings, loadBooks, loadLogs, loadHistory, setSpeed, setVolume, setVoiceId])
+  }, [loadSettings, loadBooks, setSpeed, setVolume, setVoiceId])
+
+  // 进入历史页再加载（避免启动读 history.json）
+  useEffect(() => {
+    if (currentView === 'history') {
+      void loadHistory()
+    }
+  }, [currentView, loadHistory])
 
   // === Theme handling ===
   useEffect(() => {
@@ -376,8 +393,7 @@ export default function App() {
   // === AI 阅读模式：停止 TTS，但保留阅读位置（不 reset 到范围起点）===
   useEffect(() => {
     if (readerMode === 'ai-reading') tts.pause()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readerMode])
+  }, [readerMode, tts])
 
   // === 切到阅读器且处于 AI 阅读时，禁止残留的书籍 TTS 继续响 ===
   useEffect(() => {
@@ -385,8 +401,7 @@ export default function App() {
       const state = usePlayerStore.getState().playState
       if (state === 'playing') tts.pause()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentView, readerMode])
+  }, [currentView, readerMode, tts])
 
   // === 实时日志推送（主进程 → 渲染进程） ===
   useEffect(() => {
@@ -408,87 +423,7 @@ export default function App() {
     }
   }, [showToast])
 
-  // === Update floating ball state when player changes ===
-  useEffect(() => {
-    const book = useBookStore.getState().currentBook
-    const player = usePlayerStore.getState()
-    const bounds = useBookStore.getState().getRangeBounds()
-    const totalSentences = book?.sentences.length || 0
-    const cur = player.currentSentenceIndex
-    const windowSize = Math.max(1, bounds.end - bounds.start)
-
-    // 查找当前章节标题（chapters 全局，自洽）
-    const chapters = book?.chapters || []
-    let chapterTitle = ''
-    if (chapters.length > 0) {
-      const found = chapters.find(
-        (ch) => cur >= ch.startIndex && cur < ch.startIndex + ch.sentenceCount
-      )
-      if (found) chapterTitle = found.title
-    }
-
-    // range-aware 进度：范围激活时按窗口内相对位置计算
-    const progressPercent = sentenceRangeActive(book, bounds)
-      ? ((cur - bounds.start) / windowSize) * 100
-      : totalSentences > 0
-        ? (cur / totalSentences) * 100
-        : 0
-
-    // 构建附近句子窗口（4句：当前-1, 当前, 当前+1, 当前+2，clamp到范围边界）
-    const nearbySentences: Array<{ index: number; text: string; isCurrent: boolean }> = []
-    if (book && totalSentences > 0) {
-      const windowStart = Math.max(bounds.start, cur - 1)
-      const windowEnd = Math.min(bounds.end, cur + 3)
-      for (let i = windowStart; i < windowEnd; i++) {
-        nearbySentences.push({
-          index: i,
-          text: book.sentences[i] || '',
-          isCurrent: i === cur
-        })
-      }
-    }
-
-    const snapshot = {
-      hasContent: !!book && totalSentences > 0,
-      isPlaying: player.playState === 'playing',
-      isLoading: player.playState === 'playing' && !book?.sentences[cur],
-      error: useFloatingBallStore.getState().error,
-      bookTitle: book?.title || '',
-      chapterTitle,
-      currentSentenceText: book?.sentences[cur] || '',
-      progressPercent,
-      nearbySentences
-    }
-
-    useFloatingBallStore.getState().setSnapshot(snapshot)
-
-    window.api?.updateFloatingBallState(snapshot)
-
-    // === 同步字幕窗口 ===
-    if (shouldPublishBookPlaybackState(rawSpeechActive)) {
-      if (book && totalSentences > 0) {
-        window.api?.subtitleSendUpdate({
-          text: book.sentences[cur] || '',
-          bookTitle: book.title,
-          chapterTitle,
-          isPlaying: player.playState === 'playing',
-          hasContent: true,
-          progressPercent
-        })
-      } else {
-        window.api?.subtitleSendUpdate({
-          text: '',
-          isPlaying: false,
-          hasContent: false,
-          progressPercent: 0
-        })
-      }
-    }
-  }, [playState, rawSpeechActive, currentSentenceIndex, currentBook])
-
-  // 范围是否激活：sentences 全集长度 > 窗口大小
-  // 不直接用 bookStore.sentenceRange 是为了避免该 effect 额外订阅它造成抖动；
-  // 当 bounds 与全集不一致即视为范围生效。
+  // 范围是否激活
   function sentenceRangeActive(
     book: BookData | null,
     bounds: { start: number; end: number }
@@ -497,43 +432,171 @@ export default function App() {
     return bounds.start !== 0 || bounds.end !== book.sentences.length
   }
 
-  // === Auto-save progress on sentence change ===
+  // === 悬浮球 / 字幕 / 进度：store.subscribe，不触发 App 重渲染 ===
+  const lastIpcRef = useRef(0)
+  const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (!currentBook) return
-    const saveTimer = setTimeout(async () => {
+    const publishFloating = () => {
+      const book = useBookStore.getState().currentBook
       const player = usePlayerStore.getState()
       const bounds = useBookStore.getState().getRangeBounds()
+      const totalSentences = book?.sentences.length || 0
+      const cur = player.currentSentenceIndex
       const windowSize = Math.max(1, bounds.end - bounds.start)
-      // range-aware 进度：范围激活时按窗口内相对位置
-      const rangeActive = bounds.start !== 0 || bounds.end !== currentBook.sentences.length
-      const progressPercent = rangeActive
-        ? ((player.currentSentenceIndex - bounds.start) / windowSize) * 100
-        : currentBook.sentences.length > 0
-          ? (player.currentSentenceIndex / currentBook.sentences.length) * 100
-          : 0
-      const progress = {
-        currentSentenceIndex: player.currentSentenceIndex, // 全局索引
-        currentChapterIndex: player.currentChapterIndex,
-        progressPercent,
-        lastReadAt: new Date().toISOString()
+
+      const chapters = book?.chapters || []
+      let chapterTitle = ''
+      if (chapters.length > 0) {
+        const found = chapters.find(
+          (ch) => cur >= ch.startIndex && cur < ch.startIndex + ch.sentenceCount
+        )
+        if (found) chapterTitle = found.title
       }
-      updateBookProgress(currentBook.id, progress)
-    }, 1000)
-    return () => clearTimeout(saveTimer)
-  }, [currentSentenceIndex, currentBook, updateBookProgress])
+
+      const progressPercent = sentenceRangeActive(book, bounds)
+        ? ((cur - bounds.start) / windowSize) * 100
+        : totalSentences > 0
+          ? (cur / totalSentences) * 100
+          : 0
+
+      const nearbySentences: Array<{ index: number; text: string; isCurrent: boolean }> = []
+      if (book && totalSentences > 0) {
+        const windowStart = Math.max(bounds.start, cur - 1)
+        const windowEnd = Math.min(bounds.end, cur + 3)
+        for (let i = windowStart; i < windowEnd; i++) {
+          nearbySentences.push({
+            index: i,
+            text: book.sentences[i] || '',
+            isCurrent: i === cur
+          })
+        }
+      }
+
+      const snapshot = {
+        hasContent: !!book && totalSentences > 0,
+        isPlaying: player.playState === 'playing',
+        isLoading: player.playState === 'playing' && !book?.sentences[cur],
+        error: useFloatingBallStore.getState().error,
+        bookTitle: book?.title || '',
+        chapterTitle,
+        currentSentenceText: book?.sentences[cur] || '',
+        progressPercent,
+        nearbySentences
+      }
+
+      useFloatingBallStore.getState().setSnapshot(snapshot)
+
+      const now = Date.now()
+      if (now - lastIpcRef.current < 200) return
+      lastIpcRef.current = now
+
+      window.api?.updateFloatingBallState(snapshot)
+
+      if (shouldPublishBookPlaybackState(player.rawSpeechActive)) {
+        if (book && totalSentences > 0) {
+          window.api?.subtitleSendUpdate({
+            text: book.sentences[cur] || '',
+            bookTitle: book.title,
+            chapterTitle,
+            isPlaying: player.playState === 'playing',
+            hasContent: true,
+            progressPercent
+          })
+        } else {
+          window.api?.subtitleSendUpdate({
+            text: '',
+            isPlaying: false,
+            hasContent: false,
+            progressPercent: 0
+          })
+        }
+      }
+    }
+
+    const scheduleProgressSave = () => {
+      if (progressTimerRef.current) clearTimeout(progressTimerRef.current)
+      progressTimerRef.current = setTimeout(() => {
+        progressTimerRef.current = null
+        const book = useBookStore.getState().currentBook
+        if (!book) return
+        const player = usePlayerStore.getState()
+        const bounds = useBookStore.getState().getRangeBounds()
+        const windowSize = Math.max(1, bounds.end - bounds.start)
+        const rangeActive = bounds.start !== 0 || bounds.end !== book.sentences.length
+        const progressPercent = rangeActive
+          ? ((player.currentSentenceIndex - bounds.start) / windowSize) * 100
+          : book.sentences.length > 0
+            ? (player.currentSentenceIndex / book.sentences.length) * 100
+            : 0
+        useBookStore.getState().updateBookProgress(book.id, {
+          currentSentenceIndex: player.currentSentenceIndex,
+          currentChapterIndex: player.currentChapterIndex,
+          progressPercent,
+          lastReadAt: new Date().toISOString()
+        })
+      }, 1200)
+    }
+
+    // 立即同步一次
+    publishFloating()
+
+    const unsubPlayer = usePlayerStore.subscribe((state, prev) => {
+      if (
+        state.currentSentenceIndex === prev.currentSentenceIndex &&
+        state.playState === prev.playState &&
+        state.rawSpeechActive === prev.rawSpeechActive &&
+        state.currentChapterIndex === prev.currentChapterIndex
+      ) {
+        return
+      }
+      publishFloating()
+      if (state.currentSentenceIndex !== prev.currentSentenceIndex) {
+        scheduleProgressSave()
+      }
+    })
+    const unsubBook = useBookStore.subscribe((state, prev) => {
+      if (state.currentBook?.id !== prev.currentBook?.id) {
+        publishFloating()
+      }
+    })
+
+    return () => {
+      unsubPlayer()
+      unsubBook()
+      if (progressTimerRef.current) clearTimeout(progressTimerRef.current)
+    }
+  }, [])
+
+  // 切走页面 / 最小化前立刻落盘，避免防抖窗口内丢进度
+  // 注意：flushPersist 内部有 booksHydrated 守卫，未 loadBooks 前不会写盘
+  useEffect(() => {
+    const flush = () => {
+      void useBookStore.getState().flushPersist()
+    }
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+    window.addEventListener('beforeunload', flush)
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      window.removeEventListener('beforeunload', flush)
+      document.removeEventListener('visibilitychange', onVis)
+      // 不在 React unmount 时 flush：StrictMode/HMR 会在 books=[] 时卸载，绝不能写盘
+    }
+  }, [])
 
   // === 清洗后自动打开预选页 ===
   useEffect(() => {
     const bookId = useTextCleanStore.getState().openBookAfterApply
     if (bookId && currentView === 'shelf') {
-      const book = books.find((b) => b.id === bookId)
+      const book = useBookStore.getState().books.find((b) => b.id === bookId)
       if (book) {
         useTextCleanStore.getState().setOpenBookAfterApply(null)
         // 清洗后句数可能变化，强制弹预选页展示最新版本，不走缓存跳过
         handleOpenBook(book, { forceSelector: true })
       }
     }
-  }, [currentView, books])
+  }, [currentView, booksLength])
 
   // === History recording (session-based: record when play starts -> stops) ===
   const sessionStartRef = useRef<{
@@ -597,6 +660,18 @@ export default function App() {
     }
   }, [currentBook?.id])
 
+  // === 导入进度（主进程推送） ===
+  useEffect(() => {
+    const cleanup = window.api?.onImportProgress((data) => {
+      if (data?.detail) {
+        useBookStore.getState().setLoading(true, data.detail)
+      }
+    })
+    return () => {
+      cleanup?.()
+    }
+  }, [])
+
   // === Import file handler ===
   const handleImportFile = useCallback(
     async (filePath: string) => {
@@ -606,6 +681,7 @@ export default function App() {
           success: boolean
           book?: BookData
           error?: string
+          warning?: string
         }
 
         if (result?.success && result.book) {
@@ -631,6 +707,11 @@ export default function App() {
               }
             })
           }
+          if (result.warning) {
+            showToast('warning', result.warning)
+          } else {
+            showToast('success', `已导入《${newBook.title}》`)
+          }
         } else {
           showToast('error', result?.error || '导入失败')
         }
@@ -644,14 +725,23 @@ export default function App() {
     [setLoading, showToast]
   )
 
-  /** RangeSelector 确认后进入播放器 */
+  /** RangeSelector 确认后进入播放器（遮罩盖到阅读器首帧画完） */
   const handleChapterConfirm = useCallback(
-    (
+    async (
       book: BookData,
       range: { start: number; end: number } | null,
       activeChapters?: Chapter[],
-      recordId?: string
+      recordId?: string,
+      chapterMode?: ChapterMode,
+      options?: { skipLoading?: boolean }
     ) => {
+      const startedAt = performance.now()
+      if (!options?.skipLoading) {
+        setLoading(true, '正在进入阅读…')
+      } else {
+        setLoading(true, '正在准备阅读界面…')
+      }
+      try {
       // 选「原始版本」（recordId 为空）时，永远用导入时的真·原文，而非被覆盖过的 book.sentences
       let sentences =
         !recordId && book.originalSentences && book.originalSentences.length > 0
@@ -669,12 +759,59 @@ export default function App() {
       }
       sentences = normalizeSentences(sentences)
       chapters = normalizeChapters(chapters, sentences.length)
-      const displayBook = normalizeBookData({
-        ...book,
-        chapters,
-        sentences,
-        timeMap: recordId ? undefined : book.timeMap
-      })
+      const mode: ChapterMode =
+        chapterMode === 'merged' || chapterMode === 'original'
+          ? chapterMode
+          : book.chapterMode === 'merged'
+            ? 'merged'
+            : 'original'
+      const sourceBoundaries = resolveSourceBoundaries(book)
+
+      // 关键修复：把用户选中的章节写进书库，阅读器以后都认这套（不再只活在内存里）
+      // 仅当激活的是主文本句数与书库一致时才持久化（编辑记录/句数不一致只会话生效）
+      const canPersistChapters = !recordId && sentences.length === book.sentences.length
+      let structure = book.structure
+      let structureMeta = book.structureMeta
+      if (canPersistChapters && activeChapters) {
+        const pseudo = generatePseudoStructure(sentences, chapters)
+        structure = pseudo.structure
+        structureMeta = pseudo.structureMeta
+        const sentenceIndex = clampSentenceIndex(book.currentSentenceIndex, sentences.length)
+        const toSave = normalizeBookData(
+          {
+            ...book,
+            chapters,
+            sourceBoundaries,
+            chapterMode: mode,
+            structure,
+            structureMeta,
+            currentSentenceIndex: sentenceIndex,
+            currentChapterIndex: findChapterIndex(chapters, sentenceIndex)
+          },
+          book.structureMeta?.contentHash ? { contentHash: book.structureMeta.contentHash } : undefined
+        )
+        if (toSave) {
+          void updateBookAndPersist(toSave)
+        }
+      }
+
+      // 打开链路性能：无 recordId 时句子即导入原文，其 hash 与 book.structureMeta.contentHash 一致，
+      // 直接传入复用，跳过 normalize 内的全量 SHA-256（渲染进程纯 JS sha256，大书单次约 145ms）。
+      const displayBook = normalizeBookData(
+        {
+          ...book,
+          chapters,
+          sentences,
+          sourceBoundaries,
+          chapterMode: mode,
+          structure: canPersistChapters && activeChapters ? structure : book.structure,
+          structureMeta: canPersistChapters && activeChapters ? structureMeta : book.structureMeta,
+          timeMap: recordId ? undefined : book.timeMap
+        },
+        !recordId && book.structureMeta?.contentHash
+          ? { contentHash: book.structureMeta.contentHash }
+          : undefined
+      )
       if (!displayBook) {
         showToast('error', '所选版本没有可朗读内容')
         return
@@ -684,58 +821,70 @@ export default function App() {
         ? (normalizedRange?.start ?? 0)
         : displayBook.currentSentenceIndex
       activateReadingBook(displayBook, normalizedRange, requestedIndex, recordId || '__original__')
+      // 关键：activate 后阅读器大树渲染仍卡主线程，遮罩必须撑到 paint 完成
+      await waitUntilUiSettled({ minMs: 700, frames: 4, startedAt })
+      } finally {
+        setLoading(false)
+      }
     },
-    [activateReadingBook, showToast]
+    [activateReadingBook, setLoading, showToast, updateBookAndPersist]
   )
 
   // === Open book from shelf ===
   const handleOpenBook = useCallback(
-    (book: BookData, opts?: { forceSelector?: boolean }) => {
-      const normalized = normalizeBookData(book)
-      if (!normalized) {
-        showToast('error', '该文章没有可朗读的有效内容')
-        return
+    async (book: BookData, opts?: { forceSelector?: boolean }) => {
+      const startedAt = performance.now()
+      setLoading(true, book.sentences.length === 0 ? '正在打开书籍…' : '正在准备阅读…')
+      try {
+        let normalized: BookData | null
+        if (book.sentences.length === 0) {
+          normalized = await useBookStore.getState().loadFullBook(book.id)
+          if (!normalized) {
+            showToast('error', '加载书籍数据失败')
+            return
+          }
+        } else {
+          normalized = normalizeBookData(book, {
+            trusted: true,
+            contentHash: book.structureMeta?.contentHash
+          })
+          if (!normalized) {
+            showToast('error', '该文章没有可朗读的有效内容')
+            return
+          }
+        }
+        const pref = opts?.forceSelector
+          ? null
+          : validatePlayPref(loadPlayPref(normalized.id), normalized)
+        if (pref?.range) {
+          const recordId = pref.recordId ?? null
+          // 子流程自己关遮罩；此处保持 loading 直到进入阅读 settle
+          await handleChapterConfirm(
+            normalized,
+            pref.range,
+            recordId ? undefined : normalized.chapters,
+            recordId || undefined,
+            normalized.chapterMode
+          )
+          return
+        }
+        setRangeSelectorData({ book: normalized })
+        await waitUntilUiSettled({ minMs: 450, frames: 3, startedAt })
+      } finally {
+        // 若已进入 handleChapterConfirm，其 finally 会 setLoading(false)；
+        // 这里再清一次保证选章页路径也会关掉。
+        setLoading(false)
       }
-      // 上次的预选缓存仍有效（版本句数没变）→ 跳过预选页，按上次的选择直接进播放器
-      const pref = opts?.forceSelector ? null : validatePlayPref(loadPlayPref(normalized.id), normalized)
-      if (pref?.range) {
-        const recordId = pref.recordId ?? null
-        const record = recordId ? normalized.editHistory?.find((r) => r.id === recordId) : undefined
-        const rawSentences = record
-          ? record.sentences
-          : normalized.originalSentences?.length
-            ? normalized.originalSentences
-            : normalized.sentences
-        const base = record
-          ? buildPseudoChapters(rawSentences)
-          : normalizeChapters(normalized.chapters, normalizeSentences(rawSentences).length)
-        const activeChapters = pref.merged ? mergeSmallChapters(base) : base
-        handleChapterConfirm(normalized, pref.range, activeChapters, recordId || undefined)
-        return
-      }
-      setRangeSelectorData({ book: normalized })
     },
-    [handleChapterConfirm, showToast]
+    [handleChapterConfirm, setLoading, showToast]
   )
 
-  // === Auto-resume last reading position on startup ===
+  // === 每次启动进入书架页，不再自动恢复阅读位置 ===
   const autoResumedRef = useRef(false)
   useEffect(() => {
-    if (autoResumedRef.current || books.length === 0) return
-    const s = useSettingsStore.getState().settings
-    if (s.autoResume === false) {
-      autoResumedRef.current = true
-      return
-    }
-    // 找最近阅读且未完成的书
-    const candidate = books
-      .filter((b) => !b.isCompleted && b.progressPercent > 0 && b.lastReadAt)
-      .sort((a, b) => new Date(b.lastReadAt).getTime() - new Date(a.lastReadAt).getTime())[0]
+    if (autoResumedRef.current || booksLength === 0) return
     autoResumedRef.current = true
-    if (candidate) {
-      handleOpenBook(candidate)
-    }
-  }, [books, handleOpenBook])
+  }, [booksLength])
 
   // === Chapter/page skip (ControlBar buttons) ===
   const handleSkipChapter = useCallback(
@@ -860,21 +1009,18 @@ export default function App() {
     }
   }, [])
 
-  // === Detect if this is the floating ball window (via hash routing) ===
-  if (typeof window !== 'undefined' && window.location.hash === '#/floating') {
-    return <FloatingBallWindow />
-  }
-  // === Screenshot selection overlay window ===
-  if (typeof window !== 'undefined' && window.location.hash === '#/screenshot') {
-    return <ScreenshotOverlay />
-  }
-  // === Desktop subtitle window ===
-  if (typeof window !== 'undefined' && window.location.hash === '#/subtitle') {
-    return <SubtitleWindow />
-  }
-
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-gray-50 dark:bg-dark-bg relative">
+      <LoadingOverlay
+        visible={appBooting}
+        message="正在打开听伴…"
+        detail="加载设置与书架，并等待界面就绪"
+      />
+      <LoadingOverlay
+        visible={!appBooting && isLoading}
+        message={loadingMessage || '请稍候…'}
+        detail="正在完成解析与界面渲染，完成后即可流畅使用"
+      />
       <TitleBar
         immersive={playerImmersive && currentView === 'player'}
         onToggleImmersive={currentView === 'player' ? () => setPlayerImmersive((v) => !v) : undefined}
@@ -902,16 +1048,27 @@ export default function App() {
             <BookShelf
               onImportFile={handleImportFile}
               onOpenBook={handleOpenBook}
-              onSelectChapters={(book) => {
-                const normalized = normalizeBookData(book)
+              onSelectChapters={async (book) => {
+                let normalized = book.sentences.length > 0 ? normalizeBookData(book) : null
+                if (!normalized) {
+                  normalized = await useBookStore.getState().loadFullBook(book.id)
+                }
                 if (!normalized) {
                   showToast('error', '该文章没有可朗读的有效内容')
                   return
                 }
                 setRangeSelectorData({ book: normalized, initialPage: 1 })
               }}
-              onCleanText={(book) => {
-                const text = (book.sentences || []).join('\n')
+              onCleanText={async (book) => {
+                let fullBook = book.sentences.length > 0 ? book : null
+                if (!fullBook) {
+                  fullBook = await useBookStore.getState().loadFullBook(book.id)
+                }
+                if (!fullBook) {
+                  showToast('error', '加载书籍数据失败')
+                  return
+                }
+                const text = (fullBook.sentences || []).join('\n')
                 tts.stop()
                 useTextCleanStore.getState().setSource(text, book.id)
                 setCurrentView('textclean')
@@ -929,6 +1086,10 @@ export default function App() {
                   onStopRaw={tts.stopRaw}
                   onSeekToSentence={tts.seekTo}
                   onPlayFromSentence={tts.playFrom}
+                  onPlay={tts.play}
+                  onPause={tts.pause}
+                  onPrevSentence={tts.prevSentence}
+                  onNextSentence={tts.nextSentence}
                   onReselectRange={() => {
                     const active = useBookStore.getState().currentBook
                     if (active) setRangeSelectorData({ book: active, initialPage: 1 })
@@ -937,7 +1098,7 @@ export default function App() {
                     const active = useBookStore.getState().currentBook
                     if (!active) return
                     const base = useBookStore.getState().books.find((book) => book.id === active.id)
-                    if (base) handleChapterConfirm(base, null, undefined, recordId)
+                    if (base) void handleChapterConfirm(base, null, undefined, recordId)
                   }}
                 />
               </div>
@@ -949,7 +1110,7 @@ export default function App() {
                     const active = useBookStore.getState().currentBook
                     if (!active) return
                     const base = useBookStore.getState().books.find((book) => book.id === active.id)
-                    if (base) handleChapterConfirm(base, null, undefined, recordId)
+                    if (base) void handleChapterConfirm(base, null, undefined, recordId)
                   }}
                   onReloadBook={(book) => activateReadingBook(book)}
                   onReselectRange={(initialPage) => {
@@ -983,19 +1144,6 @@ export default function App() {
                 </div>
               )}
 
-              {shouldShowAiPlaybackCapsule(readerMode) && (
-                <AiPlaybackCapsule
-                  playState={playState}
-                  currentSentencePreview={
-                    currentBook?.sentences[currentSentenceIndex]?.trim() ||
-                    '点击正文句子设定起点，再按播放'
-                  }
-                  onPlay={tts.play}
-                  onPause={tts.pause}
-                  onPrevSentence={tts.prevSentence}
-                  onNextSentence={tts.nextSentence}
-                />
-              )}
             </div>
 
           {currentView === 'bookmarks' && (
@@ -1020,9 +1168,9 @@ export default function App() {
             <TextCleanerView
               showToast={showToast}
               onBackToShelf={() => setCurrentView('shelf')}
-              onOpenVersion={(book, recordId) =>
-                handleChapterConfirm(book, null, undefined, recordId)
-              }
+              onOpenVersion={(book, recordId) => {
+                void handleChapterConfirm(book, null, undefined, recordId)
+              }}
             />
           )}
         </div>
@@ -1038,6 +1186,8 @@ export default function App() {
         <RangeSelector
           bookId={rangeSelectorData.book.id}
           chapters={rangeSelectorData.book.chapters}
+          sourceBoundaries={rangeSelectorData.book.sourceBoundaries}
+          chapterMode={rangeSelectorData.book.chapterMode}
           editHistory={rangeSelectorData.book.editHistory}
           sentenceCount={rangeSelectorData.book.sentences.length}
           originalSentences={rangeSelectorData.book.originalSentences}
@@ -1045,10 +1195,10 @@ export default function App() {
           onCancel={() => {
             setRangeSelectorData(null)
           }}
-          onConfirm={(range, activeChapters, recordId) => {
+          onConfirm={(range, activeChapters, recordId, chapterMode) => {
             const book = rangeSelectorData.book
             setRangeSelectorData(null)
-            handleChapterConfirm(book, range, activeChapters, recordId)
+            void handleChapterConfirm(book, range, activeChapters, recordId, chapterMode)
           }}
         />
       )}

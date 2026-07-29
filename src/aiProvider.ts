@@ -88,7 +88,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   }
 ]
 
-/** 构建联网搜索 tools 参数——仅智谱支持原生 web_search */
+/** @deprecated 请用 src/webSearch.ts 的 buildWebSearchTools(settings, engine) */
 export function buildWebSearchTools(
   config: AiLlmSettings & { provider?: AiProvider }
 ): unknown[] | undefined {
@@ -96,6 +96,5 @@ export function buildWebSearchTools(
   if (provider === 'zhipu') {
     return [{ type: 'web_search', web_search: { search_engine: 'search-pro' } }]
   }
-  // 其他提供商暂不支持内置联网搜索 tool
   return undefined
 }

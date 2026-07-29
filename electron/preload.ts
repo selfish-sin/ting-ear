@@ -8,13 +8,28 @@ const api = {
   selectFile: () => ipcRenderer.invoke('file:select'),
   importFile: (filePath: string) => ipcRenderer.invoke('file:import', filePath),
   saveProgress: (data: unknown) => ipcRenderer.invoke('file:saveProgress', data),
+  /** 仅写 progress.json（轻量字段），高频进度用此接口，避免整本过 IPC */
+  saveProgressOnly: (data: unknown) => ipcRenderer.invoke('file:saveProgressOnly', data),
   loadProgress: () => ipcRenderer.invoke('file:loadProgress'),
+  loadShelf: () => ipcRenderer.invoke('file:loadShelf'),
+  loadBookData: (bookId: string) => ipcRenderer.invoke('file:loadBookData', bookId),
   loadAlbums: () => ipcRenderer.invoke('album:load'),
   saveAlbums: (albums: unknown) => ipcRenderer.invoke('album:save', albums),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('file:saveSettings', settings),
   loadSettings: () => ipcRenderer.invoke('file:loadSettings'),
+  exportSettings: () => ipcRenderer.invoke('settings:export'),
+  importSettings: () => ipcRenderer.invoke('settings:import'),
+  onImportProgress: (callback: (data: { filePath: string; phase: string; detail?: string; format?: string }) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: { filePath: string; phase: string; detail?: string; format?: string }) =>
+      callback(data)
+    ipcRenderer.on('file:import-progress', handler)
+    return () => ipcRenderer.removeListener('file:import-progress', handler)
+  },
   deleteBook: (bookId: string) => ipcRenderer.invoke('file:deleteBook', bookId),
   reprocessBook: (bookId: string) => ipcRenderer.invoke('book:reprocess', bookId),
+  reparseBook: (bookId: string, options?: { mode?: 'original' | 'merged' }) =>
+    ipcRenderer.invoke('book:reparse', bookId, options),
+  migrateAllChapters: () => ipcRenderer.invoke('book:migrate-all-chapters'),
   exportBookmarks: (bookId: string) => ipcRenderer.invoke('file:exportBookmarks', bookId),
 
   // === Cover operations ===
@@ -74,14 +89,27 @@ const api = {
   aiConvCreate: (bookId: string, title?: string) => ipcRenderer.invoke('ai:conv:create', bookId, title),
   aiConvSave: (bookId: string, convId: string, messages: unknown[]) => ipcRenderer.invoke('ai:conv:save', bookId, convId, messages),
   aiConvDelete: (bookId: string, convId: string) => ipcRenderer.invoke('ai:conv:delete', bookId, convId),
+  aiConvRename: (bookId: string, convId: string, title: string) =>
+    ipcRenderer.invoke('ai:conv:rename', bookId, convId, title),
+  aiConvSetActive: (bookId: string, convId: string) =>
+    ipcRenderer.invoke('ai:conv:set-active', bookId, convId),
   aiNmemStatus: (force = false) => ipcRenderer.invoke('ai:nmem:status', force),
+  aiNmemBookStatus: (bookId: string) => ipcRenderer.invoke('ai:nmem:book-status', bookId),
   aiNmemIngest: (book: unknown) => ipcRenderer.invoke('ai:nmem:ingest', book),
   aiNmemSyncAll: (force = false) => ipcRenderer.invoke('ai:nmem:sync-all', force),
+  aiNmemDedupe: () => ipcRenderer.invoke('ai:nmem:dedupe'),
   aiListModels: (config: unknown) => ipcRenderer.invoke('ai:models:list', config),
   aiTestModel: (config: unknown) => ipcRenderer.invoke('ai:model:test', config),
   aiOutlineGenerate: (request: unknown) => ipcRenderer.invoke('ai:outline:generate', request),
   aiOutlineGet: (request: unknown) => ipcRenderer.invoke('ai:outline:get', request),
   aiOutlineUpdate: (record: unknown) => ipcRenderer.invoke('ai:outline:update', record),
+  aiOutlineRegenerateAll: (payload?: { force?: boolean }) => ipcRenderer.invoke('ai:outline:regenerate-all', payload),
+  aiOutlineCancelBatch: () => ipcRenderer.invoke('ai:outline:cancel-batch'),
+  onOutlineBatchProgress: (callback: (progress: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress)
+    ipcRenderer.on('ai:outline:batch-progress', handler)
+    return () => { ipcRenderer.removeListener('ai:outline:batch-progress', handler) }
+  },
   onAiChatChunk: (callback: (event: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
     ipcRenderer.on('ai:chat:chunk', handler)

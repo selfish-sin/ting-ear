@@ -1,12 +1,34 @@
-import { app, shell, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, protocol, net } from 'electron'
 import { join } from 'path'
+import { existsSync } from 'fs'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+
+// 开发模式下开启远程调试，便于性能排查（生产环境无 effect）
+if (is.dev) {
+  app.commandLine.appendSwitch('remote-debugging-port', '9222')
+}
+
+// 封面自定义协议：渲染层用 ting-cover://x/{bookId} 直接读盘，避免启动时把 PNG 全转 base64 过 IPC
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'ting-cover',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      bypassCSP: true,
+      stream: true,
+      corsEnabled: true
+    }
+  }
+])
 
 // Custom flag on the app instance to track quit intent
 interface AppWithQuitFlag {
   isQuitting?: boolean
 }
-import { registerFileHandlers, setCustomDataDir } from './ipc/fileHandlers'
+import { registerFileHandlers, setCustomDataDir, flushLibraryProgressOnQuit, getDataDir } from './ipc/fileHandlers'
 import { registerTtsHandlers } from './ipc/ttsHandlers'
 import { registerWindowHandlers } from './ipc/windowHandlers'
 import { registerBookmarkHandlers } from './ipc/bookmarkHandlers'
@@ -23,6 +45,7 @@ import { registerOcrHandlers, preheatOcr } from './ipc/ocrHandlers'
 import { registerTextCleanHandlers } from './ipc/textCleanHandlers'
 import { registerSubtitleHandlers } from './ipc/subtitleHandlers'
 import { SHORTCUT_ACTION_LIST, normalizeShortcuts } from '../src/shortcuts'
+import { safeOpenExternal } from './utils/safeOpenExternal'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -35,6 +58,8 @@ function createWindow(): BrowserWindow {
     ? join(__dirname, '../../icon.ico')
     : join(process.resourcesPath, 'icon.ico')
 
+  const preferAlwaysOnTop = settingsService?.get().windowAlwaysOnTop ?? false
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -44,7 +69,7 @@ function createWindow(): BrowserWindow {
     frame: false,
     titleBarStyle: 'hidden',
     transparent: false,
-    alwaysOnTop: true,
+    alwaysOnTop: preferAlwaysOnTop,
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
@@ -52,7 +77,9 @@ function createWindow(): BrowserWindow {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: true
+      webSecurity: true,
+      spellcheck: false,
+      backgroundThrottling: true
     }
   })
 
@@ -74,7 +101,7 @@ function createWindow(): BrowserWindow {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    void safeOpenExternal(details.url)
     return { action: 'deny' }
   })
   mainWindow.webContents.on('will-navigate', (event, url) => {
@@ -206,7 +233,7 @@ app.whenReady().then(async () => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // Initialize services
+  // Initialize services（先加载 settings，再 createWindow，以便 alwaysOnTop 默认值生效）
   logService = new LogService()
   settingsService = new SettingsService()
   await settingsService.load()
@@ -220,11 +247,36 @@ app.whenReady().then(async () => {
     logService.info('System', `使用自定义数据目录: ${customDir}`)
   }
 
-  logService.info('System', `听伴 v3.0 启动 | Electron ${process.versions.electron} | Node ${process.versions.node}`)
+  // 封面协议：ting-cover://x/{bookId} → covers/{bookId}.png（零 base64、零 IPC）
+  protocol.handle('ting-cover', (request) => {
+    try {
+      const u = new URL(request.url)
+      // pathname 形如 /{bookId} 或 /{bookId}.png
+      const raw = decodeURIComponent(u.pathname.replace(/^\//, '')).replace(/\.png$/i, '')
+      const bookId = raw || u.hostname
+      if (!bookId || bookId === 'x') {
+        return new Response('missing id', { status: 400 })
+      }
+      const coverPath = join(getDataDir(), 'covers', `${bookId}.png`)
+      if (!existsSync(coverPath)) {
+        return new Response('not found', { status: 404 })
+      }
+      return net.fetch(pathToFileURL(coverPath).href)
+    } catch {
+      return new Response('error', { status: 500 })
+    }
+  })
+
+  logService.info('System', `听伴 v1.0 启动 | Electron ${process.versions.electron} | Node ${process.versions.node}`)
 
   createWindow()
   LogService.setMainWindow(mainWindow)  // 实时推送日志到渲染进程
   createTray()
+
+  // 退出前强制刷日志，避免批量缓冲丢失
+  app.on('before-quit', () => {
+    logService?.flushSync()
+  })
 
   // Create EngineManager synchronously first so all IPC handlers can reference it,
   // then register ALL handlers before the async init — this ensures window controls
@@ -242,22 +294,33 @@ app.whenReady().then(async () => {
   registerTextCleanHandlers(settingsService, logService)
   registerSubtitleHandlers(logService)
 
-  // NOW initialize the TTS engine (async — does not block IPC handler registration)
+  // NOW initialize the TTS engine — 不阻塞启动，后台并行初始化
   const settings = settingsService.get()
-  try {
-    await engineManager.init(settings.qwenApiKey, settings.qwenEndpoint)
-    console.info('[Main] EngineManager initialized successfully')
-  } catch (e) {
-    console.error('[Main] EngineManager init failed:', e)
-    logService.error('System', `TTS 引擎初始化失败: ${e instanceof Error ? e.message : String(e)}`)
-    // 即使 TTS 失败也要继续启动 — 用户还能用其他功能
-  }
+  void engineManager!.init(settings.qwenApiKey, settings.qwenEndpoint)
+    .then(() => {
+      console.info('[Main] EngineManager initialized successfully')
+      engineManager!.setActiveEngine(settings.ttsEngine || 'edge')
+      // 缓存清理延后到空闲，避免启动时扫盘抢 I/O
+      setTimeout(() => {
+        try {
+          QwenAdapter.cleanupCache()
+          EdgeAdapter.cleanupCache()
+        } catch {
+          /* ignore */
+        }
+      }, 15000)
+    })
+    .catch((e) => {
+      console.error('[Main] EngineManager init failed:', e)
+      logService!.error('System', `TTS 引擎初始化失败: ${e instanceof Error ? e.message : String(e)}`)
+    })
   // 活动引擎以用户设置为准（默认 'edge' 免费可用；用户在设置里可改）
-  engineManager.setActiveEngine(settings.ttsEngine || 'edge')
-  QwenAdapter.cleanupCache()  // 清除超过 10 天的音频缓存
-  EdgeAdapter.cleanupCache()
+  // engineManager.setActiveEngine 已移到 init 回调中
 
-  preheatOcr(logService)  // 后台异步预热，不阻塞启动
+  // OCR 预热延后：Python 冷启动很重，用户截图前再热也能接受
+  setTimeout(() => {
+    if (logService) preheatOcr(logService)
+  }, 8000)
 
   // 运行时更新自定义全局快捷键（来自设置页）
   ipcMain.on('shortcuts:update', (_event, shortcuts: Record<string, string>) => {
@@ -284,6 +347,7 @@ app.on('before-quit', () => {
 })
 
 app.on('will-quit', () => {
+  flushLibraryProgressOnQuit()
   globalShortcut.unregisterAll()
 })
 

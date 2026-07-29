@@ -44,7 +44,7 @@ export function contentHash(text: string): string {
 /** 稳定源名称：同一本书重复提交时尽量命中 MDM 去重 */
 export function bookSourceName(book: BookData): string {
   const title = (book.title || '未命名书籍').trim() || '未命名书籍'
-  return `[bookId=${book.id}] ${title}`
+  return `${title} [bookId=${book.id}]`
 }
 
 /** 整本书正文（不再按章/页拆分） */

@@ -26,9 +26,17 @@ function formatTime(totalMs: number): string {
 
 /** 紧凑进度条：少占高度，窄屏不挤 */
 export default function ProgressBar({ onSeek, onPause, onResume }: ProgressBarProps) {
-  const { currentSentenceIndex, playState, timeMap, speed, currentChapterIndex, pageIndex, pageSize } =
-    usePlayerStore()
-  const { sentences, chapters, currentBook, sentenceRange } = useBookStore()
+  const currentSentenceIndex = usePlayerStore((s) => s.currentSentenceIndex)
+  const playState = usePlayerStore((s) => s.playState)
+  const timeMap = usePlayerStore((s) => s.timeMap)
+  const speed = usePlayerStore((s) => s.speed)
+  const currentChapterIndex = usePlayerStore((s) => s.currentChapterIndex)
+  const pageIndex = usePlayerStore((s) => s.pageIndex)
+  const pageSize = usePlayerStore((s) => s.pageSize)
+  const sentences = useBookStore((s) => s.sentences)
+  const chapters = useBookStore((s) => s.chapters)
+  const currentBook = useBookStore((s) => s.currentBook)
+  const sentenceRange = useBookStore((s) => s.sentenceRange)
 
   const hasChapters = (currentBook?.chapters?.length || 0) > 1
 

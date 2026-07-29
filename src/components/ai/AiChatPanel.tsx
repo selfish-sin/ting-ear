@@ -19,12 +19,20 @@ interface AiChatPanelContentProps {
   onClear: () => Promise<void>
   nmemStatus?: 'checking' | 'online' | 'offline'
   nmemError?: string | null
+  bookIngestStatus?: import('../../global').AiBookIngestStatus['status'] | 'checking'
+  bookIngestError?: string | null
   onRetryNmem?: () => Promise<void>
+  onSyncBookToNmem?: () => Promise<boolean>
   onNavigateSource?: (source: AiSourceRef) => void
   quotes?: string[]
   onRemoveQuote?: (index: number) => void
   onSpeakRaw?: (text: string) => Promise<void>
   onStopRaw?: () => void
+  onCopyMessage?: (messageId: string) => Promise<boolean>
+  onDeleteMessage?: (messageId: string) => Promise<void>
+  onEditMessage?: (messageId: string, newText: string) => Promise<boolean>
+  onRegenerate?: (messageId: string) => Promise<boolean>
+  onRetryMessage?: (messageId: string) => Promise<boolean>
   focusRequestId?: number | null
   onFocusRequestConsumed?: (requestId: number) => void
 }
@@ -130,12 +138,20 @@ export function AiChatPanelContent({
   onClear,
   nmemStatus = 'online',
   nmemError = null,
+  bookIngestStatus = 'none',
+  bookIngestError = null,
   onRetryNmem = async () => undefined,
+  onSyncBookToNmem,
   onNavigateSource = () => undefined,
   quotes = [],
   onRemoveQuote = () => undefined,
   onSpeakRaw,
   onStopRaw,
+  onCopyMessage,
+  onDeleteMessage,
+  onEditMessage,
+  onRegenerate,
+  onRetryMessage,
   focusRequestId = null,
   onFocusRequestConsumed = () => undefined
 }: AiChatPanelContentProps) {
@@ -245,13 +261,25 @@ export function AiChatPanelContent({
               请先在设置中配置 AI
             </div>
           )}
-          <NmemBanner status={nmemStatus} error={nmemError} onRetry={onRetryNmem} />
+          <NmemBanner
+            status={nmemStatus}
+            error={nmemError}
+            bookIngestStatus={bookIngestStatus}
+            bookIngestError={bookIngestError}
+            onRetry={onRetryNmem}
+            onSyncBook={onSyncBookToNmem}
+          />
           <ChatMessages
             messages={messages}
             isStreaming={isStreaming}
             onNavigateSource={onNavigateSource}
             onSpeakRaw={onSpeakRaw}
             onStopRaw={onStopRaw}
+            onCopy={onCopyMessage}
+            onDelete={onDeleteMessage}
+            onEdit={onEditMessage}
+            onRegenerate={onRegenerate}
+            onRetry={onRetryMessage}
           />
           <ChatInput
             isStreaming={isStreaming}
@@ -282,8 +310,11 @@ export default function AiChatPanel({
     isStreaming,
     nmemStatus,
     nmemError,
+    bookIngestStatus,
+    bookIngestError,
     initialize,
     refreshNmemStatus,
+    syncCurrentBookToNmem,
     sendMessage,
     cancelStream,
     clearHistory,
@@ -291,7 +322,12 @@ export default function AiChatPanel({
     quotes,
     removeQuote,
     pendingChatFocusRequestId,
-    consumeChatFocusRequest
+    consumeChatFocusRequest,
+    copyMessage,
+    deleteMessage,
+    editAndResend,
+    regenerate,
+    retryError
   } = useAiStore()
 
   useEffect(() => {
@@ -309,7 +345,16 @@ export default function AiChatPanel({
     return () => window.clearInterval(interval)
   }, [aiSettings?.nmem.baseUrl, aiSettings?.nmem.statusCacheMs, refreshNmemStatus])
 
-  const isConfigured = Boolean(aiSettings?.llm.baseUrl.trim() && aiSettings.llm.model.trim())
+  // 与后端 resolveEngine 一致：空 baseUrl 的引擎不算已配置
+  const assigned =
+    aiSettings?.engines?.find((e) => e.id === aiSettings.taskAssignment?.chat) ||
+    aiSettings?.engines?.[0]
+  const chatEngine =
+    assigned?.baseUrl?.trim() && assigned?.model?.trim()
+      ? assigned
+      : aiSettings?.engines?.find((e) => e.baseUrl?.trim() && e.model?.trim()) ||
+        aiSettings?.llm
+  const isConfigured = Boolean(chatEngine?.baseUrl?.trim() && chatEngine?.model?.trim())
 
   const navigateSource = (source: AiSourceRef) => {
     if (!currentBook) return
@@ -330,7 +375,10 @@ export default function AiChatPanel({
       onCancel={cancelStream}
       nmemStatus={nmemStatus}
       nmemError={nmemError}
+      bookIngestStatus={bookIngestStatus}
+      bookIngestError={bookIngestError}
       onRetryNmem={() => refreshNmemStatus(true)}
+      onSyncBookToNmem={syncCurrentBookToNmem}
       onNavigateSource={navigateSource}
       onClear={async () => {
         if (window.confirm('确定清空当前书籍的 AI 对话历史？')) await clearHistory()
@@ -339,6 +387,11 @@ export default function AiChatPanel({
       onRemoveQuote={removeQuote}
       onSpeakRaw={onSpeakRaw}
       onStopRaw={onStopRaw}
+      onCopyMessage={copyMessage}
+      onDeleteMessage={deleteMessage}
+      onEditMessage={editAndResend}
+      onRegenerate={regenerate}
+      onRetryMessage={retryError}
       focusRequestId={pendingChatFocusRequestId}
       onFocusRequestConsumed={consumeChatFocusRequest}
     />

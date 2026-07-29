@@ -35,8 +35,9 @@ const fakeApi: Partial<Api> = {
   aiHistoryGet: async () => {
     if (historyLoadError) throw historyLoadError
     return [
-      { role: 'user', content: '历史问题' },
+      { id: 'u-hist', role: 'user', content: '历史问题' },
       {
+        id: 'a-hist',
         role: 'assistant',
         content: '历史回答 [1]',
         sources: [persistedSource],
@@ -44,6 +45,38 @@ const fakeApi: Partial<Api> = {
       }
     ] as never
   },
+  aiConvList: async () => {
+    if (historyLoadError) throw historyLoadError
+    return {
+      activeId: 'conv-1',
+      conversations: [
+        { id: 'conv-1', title: '历史对话', createdAt: '2020-01-01T00:00:00.000Z', messageCount: 2 }
+      ]
+    }
+  },
+  aiConvLoad: async () => {
+    if (historyLoadError) throw historyLoadError
+    return [
+      { id: 'u-hist', role: 'user', content: '历史问题' },
+      {
+        id: 'a-hist',
+        role: 'assistant',
+        content: '历史回答 [1]',
+        sources: [persistedSource],
+        retrievalStatus: 'done'
+      }
+    ] as never
+  },
+  aiConvCreate: async () => ({
+    id: 'conv-new',
+    title: '新对话',
+    createdAt: new Date().toISOString(),
+    messages: []
+  }),
+  aiConvSave: async () => ({ success: true }),
+  aiConvDelete: async () => ({ success: true }),
+  aiConvRename: async () => ({ success: true }),
+  aiConvSetActive: async () => ({ success: true }),
   aiChat: async (requestId, payload) => {
     sentRequest = { requestId, payload }
     if (pendingChatResponse) {
@@ -61,6 +94,7 @@ const fakeApi: Partial<Api> = {
   },
   aiHistoryClear: async () => ({ success: true }),
   aiNmemStatus: async () => ({ status: 'online', checkedAt: new Date().toISOString() }),
+  aiNmemBookStatus: async () => ({ status: 'searchable' as const }),
   onAiChatChunk: (callback) => {
     chunkListener = callback
     return () => {
@@ -105,6 +139,7 @@ async function run(): Promise<void> {
   )
   assert.equal(useAiStore.getState().messages[1].sources?.[0].memoryId, 'persisted-memory')
   assert.equal(useAiStore.getState().messages[1].retrievalStatus, 'done')
+  assert.equal(useAiStore.getState().activeConvId, 'conv-1')
   console.log('  ok loads persisted history for the current book')
 
   historyLoadError = new Error('磁盘不可读')
@@ -175,7 +210,9 @@ async function run(): Promise<void> {
   assert.equal(useAiStore.getState().isStreaming, true)
   assert.equal(useAiStore.getState().nmemStatus, 'online')
   const sentPayload = sentRequest?.payload as AiChatPayload
+  assert.equal(sentPayload.conversationId, 'conv-1')
   assert.equal(sentPayload.currentChapterIndex, 1)
+  assert.equal(sentPayload.injectFullText, true)
   assert.deepEqual(sentPayload.quotes, [
     '第一条引用',
     '第三条引用',
@@ -214,6 +251,17 @@ async function run(): Promise<void> {
   assert.equal(useAiStore.getState().isStreaming, false)
   assert.equal(useAiStore.getState().messages.at(-1)?.status, 'complete')
   console.log('  ok appends ordered chunks to the pending assistant message')
+
+  // 乱序 chunk 应缓冲重组，而不是静默丢弃
+  assert.equal(await useAiStore.getState().sendMessage('乱序测试'), true)
+  const reorderId = useAiStore.getState().currentRequestId
+  assert.ok(reorderId)
+  chunkListener?.({ requestId: reorderId, seq: 1, text: 'B' })
+  chunkListener?.({ requestId: reorderId, seq: 0, text: 'A' })
+  chunkListener?.({ requestId: reorderId, seq: 2, text: 'C' })
+  assert.equal(useAiStore.getState().messages.at(-1)?.parts[0].text, 'ABC')
+  doneListener?.({ requestId: reorderId, cancelled: false })
+  console.log('  ok reorders out-of-sequence chunks instead of dropping them')
 
   useAiStore.getState().addQuote('失败后保留的引用')
   chatShouldSucceed = false
@@ -285,7 +333,7 @@ async function run(): Promise<void> {
   console.log('  ok keeps a chat focus request pending until the matching panel consumes it')
 
   useAiStore.getState().dispose()
-  console.log('AI store result: 11 passed')
+  console.log('AI store result: 12 passed')
 }
 
 void run()

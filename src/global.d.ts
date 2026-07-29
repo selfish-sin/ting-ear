@@ -32,11 +32,35 @@ export interface Api {
   selectFile: () => Promise<string[] | null>
   importFile: (filePath: string) => Promise<ImportResult>
   saveProgress: (data: BookData[]) => Promise<{ success: boolean; error?: string }>
+  /** 仅写进度（轻量字段数组），高频路径用，避免整本 sentences 过 IPC */
+  saveProgressOnly: (
+    data: Array<{
+      id: string
+      currentSentenceIndex?: number
+      currentChapterIndex?: number
+      progressPercent?: number
+      lastReadAt?: string
+      isCompleted?: boolean
+      timeMap?: number[]
+    }>
+  ) => Promise<{ success: boolean; error?: string }>
   loadProgress: () => Promise<BookData[] | null>
+  /** 轻量书架：仅 index+progress，无全文 */
+  loadShelf: () => Promise<ShelfBook[] | null>
+  /** 按需加载单书完整数据 */
+  loadBookData: (bookId: string) => Promise<BookData | null>
   loadAlbums: () => Promise<CustomAlbum[] | null>
   saveAlbums: (albums: CustomAlbum[]) => Promise<{ success: boolean; error?: string }>
-  saveSettings: (settings: AppSettings) => Promise<void>
+  saveSettings: (settings: AppSettings) => Promise<{ success: boolean; error?: string } | void>
   loadSettings: () => Promise<AppSettings | null>
+  /** 导出设置 JSON（含 API Key，用户自行保管） */
+  exportSettings: () => Promise<{ success: boolean; filePath?: string; error?: string }>
+  /** 从 JSON 导入设置（不切换 dataDir） */
+  importSettings: () => Promise<{ success: boolean; error?: string }>
+  /** 导入进度（解析/结构化/写盘） */
+  onImportProgress: (
+    callback: (data: { filePath: string; phase: string; detail?: string; format?: string }) => void
+  ) => () => void
   ttsSynthesize: (
     text: string,
     voice: string,
@@ -92,12 +116,19 @@ export interface Api {
   aiCancel: (requestId: string) => Promise<{ success: boolean }>
   aiHistoryGet: (bookId: string) => Promise<AiHistoryMessage[]>
   aiHistoryClear: (bookId?: string) => Promise<{ success: boolean; error?: string }>
-  aiConvList: (bookId: string) => Promise<Array<{ id: string; title: string; createdAt: string; messageCount: number }>>
+  aiConvList: (bookId: string) => Promise<{
+    activeId: string | null
+    conversations: Array<{ id: string; title: string; createdAt: string; messageCount: number }>
+  }>
   aiConvLoad: (bookId: string, convId: string) => Promise<AiHistoryMessage[]>
   aiConvCreate: (bookId: string, title?: string) => Promise<AiConversation>
   aiConvSave: (bookId: string, convId: string, messages: AiHistoryMessage[]) => Promise<{ success: boolean }>
   aiConvDelete: (bookId: string, convId: string) => Promise<{ success: boolean }>
+  aiConvRename: (bookId: string, convId: string, title: string) => Promise<{ success: boolean; error?: string }>
+  aiConvSetActive: (bookId: string, convId: string) => Promise<{ success: boolean }>
   aiNmemStatus: (force?: boolean) => Promise<AiNmemStatus>
+  /** 本书知识库同步状态（本地记录） */
+  aiNmemBookStatus: (bookId: string) => Promise<AiBookIngestStatus>
   aiNmemIngest: (book: BookData) => Promise<{
     success: boolean
     ingested?: number
@@ -110,6 +141,13 @@ export interface Api {
     synced?: number
     failed?: number
     skipped?: number
+    error?: string
+  }>
+  aiNmemDedupe: () => Promise<{
+    success: boolean
+    removed?: number
+    kept?: number
+    groups?: number
     error?: string
   }>
   aiListModels: (config: AiLlmSettings) => Promise<{
@@ -137,6 +175,16 @@ export interface Api {
     record?: ChapterOutlineRecord
     error?: string
   }>
+  /** 一键为全部书更新大纲（后台运行，通过 onOutlineBatchProgress 推送进度） */
+  aiOutlineRegenerateAll: (payload?: { force?: boolean }) => Promise<{
+    accepted: boolean
+    bookTotal?: number
+    reason?: string
+  }>
+  /** 取消正在进行的批量大纲任务 */
+  aiOutlineCancelBatch: () => Promise<{ cancelled: boolean }>
+  /** 订阅批量大纲进度；返回取消订阅函数 */
+  onOutlineBatchProgress: (callback: (progress: OutlineBatchProgress) => void) => () => void
   onAiChatChunk: (callback: (event: AiChatChunkEvent) => void) => () => void
   onAiChatSources: (callback: (event: AiChatSourcesEvent) => void) => () => void
   onAiChatDone: (callback: (event: AiChatDoneEvent) => void) => () => void
@@ -244,6 +292,22 @@ export interface Api {
     stats?: Record<string, number>
     error?: string
   }>
+  reparseBook: (
+    bookId: string,
+    options?: { mode?: 'original' | 'merged' }
+  ) => Promise<{
+    success: boolean
+    book?: BookData
+    error?: string
+  }>
+  /** 一键迁移：全部旧书按 original 模式重切入库 */
+  migrateAllChapters: () => Promise<{
+    success: boolean
+    done?: number
+    failed?: number
+    total?: number
+    error?: string
+  }>
   exportBookmarks: (bookId: string) => Promise<{ success: boolean; error?: string }>
 
   // Cover operations
@@ -323,6 +387,7 @@ export interface ChapterOutlineSection {
   originalTitle: string
   customTitle?: string
   point?: string
+  summary?: string
   startOffset: number
 }
 
@@ -344,6 +409,20 @@ export interface ChapterOutlineGenerateRequest {
   chapterKey: string
   /** true = 忽略已有缓存，强制重新生成 */
   force?: boolean
+}
+
+/** 批量大纲生成进度事件（与 electron/services/ai/outline-batch.ts 保持一致） */
+export interface OutlineBatchProgress {
+  /** 'book' = 处理中，'done' = 全部结束（含被取消） */
+  phase: 'book' | 'done'
+  bookIndex: number
+  bookTotal: number
+  bookTitle: string
+  chapterIndex: number
+  chapterTotal: number
+  succeeded: number
+  failed: number
+  skipped: number
 }
 
 export interface Sentence {
@@ -387,6 +466,35 @@ export interface StructureMeta {
   sourceFormat: string
 }
 
+/** 书架卡片展示所需的最小子集（不含 sentences/chapters/structure 等重数据） */
+export interface ShelfBook {
+  id: string
+  title: string
+  author: string
+  coverPath?: string
+  coverSource?: 'auto' | 'custom'
+  filePath: string
+  format: string
+  sentenceCount: number
+  chapterCount: number
+  addedAt: string
+  lastReadAt: string
+  progressPercent: number
+  isCompleted: boolean
+  currentSentenceIndex: number
+  currentChapterIndex: number
+}
+
+/** 预选页分章模式：原始=书签边界(+超长切段)；合并=35~400 */
+export type ChapterMode = 'original' | 'merged'
+
+/** 导入时读到的书签/目录分界点（原料，切换原始/合并时共用） */
+export interface ChapterBoundary {
+  title: string
+  sentenceIndex: number
+  depth?: number
+}
+
 export interface BookData {
   id: string
   title: string
@@ -399,7 +507,16 @@ export interface BookData {
   filePath: string
   format: string
   sentences: string[]
+  /** 句子总数（启动时从 index 读取，无需加载完整 sentences 数组） */
+  sentenceCount?: number
   chapters: Chapter[]
+  /**
+   * 书签/目录原料边界。预选页「原始/合并」都从此派生；
+   * 缺省时用当前 chapters 反推（旧书迁移）。
+   */
+  sourceBoundaries?: ChapterBoundary[]
+  /** 当前 chapters 对应的分章模式；确认阅读时写库 */
+  chapterMode?: ChapterMode
   currentChapterIndex: number
   currentSentenceIndex: number
   currentTimeOffset?: number
@@ -487,6 +604,8 @@ export interface AiPromptMessage {
 }
 
 export interface AiHistoryMessage extends AiPromptMessage {
+  /** 稳定消息 ID；旧历史可能缺失，加载时会补齐 */
+  id?: string
   sources?: AiSourceRef[]
   retrievalStatus?: 'done' | 'offline' | 'error' | 'skipped'
   retrievalError?: string
@@ -496,6 +615,7 @@ export interface AiConversation {
   id: string
   title: string
   createdAt: string
+  updatedAt?: string
   messages: AiHistoryMessage[]
 }
 
@@ -538,6 +658,11 @@ export interface AiSettings {
     enabled: boolean
     /** 联网搜索系统提示词（可在高级设置编辑） */
     prompt: string
+    /**
+     * 搜索后端：与 LLM provider 解耦。
+     * auto = 智谱引擎用原生 tool，其它仅提示；zhipu-native / none 见 webSearch 模块
+     */
+    backend?: 'auto' | 'zhipu-native' | 'none'
   }
   retrieval: {
     enabled: boolean
@@ -549,7 +674,7 @@ export interface AiSettings {
     evidencePrompt: string
     readerContextPrompt: string
     selectionPrompt: string
-    /** 会话级「当前章」注入提示词（本章 ≤ fullTextMaxChars 时每会话一次） */
+    /** 「当前章」注入提示词（本章 ≤ fullTextMaxChars 时每轮可注入） */
     fullTextInjectPrompt: string
     /** 本章注入字数上限（默认 50000，按当前章计，非全书） */
     fullTextMaxChars: number
@@ -565,12 +690,14 @@ export interface AiSettings {
 export interface AiChatPayload {
   bookId: string
   bookTitle: string
+  /** 目标会话；缺失时后端写入该书 active 会话（兼容旧调用） */
+  conversationId?: string
   messages: AiHistoryMessage[]
   autoContext?: string
   currentChapterIndex?: number
   quotes?: string[]
   /**
-   * 本轮是否注入「当前章节」正文（每会话最多一次，且本章字数 ≤ fullTextMaxChars）。
+   * 本轮是否注入「当前章节」正文（本章字数 ≤ fullTextMaxChars 时每轮可注入，保证追问仍有上下文）。
    * 注入后仍会做知识库检索。
    */
   injectFullText?: boolean
@@ -645,9 +772,22 @@ export interface AiNmemStatus {
   error?: string
 }
 
+/** 单本书在知识库中的本地同步状态 */
+export interface AiBookIngestStatus {
+  status: 'none' | 'submitting' | 'indexing' | 'searchable' | 'failed'
+  sourceId?: string
+  error?: string
+  updatedAt?: string
+}
+
 export interface AiHistoryRepository {
   load: (bookId: string) => AiHistoryMessage[] | Promise<AiHistoryMessage[]>
-  save: (bookId: string, messages: AiHistoryMessage[]) => void | Promise<void>
+  /** conversationId 指定写入会话；缺省写 active / 第一个会话 */
+  save: (
+    bookId: string,
+    messages: AiHistoryMessage[],
+    conversationId?: string
+  ) => void | Promise<void>
   clear: (bookId?: string) => void | Promise<void>
 }
 
@@ -655,6 +795,8 @@ export interface ImportResult {
   success: boolean
   book?: BookData
   error?: string
+  /** 非致命提示，如 PDF 仅文字层 */
+  warning?: string
 }
 
 export interface TTSResult {
@@ -690,6 +832,7 @@ export interface AppSettings {
   voiceId: string
   defaultSpeed: number
   defaultVolume: number
+  /** 主窗口是否置顶；默认 false，避免抢焦点 */
   windowAlwaysOnTop: boolean
   windowOpacity: number
   floatingBallEnabled: boolean

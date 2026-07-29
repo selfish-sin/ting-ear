@@ -10,7 +10,14 @@ assert.deepEqual(parseSourceMetadata('[bookId=book-1][ch=2] 第三章'), {
   chapterIndex: 2,
   chapterTitle: '第三章'
 })
+assert.deepEqual(parseSourceMetadata('测试之书 [bookId=book-1]'), {
+  bookId: 'book-1',
+  chapterIndex: -1,
+  chapterTitle: '测试之书'
+})
+// 兼容旧前缀格式
 assert.deepEqual(parseSourceMetadata('[bookId=book-1] 测试之书'), {
+
   bookId: 'book-1',
   chapterIndex: -1,
   chapterTitle: '测试之书'

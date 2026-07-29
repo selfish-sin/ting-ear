@@ -21,6 +21,7 @@ async function main(): Promise<void> {
   assert.equal(shouldShowAiPlaybackCapsule('listening'), false)
   console.log('  ok assigns one playback surface to each reader mode')
 
+  // 兼容函数仍可用；顶栏模式不再拖拽
   assert.deepEqual(
     clampPlaybackCapsulePosition(
       { x: -20, y: 900 },
@@ -29,16 +30,9 @@ async function main(): Promise<void> {
     ),
     { x: 8, y: 548 }
   )
-  assert.deepEqual(
-    clampPlaybackCapsulePosition(
-      { x: 320, y: 240 },
-      { width: 800, height: 600 },
-      { width: 150, height: 44 }
-    ),
-    { x: 320, y: 240 }
-  )
-  console.log('  ok clamps the draggable AI playback capsule inside the reader')
+  console.log('  ok keeps clamp helper for layout safety')
 
+  // 顶栏内嵌：无拖拽手柄，仍有句预览
   const capsuleMarkup = renderToStaticMarkup(
     createElement(AiPlaybackCapsule, {
       playState: 'paused',
@@ -46,13 +40,15 @@ async function main(): Promise<void> {
       onPlay: () => undefined,
       onPause: () => undefined,
       onPrevSentence: () => undefined,
-      onNextSentence: () => undefined
+      onNextSentence: () => undefined,
+      variant: 'header'
     })
   )
-  assert.match(capsuleMarkup, /data-playback-drag-handle="true"/)
+  assert.doesNotMatch(capsuleMarkup, /data-playback-drag-handle/)
+  assert.match(capsuleMarkup, /data-playback-variant="header"/)
   assert.match(capsuleMarkup, /data-playback-preview="true"/)
   assert.match(capsuleMarkup, /这是当前播放起点句子/)
-  console.log('  ok exposes a dedicated drag handle and shows play-head preview')
+  console.log('  ok mounts compact header playback controls without floating drag handle')
 
   const initialMode = useBookStore.getState().readerMode
   usePlayerStore.setState({

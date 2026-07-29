@@ -23,7 +23,7 @@ assert.deepEqual(parseOutlineSections('[{"title":"总论","startOffset":0,"point
   { title: '总论', startOffset: 0, point: '核心观点' }
 ])
 assert.deepEqual(parseOutlineSections('[{"title":"坏偏移","startOffset":-2}]'), [
-  { title: '坏偏移', startOffset: -2, point: undefined }
+  { title: '坏偏移', startOffset: -2 }
 ])
 
 // 截断 JSON：末尾对象写到一半，仍应抢救前面的完整条目

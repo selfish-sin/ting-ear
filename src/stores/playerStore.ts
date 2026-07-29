@@ -32,10 +32,13 @@ interface PlayerState {
 
   // Time map for progress bar (cumulative ms per sentence)
   timeMap: number[]
+  // Internal: rAF flush guard for timeMap → bookStore
+  _timeMapFlushScheduled: boolean
 
   // Actions
   setTimeMap: (map: number[]) => void
   updateTimeMapEntry: (index: number, durationMs: number) => void
+  _scheduleTimeMapFlush: () => void
   setPlayState: (state: PlayState) => void
   setRawSpeechActive: (active: boolean) => void
   setCurrentSentenceIndex: (index: number) => void
@@ -68,7 +71,8 @@ const initialState = {
   currentAudio: null,
   pageIndex: 0,
   pageSize: 500,
-  timeMap: []
+  timeMap: [],
+  _timeMapFlushScheduled: false
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
@@ -106,20 +110,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setTimeMap: (timeMap) => set({ timeMap }),
   updateTimeMapEntry: (index, durationMs) =>
     set((s) => {
-      const map = [...s.timeMap]
-      // 确保数组足够长
+      // 浅拷贝一次，仅修改目标槽位
+      const map = s.timeMap.slice()
       while (map.length <= index) map.push(0)
       map[index] = durationMs
-
-      // 触发保存到 BookData
-      setTimeout(() => {
-        useBookStore.getState().updateCurrentTimeMap([...map])
-      }, 0)
-
+      // rAF 批量 flush 到 bookStore，替代每句 setTimeout + 二次拷贝
+      get()._scheduleTimeMapFlush()
       return { timeMap: map }
     }),
   reset: () => set(initialState),
-  resetToQwenTTS: () => set({ useSystemTTS: false, ttsEngine: 'qwen' })
+  resetToQwenTTS: () => set({ useSystemTTS: false, ttsEngine: 'qwen' }),
+  _scheduleTimeMapFlush: () => {
+    // rAF 合并：一帧内多次 updateTimeMapEntry 只 flush 一次到 bookStore
+    if (get()._timeMapFlushScheduled) return
+    set({ _timeMapFlushScheduled: true })
+    requestAnimationFrame(() => {
+      set({ _timeMapFlushScheduled: false })
+      useBookStore.getState().updateCurrentTimeMap(get().timeMap)
+    })
+  }
 }))
 
 export function shouldPublishBookPlaybackState(rawSpeechActive: boolean): boolean {

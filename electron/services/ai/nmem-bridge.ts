@@ -270,4 +270,24 @@ export class NmemBridge {
       return null
     }
   }
+
+  /**
+   * 删除一个 source：重传前清理旧源 / 去重时删除多余副本。
+   * 失败（含 404 已不存在）返回 false，不抛错，避免阻塞主流程。
+   */
+  async deleteSource(sourceId: string, signal?: AbortSignal): Promise<boolean> {
+    if (!sourceId) return false
+    const settings = this.getSettings()
+    try {
+      const response = await this.request(
+        endpoint(settings.baseUrl, `/sources/${encodeURIComponent(sourceId)}`),
+        { method: 'DELETE' },
+        settings.searchTimeoutMs,
+        signal
+      )
+      return response.ok
+    } catch {
+      return false
+    }
+  }
 }

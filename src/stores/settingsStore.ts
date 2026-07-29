@@ -47,7 +47,7 @@ export const defaultSettings: AppSettings = {
   voiceId: 'zh-CN-XiaoxiaoNeural',
   defaultSpeed: 1.0,
   defaultVolume: 0.8,
-  windowAlwaysOnTop: true,
+  windowAlwaysOnTop: false,
   windowOpacity: 0.95,
   floatingBallEnabled: true,
   floatingBall: defaultFloatingBall,
@@ -57,7 +57,7 @@ export const defaultSettings: AppSettings = {
   shortcuts: DEFAULT_SHORTCUTS,
   dataDir: '',
   dataDirHistory: [],
-  autoResume: true,
+  autoResume: false,
   ai: mergeAiSettings()
 }
 

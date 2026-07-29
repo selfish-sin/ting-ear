@@ -10,7 +10,7 @@ import type {
 } from '../../../src/global'
 import { AiServiceError, streamChat } from './llm-caller'
 import { resolveEngine } from './ai-config'
-import { buildWebSearchTools } from '../../../src/aiProvider'
+import { buildWebSearchTools } from '../../../src/webSearch'
 import { NmemBridgeError, type NmemMemory } from './nmem-bridge'
 
 interface AiEventSender {
@@ -76,13 +76,22 @@ export function parseSourceMetadata(source: string): SourceMetadata | null {
       chapterTitle: chapterMatch[3].trim() || `第 ${Number(chapterMatch[2]) + 1} 章`
     }
   }
-  // 新版整本：`[bookId=id] 书名`（chapterIndex = -1 表示全书源）
-  const bookMatch = /^\[bookId=([^\]]+)]\s*(.*)$/.exec(text)
-  if (bookMatch) {
+  // 整本（ingest bookSourceName）：`书名 [bookId=id]`（chapterIndex = -1 表示全书源）
+  const bookSuffixMatch = /^(.*?)\s*\[bookId=([^\]]+)]\s*$/.exec(text)
+  if (bookSuffixMatch) {
     return {
-      bookId: bookMatch[1],
+      bookId: bookSuffixMatch[2],
       chapterIndex: -1,
-      chapterTitle: bookMatch[2].trim() || '全书'
+      chapterTitle: bookSuffixMatch[1].trim() || '全书'
+    }
+  }
+  // 兼容旧整本：`[bookId=id] 书名`
+  const bookPrefixMatch = /^\[bookId=([^\]]+)]\s*(.*)$/.exec(text)
+  if (bookPrefixMatch) {
+    return {
+      bookId: bookPrefixMatch[1],
+      chapterIndex: -1,
+      chapterTitle: bookPrefixMatch[2].trim() || '全书'
     }
   }
   return null
@@ -182,6 +191,8 @@ export function buildRetrievalQuery(payload: AiChatPayload): string {
     .reverse()
     .find((message) => message.role === 'user')?.content || ''
   const parts: string[] = []
+  // 书名有助于全书级问题命中正确源
+  if (payload.bookTitle?.trim()) parts.push(payload.bookTitle.trim())
   if (lastUserText.trim()) parts.push(lastUserText.trim())
   const quotes = normalizedQuotes(payload)
   if (quotes.length > 0) parts.push(quotes.join(' '))
@@ -190,12 +201,18 @@ export function buildRetrievalQuery(payload: AiChatPayload): string {
     const lines = payload.autoContext.split('\n')
     for (const line of lines) {
       const trimmed = line.trim()
-      if (trimmed.startsWith('当前句：') || trimmed.startsWith('章节：')) {
-        parts.push(trimmed.replace(/^(当前句：|章节：)/, ''))
+      if (
+        trimmed.startsWith('当前句：') ||
+        trimmed.startsWith('章节：') ||
+        trimmed.startsWith('书籍：')
+      ) {
+        parts.push(trimmed.replace(/^(当前句：|章节：|书籍：)/, ''))
       }
     }
   }
-  return [...new Set(parts)].join(' ')
+  // 去重并限制总长，避免检索 query 过长
+  const unique = [...new Set(parts.map((p) => p.trim()).filter(Boolean))]
+  return unique.join(' ').slice(0, 800)
 }
 
 function fullTextPrompt(content: string, policyPrompt: string): AiPromptMessage[] {
@@ -221,7 +238,7 @@ export function buildPromptMessages(
     .map(({ role, content }) => ({ role, content }))
   const category = classifyQuestion(settings, payload)
   const includeContext = Boolean(payload.autoContext?.trim()) && category !== 'greeting'
-  // 本章注入：与检索并存（当前章 ≤5 万字且本会话首次）
+  // 本章注入：与检索并存（当前章 ≤5 万字时可每轮注入，保证追问有正文）
   const includeFullText =
     Boolean(payload.injectFullText) &&
     Boolean(payload.fullText?.trim()) &&
@@ -278,6 +295,17 @@ export class AiService {
     let seq = 0
 
     try {
+      const chatEngine = resolveEngine(settings, 'chat')
+      if (!chatEngine.baseUrl?.trim() || !chatEngine.model?.trim()) {
+        sender.send('ai:chat:error', {
+          requestId,
+          code: 'model_error',
+          message:
+            'AI 引擎未配置完整：请打开「设置 → AI」，为对话引擎填写服务地址和模型名称（例如 DeepSeek：https://api.deepseek.com/v1 + deepseek-chat）'
+        })
+        return
+      }
+
       if (
         settings.retrieval.enabled &&
         this.dependencies.retrieve &&
@@ -320,8 +348,7 @@ export class AiService {
       }
 
       const requestMessages = buildPromptMessages(settings, payload, sources)
-      const chatEngine = resolveEngine(settings, 'chat')
-      const tools = settings.webSearch?.enabled ? buildWebSearchTools(chatEngine) : undefined
+      const tools = buildWebSearchTools(settings, chatEngine)
       for await (const text of this.stream(chatEngine, requestMessages, controller.signal, tools)) {
         if (controller.signal.aborted) break
         answer += text
@@ -329,21 +356,31 @@ export class AiService {
         seq += 1
       }
 
+      const assistantMessage: AiHistoryMessage = {
+        id: `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        role: 'assistant',
+        content: answer,
+        sources,
+        retrievalStatus
+      }
+      const completedMessages: AiHistoryMessage[] = [...recentMessages, assistantMessage]
+
+      // 停止时仍落盘：有部分回答则保存完整轮次；否则至少保留用户消息
       if (controller.signal.aborted) {
+        await this.dependencies.history.save(
+          payload.bookId,
+          answer.trim() ? completedMessages : recentMessages,
+          payload.conversationId
+        )
         sender.send('ai:chat:done', { requestId, cancelled: true })
         return
       }
 
-      const completedMessages: AiHistoryMessage[] = [
-        ...recentMessages,
-        {
-          role: 'assistant',
-          content: answer,
-          sources,
-          retrievalStatus
-        }
-      ]
-      await this.dependencies.history.save(payload.bookId, completedMessages)
+      await this.dependencies.history.save(
+        payload.bookId,
+        completedMessages,
+        payload.conversationId
+      )
       sender.send('ai:chat:done', { requestId, cancelled: false })
     } catch (error) {
       if (controller.signal.aborted || (error instanceof AiServiceError && error.code === 'cancelled')) {

@@ -1,6 +1,19 @@
 import { v4 as uuidv4 } from 'uuid'
-import type { Block, BookData, Chapter, EditRecord, StructuredChapter, StructureMeta } from '../global'
+import type {
+  Block,
+  BookData,
+  Chapter,
+  ChapterMode,
+  EditRecord,
+  StructuredChapter,
+  StructureMeta
+} from '../global'
 import { hashSentences } from './contentHash'
+import {
+  type Boundary,
+  buildChaptersByMode,
+  chaptersToBoundaries
+} from './chapterBuilder'
 
 export const BOOK_TITLE_MAX_LENGTH = 120
 export const MIN_READABLE_SENTENCE_LENGTH = 20
@@ -21,8 +34,20 @@ export function sanitizeReadableText(text: string): string {
   return text.replace(HIDDEN_CONTROL_CHARS, '')
 }
 
-export function normalizeSentences(value: unknown): string[] {
+/**
+ * @param light 信任库内已清洗数据：只剔除非字符串/空串，不做控制符清洗与正则（大书打开快一个数量级）
+ */
+export function normalizeSentences(value: unknown, light = false): string[] {
   if (!Array.isArray(value)) return []
+  if (light) {
+    // 库内 JSON 已是规范句；只去掉明显无效项
+    const out: string[] = []
+    for (let i = 0; i < value.length; i++) {
+      const s = value[i]
+      if (typeof s === 'string' && s.length > 0) out.push(s)
+    }
+    return out
+  }
   return value
     .filter((sentence): sentence is string => typeof sentence === 'string')
     .map((sentence) => sanitizeReadableText(sentence).trim())
@@ -199,78 +224,56 @@ export function chapterKey(chapter: Chapter, index: number): string {
 }
 
 export function buildPseudoChapters(sentences: string[], chunkSize = 400): Chapter[] {
-  const normalized = normalizeSentences(sentences)
-  const chapters: Chapter[] = []
-  for (let startIndex = 0; startIndex < normalized.length; startIndex += chunkSize) {
-    const sentenceCount = Math.min(chunkSize, normalized.length - startIndex)
-    chapters.push({
-      title: `段落 ${startIndex + 1}-${startIndex + sentenceCount}`,
-      startIndex,
-      sentenceCount
-    })
-  }
-  return chapters
+  // 编辑记录版本无书签：与统一算法 original/伪分章一致
+  return buildChaptersByMode(
+    normalizeSentences(sentences).length,
+    [],
+    'original'
+  ).map((c) => ({ title: c.title, startIndex: c.startIndex, sentenceCount: c.sentenceCount }))
 }
 
-/** 把相邻小章节合并为 200~500 句的组（预选页「合并」开关与自动恢复选择共用） */
+/**
+ * @deprecated 请用 buildDisplayChapters / buildChaptersByMode。
+ * 保留导出以免旧测试/调用瞬间断裂；实现已转发到统一 merged 算法。
+ */
 export function mergeSmallChapters(
   chapters: Chapter[],
-  options?: { minSentences?: number; maxSentences?: number }
+  _options?: { minSentences?: number; maxSentences?: number }
 ): Chapter[] {
-  const MIN = Math.max(1, options?.minSentences ?? 200)
-  const MAX = Math.max(MIN, options?.maxSentences ?? 500)
-  const merged: Chapter[] = []
-  let gs = 0
-  let ge = 0
-  let cs = 0
-  const mg = (s: number, e: number): Chapter => {
-    if (s === e) return { ...chapters[s] }
-    let t = 0
-    for (let i = s; i <= e; i++) t += chapters[i].sentenceCount
-    return {
-      title: `${chapters[s].title}~${chapters[e].title}`,
-      startIndex: chapters[s].startIndex,
-      sentenceCount: t
-    }
+  const total =
+    chapters.length > 0
+      ? chapters[chapters.length - 1].startIndex + chapters[chapters.length - 1].sentenceCount
+      : 0
+  return buildDisplayChapters(total, chaptersToBoundaries(chapters), 'merged')
+}
+
+/** 从书签边界（或旧章节表）按模式生成展示/入库用章节表 */
+export function buildDisplayChapters(
+  totalSentences: number,
+  boundaries: Boundary[],
+  mode: ChapterMode
+): Chapter[] {
+  return buildChaptersByMode(totalSentences, boundaries, mode).map((c) => ({
+    title: c.title,
+    startIndex: c.startIndex,
+    sentenceCount: c.sentenceCount,
+    originalTitle: c.title
+  }))
+}
+
+/** 解析本书应用的原料边界：优先 sourceBoundaries，否则从 chapters 反推 */
+export function resolveSourceBoundaries(book: {
+  sourceBoundaries?: Array<{ title: string; sentenceIndex: number; depth?: number }>
+  chapters?: Chapter[]
+}): Boundary[] {
+  if (book.sourceBoundaries && book.sourceBoundaries.length > 0) {
+    return book.sourceBoundaries.map((b) => ({
+      title: b.title,
+      sentenceIndex: b.sentenceIndex,
+      ...(b.depth !== undefined ? { depth: b.depth } : {})
+    }))
   }
-  for (let i = 0; i < chapters.length; i++) {
-    const ch = chapters[i]
-    const ns = cs + ch.sentenceCount
-    if (ns > MAX) {
-      if (cs > 0) merged.push(mg(gs, ge))
-      let r = ch.sentenceCount
-      let o = 0
-      while (r > 0) {
-        const ck = Math.min(r, MAX)
-        merged.push({
-          title: `${ch.title}(${o + 1}-${o + ck})`,
-          startIndex: ch.startIndex + o,
-          sentenceCount: ck
-        })
-        r -= ck
-        o += ck
-      }
-      gs = i + 1
-      ge = i
-      cs = 0
-    } else if (ns >= MIN) {
-      merged.push(mg(gs, i))
-      gs = i + 1
-      ge = i
-      cs = 0
-    } else {
-      ge = i
-      cs = ns
-    }
-  }
-  if (cs > 0 && gs < chapters.length) {
-    if (merged.length > 0 && cs < MIN) {
-      const l = merged[merged.length - 1]
-      l.sentenceCount += cs
-      l.title = l.title.replace(/~.+$/, '') + '~' + chapters[ge].title
-    } else merged.push(mg(gs, ge))
-  }
-  return merged
+  return chaptersToBoundaries(book.chapters || [])
 }
 
 // ===== 预选页偏好缓存（按书持久化到 localStorage）=====
@@ -381,12 +384,12 @@ export function normalizeBookTitle(value: string): string | null {
   return title
 }
 
-function normalizeEditHistory(value: unknown): EditRecord[] | undefined {
+function normalizeEditHistory(value: unknown, light = false): EditRecord[] | undefined {
   if (!Array.isArray(value)) return undefined
   const records = value.flatMap((item): EditRecord[] => {
     if (!isRecord(item) || typeof item.id !== 'string' || typeof item.type !== 'string') return []
     if (!['trim-spaces', 'ai-clean', 'manual'].includes(item.type)) return []
-    const sentences = normalizeSentences(item.sentences)
+    const sentences = normalizeSentences(item.sentences, light)
     if (sentences.length === 0) return []
     return [
       {
@@ -403,6 +406,12 @@ function normalizeEditHistory(value: unknown): EditRecord[] | undefined {
 }
 
 /** 旧书或失效结构 fallback：每章标题 + 每 5 句一个正文块。 */
+let pseudoBlockCounter = 0
+/** 轻量 blockId 生成：避免大量 uuidv4() crypto 开销 */
+function nextPseudoBlockId(): string {
+  return `pb-${Date.now().toString(36)}-${(pseudoBlockCounter++).toString(36)}`
+}
+
 export function generatePseudoStructure(
   sentences: string[],
   chapters: Chapter[]
@@ -412,7 +421,7 @@ export function generatePseudoStructure(
     const end = chapter.startIndex + chapter.sentenceCount
     const blocks: Block[] = [
       {
-        blockId: uuidv4(),
+        blockId: nextPseudoBlockId(),
         type: 'heading',
         level: 1,
         text: chapter.title,
@@ -423,7 +432,7 @@ export function generatePseudoStructure(
     for (let index = chapter.startIndex; index < end; index += blockSize) {
       const blockEnd = Math.min(index + blockSize, end)
       blocks.push({
-        blockId: uuidv4(),
+        blockId: nextPseudoBlockId(),
         type: 'paragraph',
         text: sentences.slice(index, blockEnd).join(' '),
         ttsSkip: false,
@@ -542,47 +551,189 @@ function isValidStructure(value: unknown, sentenceCount: number): value is Struc
   return chapterCursor === sentenceCount
 }
 
-export function normalizeBookData(value: unknown): BookData | null {
+/**
+ * normalizeBookData 结果缓存（按输入对象引用）。
+ * 打开书链路会对同一份数据连续 normalize 3 次（loadFullBook → handleChapterConfirm →
+ * activateReadingBook），每次都要全书 join + SHA-256 + timeMap 重建，大书打开时明显卡顿。
+ * 同一对象引用直接复用结果，消除重复全量计算。WeakMap 不防碍 GC。
+ */
+const normalizeCache = new WeakMap<object, BookData | null>()
+
+export interface NormalizeBookOptions {
+  /** 调用方已算好的 contentHash，避免大书重复 SHA-256 */
+  contentHash?: string
+  /**
+   * 信任库内已规范化数据（打开/按需加载主路径）。
+   * - 句子轻量校验，不做控制符清洗
+   * - 结构形状合法时复用 structureMeta，不重算全文 hash
+   * - 结构损坏时不强制 rebuild pseudo（避免大书卡顿），留给需要时再修
+   */
+  trusted?: boolean
+}
+
+export function normalizeBookData(
+  value: unknown,
+  opts?: NormalizeBookOptions
+): BookData | null {
+  // 已规范化对象再次传入：直接命中
+  if (isRecord(value)) {
+    const cached = normalizeCache.get(value as object)
+    if (cached !== undefined) return cached
+  }
+  const result = normalizeBookDataUncached(value, opts)
+  if (isRecord(value) && !opts?.contentHash && !opts?.trusted) {
+    normalizeCache.set(value as object, result)
+  }
+  // 输出对象映射到自身：activateReadingBook 等后续 normalize 零成本
+  if (result) normalizeCache.set(result as object, result)
+  return result
+}
+
+function isLooseStructureMeta(value: unknown): value is StructureMeta {
+  if (!isRecord(value)) return false
+  return (
+    value.schemaVersion === 1 &&
+    typeof value.contentHash === 'string' &&
+    value.contentHash.length > 0 &&
+    typeof value.sourceFormat === 'string' &&
+    value.sourceFormat.trim().length > 0
+  )
+}
+
+function normalizeBookDataUncached(
+  value: unknown,
+  opts?: NormalizeBookOptions
+): BookData | null {
   if (!isRecord(value) || typeof value.id !== 'string' || !value.id.trim()) return null
-  const sentences = normalizeSentences(value.sentences)
+  const trusted = opts?.trusted === true
+  const sentences = normalizeSentences(value.sentences, trusted)
   if (sentences.length === 0) return null
 
   const rawTitle = typeof value.title === 'string' ? sanitizeReadableText(value.title).trim() : ''
   const title = rawTitle.slice(0, BOOK_TITLE_MAX_LENGTH) || '未命名文章'
   const currentSentenceIndex = clampSentenceIndex(value.currentSentenceIndex, sentences.length)
   let chapters = normalizeChapters(value.chapters, sentences.length)
-  const originalSentences = normalizeSentences(value.originalSentences)
-  const editHistory = normalizeEditHistory(value.editHistory)
+
+  // originalSentences：同源引用或等长库数据时避免二次全量清洗
+  let originalSentences: string[]
+  if (value.originalSentences === value.sentences) {
+    originalSentences = sentences
+  } else if (
+    trusted &&
+    Array.isArray(value.originalSentences) &&
+    value.originalSentences.length === sentences.length
+  ) {
+    originalSentences = normalizeSentences(value.originalSentences, true)
+  } else {
+    originalSentences = normalizeSentences(value.originalSentences, trusted)
+  }
+  if (originalSentences.length === 0) originalSentences = sentences
+
+  const editHistory = normalizeEditHistory(value.editHistory, trusted)
   const progress = typeof value.progressPercent === 'number' ? value.progressPercent : 0
   const rawTimeMap = Array.isArray(value.timeMap) ? value.timeMap : null
 
-  // 结构数据只在版本、形状、ID、range 与当前正文全部一致时保留。
   let structure: StructuredChapter[] | undefined
   let structureMeta: StructureMeta | undefined
   const rawStructure = (value as Record<string, unknown>).structure
   const rawMeta = (value as Record<string, unknown>).structureMeta
-  const contentHash = hashSentences(sentences)
   const hasStructureData = rawStructure !== undefined || rawMeta !== undefined
-  if (isValidStructure(rawStructure, sentences.length) && isValidStructureMeta(rawMeta, contentHash)) {
-    structure = rawStructure.map((chapter, index) => ({
-      ...chapter,
-      title: chapters[index]?.customTitle || chapter.title
-    }))
-    structureMeta = rawMeta
-    chapters = structure.map((chapter, index) => {
-      const metadata = chapters[index]
-      return {
-        title: metadata?.customTitle || chapter.title,
-        startIndex: chapter.sentenceRange[0],
-        sentenceCount: chapter.sentenceRange[1] - chapter.sentenceRange[0],
-        ...(metadata?.originalTitle ? { originalTitle: metadata.originalTitle } : {}),
-        ...(metadata?.customTitle ? { customTitle: metadata.customTitle } : {})
-      }
-    })
-  } else if (hasStructureData) {
+  const structureShapeOk = isValidStructure(rawStructure, sentences.length)
+
+  // hash：优先调用方 / 库内 meta；仅在需要校验或重建时才全文哈希
+  let contentHash = opts?.contentHash
+  if (!contentHash && trusted && isLooseStructureMeta(rawMeta)) {
+    contentHash = rawMeta.contentHash
+  }
+
+  if (structureShapeOk) {
+    const metaOk = trusted
+      ? isLooseStructureMeta(rawMeta)
+      : isValidStructureMeta(
+          rawMeta,
+          contentHash ?? (contentHash = hashSentences(sentences))
+        )
+    if (metaOk) {
+      structure = rawStructure.map((chapter, index) => ({
+        ...chapter,
+        title: chapters[index]?.customTitle || chapter.title
+      }))
+      structureMeta = rawMeta as StructureMeta
+      chapters = structure.map((chapter, index) => {
+        const metadata = chapters[index]
+        return {
+          title: metadata?.customTitle || chapter.title,
+          startIndex: chapter.sentenceRange[0],
+          sentenceCount: chapter.sentenceRange[1] - chapter.sentenceRange[0],
+          ...(metadata?.originalTitle ? { originalTitle: metadata.originalTitle } : {}),
+          ...(metadata?.customTitle ? { customTitle: metadata.customTitle } : {})
+        }
+      })
+    } else if (hasStructureData && !trusted) {
+      const pseudo = generatePseudoStructure(sentences, chapters)
+      structure = pseudo.structure
+      structureMeta = pseudo.structureMeta
+    }
+    // trusted 且 meta 对不上：丢弃坏结构，不重建 pseudo（打开路径不卡）
+  } else if (hasStructureData && !trusted) {
     const pseudo = generatePseudoStructure(sentences, chapters)
     structure = pseudo.structure
     structureMeta = pseudo.structureMeta
+  }
+
+  // 无结构时补 contentHash 到 meta 仅在非 trusted 已生成 pseudo 时发生
+
+  const rawBoundaries = (value as Record<string, unknown>).sourceBoundaries
+  let sourceBoundaries: BookData['sourceBoundaries']
+  if (Array.isArray(rawBoundaries)) {
+    const list: NonNullable<BookData['sourceBoundaries']> = []
+    for (const item of rawBoundaries) {
+      if (!isRecord(item)) continue
+      const sentenceIndex = finiteInteger(item.sentenceIndex, -1)
+      if (sentenceIndex < 0 || sentenceIndex >= sentences.length) continue
+      const bTitle =
+        typeof item.title === 'string' && item.title.trim()
+          ? trusted
+            ? item.title.trim()
+            : sanitizeReadableText(item.title).trim()
+          : '未命名'
+      const depth =
+        typeof item.depth === 'number' && Number.isFinite(item.depth)
+          ? Math.trunc(item.depth)
+          : undefined
+      list.push({ title: bTitle, sentenceIndex, ...(depth !== undefined ? { depth } : {}) })
+    }
+    if (list.length > 0) sourceBoundaries = list
+  }
+
+  const rawMode = (value as Record<string, unknown>).chapterMode
+  const chapterMode: ChapterMode | undefined =
+    rawMode === 'original' || rawMode === 'merged' ? rawMode : undefined
+
+  // timeMap：长度匹配且全是有限数字时直接复用，避免大书再 map 一遍
+  let timeMap: number[] | undefined
+  if (rawTimeMap) {
+    if (rawTimeMap.length === sentences.length) {
+      let reusable = true
+      for (let i = 0; i < rawTimeMap.length; i++) {
+        const entry = rawTimeMap[i]
+        if (typeof entry !== 'number' || !Number.isFinite(entry)) {
+          reusable = false
+          break
+        }
+      }
+      timeMap = reusable
+        ? (rawTimeMap as number[])
+        : sentences.map((_, index) => {
+            const entry = rawTimeMap[index]
+            return typeof entry === 'number' && Number.isFinite(entry) ? entry : -1
+          })
+    } else {
+      timeMap = sentences.map((_, index) => {
+        const entry = rawTimeMap[index]
+        return typeof entry === 'number' && Number.isFinite(entry) ? entry : -1
+      })
+    }
   }
 
   return {
@@ -597,20 +748,17 @@ export function normalizeBookData(value: unknown): BookData | null {
     format: typeof value.format === 'string' ? value.format.toLowerCase() : 'txt',
     sentences,
     chapters,
+    ...(sourceBoundaries ? { sourceBoundaries } : {}),
+    ...(chapterMode ? { chapterMode } : {}),
     currentSentenceIndex,
     currentChapterIndex: findChapterIndex(chapters, currentSentenceIndex),
     progressPercent: Math.max(0, Math.min(Number.isFinite(progress) ? progress : 0, 100)),
     isCompleted: value.isCompleted === true,
     addedAt: typeof value.addedAt === 'string' ? value.addedAt : new Date(0).toISOString(),
     lastReadAt: typeof value.lastReadAt === 'string' ? value.lastReadAt : new Date(0).toISOString(),
-    originalSentences: originalSentences.length > 0 ? originalSentences : sentences,
+    originalSentences,
     editHistory,
-    timeMap: rawTimeMap
-      ? sentences.map((_, index) => {
-          const entry = rawTimeMap[index]
-          return typeof entry === 'number' && Number.isFinite(entry) ? entry : -1
-        })
-      : undefined,
+    timeMap,
     structure,
     structureMeta
   }

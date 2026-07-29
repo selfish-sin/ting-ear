@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict'
-import { AiServiceError, listModels, streamChat } from '../electron/services/ai/llm-caller'
+import {
+  AiServiceError,
+  listModels,
+  resolveAxiosProxyConfig,
+  sanitizeProxyUrl,
+  streamChat
+} from '../electron/services/ai/llm-caller'
 import type { AiLlmSettings, AiPromptMessage } from '../src/global'
 
 const originalFetch = globalThis.fetch
@@ -133,7 +139,32 @@ async function run(): Promise<void> {
     )
     console.log('  ok rejects streams that complete without answer content')
 
-    console.log('LLM caller result: 7 passed')
+    // 代理 env 带引号时必须能清洗，否则 axios 会 Invalid URL
+    assert.equal(sanitizeProxyUrl('"http://127.0.0.1:7897"'), 'http://127.0.0.1:7897')
+    assert.equal(sanitizeProxyUrl("'http://127.0.0.1:7897'"), 'http://127.0.0.1:7897')
+    assert.equal(sanitizeProxyUrl('http://127.0.0.1:7897'), 'http://127.0.0.1:7897')
+    assert.equal(sanitizeProxyUrl(''), null)
+    assert.equal(sanitizeProxyUrl('http://'), null)
+    assert.equal(sanitizeProxyUrl('socks5://127.0.0.1:1080'), null)
+    const prevHttps = process.env.HTTPS_PROXY
+    const prevHttp = process.env.HTTP_PROXY
+    try {
+      process.env.HTTPS_PROXY = '"http://127.0.0.1:7897"'
+      process.env.HTTP_PROXY = '"http://127.0.0.1:7897"'
+      const proxy = resolveAxiosProxyConfig()
+      assert.ok(proxy)
+      assert.equal(proxy?.host, '127.0.0.1')
+      assert.equal(proxy?.port, 7897)
+      assert.equal(proxy?.protocol, 'http')
+    } finally {
+      if (prevHttps === undefined) delete process.env.HTTPS_PROXY
+      else process.env.HTTPS_PROXY = prevHttps
+      if (prevHttp === undefined) delete process.env.HTTP_PROXY
+      else process.env.HTTP_PROXY = prevHttp
+    }
+    console.log('  ok sanitizes quoted proxy env vars for axios')
+
+    console.log('LLM caller result: 8 passed')
   } finally {
     globalThis.fetch = originalFetch
   }

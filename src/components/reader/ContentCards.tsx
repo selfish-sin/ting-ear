@@ -1,4 +1,13 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type UIEvent
+} from 'react'
 import { Copy, FileText, ListTree, MessageCircle, Play, Quote, Volume2 } from 'lucide-react'
 import type { Block, StructuredChapter } from '../../global'
 import { useAiStore } from '../../stores/aiStore'
@@ -38,6 +47,10 @@ interface ReaderContextMenuState {
   triggerElement: HTMLElement
 }
 
+/** 未测量前的估算高度（px）；虚拟列表靠它决定窗口 */
+const ESTIMATED_BLOCK_HEIGHT = 96
+const OVERSCAN = 6
+
 function normalizedHeading(value: string): string {
   return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase()
 }
@@ -69,17 +82,159 @@ export default function ContentCards({
   const requestChatFocus = useAiStore((state) => state.requestChatFocus)
   const setReaderMode = useBookStore((state) => state.setReaderMode)
   const playFrom = onPlayFromSentence || onSeekToChapter
+  // 用户手动滚动后暂停自动跟随；阅读位置变化(点句/翻章)时重新启用
+  const autoFollowRef = useRef(true)
+  const lastUserScrollAtRef = useRef(0)
+  const prevIndexRef = useRef(currentSentenceIndex)
 
+  // —— 虚拟列表状态 ——
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(640)
+  const measuredHeightsRef = useRef<Map<string, number>>(new Map())
+  const [measureTick, setMeasureTick] = useState(0)
+
+  const blocks = chapter?.blocks || []
+
+  const getBlockHeight = useCallback((blockId: string) => {
+    return measuredHeightsRef.current.get(blockId) ?? ESTIMATED_BLOCK_HEIGHT
+  }, [])
+
+  const offsets = useMemo(() => {
+    const tops: number[] = new Array(blocks.length)
+    let acc = 0
+    for (let i = 0; i < blocks.length; i++) {
+      tops[i] = acc
+      acc += getBlockHeight(blocks[i].blockId) + 12 // gap-3 ≈ 12
+    }
+    return { tops, total: acc }
+    // measureTick：可见块实测高度更新后重算垫片
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks, getBlockHeight, measureTick])
+
+  // 二分找第一个 top >= scrollTop - overscan 的块
+  const findStartIndex = useCallback(
+    (targetTop: number) => {
+      let lo = 0
+      let hi = blocks.length
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if ((offsets.tops[mid] ?? 0) < targetTop) lo = mid + 1
+        else hi = mid
+      }
+      return Math.max(0, lo - 1)
+    },
+    [blocks.length, offsets.tops]
+  )
+
+  const startIndex = useMemo(() => {
+    if (blocks.length === 0) return 0
+    return findStartIndex(Math.max(0, scrollTop - OVERSCAN * ESTIMATED_BLOCK_HEIGHT))
+  }, [blocks.length, findStartIndex, scrollTop])
+
+  const endIndex = useMemo(() => {
+    if (blocks.length === 0) return 0
+    const bottom = scrollTop + viewportHeight + OVERSCAN * ESTIMATED_BLOCK_HEIGHT
+    let i = startIndex
+    while (i < blocks.length && (offsets.tops[i] ?? 0) < bottom) i += 1
+    return Math.min(blocks.length, i + 1)
+  }, [blocks.length, offsets.tops, scrollTop, startIndex, viewportHeight])
+
+  const visibleBlocks = useMemo(
+    () => blocks.slice(startIndex, endIndex).map((block, offset) => ({ block, index: startIndex + offset })),
+    [blocks, startIndex, endIndex]
+  )
+
+  const padTop = offsets.tops[startIndex] ?? 0
+  const padBottom = Math.max(0, offsets.total - (offsets.tops[endIndex] ?? offsets.total))
+
+  // 测量可见块真实高度
   useEffect(() => {
-    const active = containerRef.current?.querySelector('[data-active="true"]')
-    active?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const root = containerRef.current
+    if (!root || visibleBlocks.length === 0) return
+    let changed = false
+    for (const { block } of visibleBlocks) {
+      const el = root.querySelector(`[data-vblock-id="${CSS.escape(block.blockId)}"]`) as HTMLElement | null
+      if (!el) continue
+      const h = el.offsetHeight
+      if (h > 0 && measuredHeightsRef.current.get(block.blockId) !== h) {
+        measuredHeightsRef.current.set(block.blockId, h)
+        changed = true
+      }
+    }
+    if (changed) setMeasureTick((n) => n + 1)
+  }, [visibleBlocks, chapter?.title])
+
+  // 视口高度
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const update = () => setViewportHeight(el.clientHeight || 640)
+    update()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null
+    ro?.observe(el)
+    return () => ro?.disconnect()
+  }, [chapter?.title])
+
+  const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    setScrollTop(event.currentTarget.scrollTop)
+  }, [])
+
+  // 监听用户手动滚动：滚轮/触摸/键盘翻页时，2.5 秒内不打断用户
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const markManual = () => {
+      lastUserScrollAtRef.current = Date.now()
+    }
+    el.addEventListener('wheel', markManual, { passive: true })
+    el.addEventListener('touchmove', markManual, { passive: true })
+    return () => {
+      el.removeEventListener('wheel', markManual)
+      el.removeEventListener('touchmove', markManual)
+    }
+  }, [])
+
+  // 阅读位置被显式改变（点句/翻章/大纲）→ 恢复自动跟随
+  useEffect(() => {
+    if (prevIndexRef.current !== currentSentenceIndex) {
+      autoFollowRef.current = true
+      prevIndexRef.current = currentSentenceIndex
+    }
   }, [currentSentenceIndex])
 
-  // 切换章节时滚回顶部
+  // 智能滚动：目标不在可视区时滚动；用估算 offset 先定位虚拟窗口
+  useEffect(() => {
+    if (!chapter) return
+    if (Date.now() - lastUserScrollAtRef.current < 2500) return
+    if (!autoFollowRef.current) return
+    const activeIdx = chapter.blocks.findIndex(
+      (b) => currentSentenceIndex >= b.sentenceRange[0] && currentSentenceIndex < b.sentenceRange[1]
+    )
+    if (activeIdx < 0) return
+    const container = containerRef.current
+    if (!container) return
+
+    const top = offsets.tops[activeIdx] ?? activeIdx * ESTIMATED_BLOCK_HEIGHT
+    const height = getBlockHeight(chapter.blocks[activeIdx].blockId)
+    const viewTop = container.scrollTop
+    const viewBottom = viewTop + container.clientHeight
+    const visible = top >= viewTop && top + height <= viewBottom
+    if (!visible) {
+      const next = Math.max(0, top - container.clientHeight * 0.25)
+      container.scrollTo({ top: next, behavior: 'auto' })
+      setScrollTop(next)
+    }
+  }, [currentSentenceIndex, chapter, offsets.tops, getBlockHeight])
+
+  // 切换章节时滚回顶部并清测量缓存
   useEffect(() => {
     containerRef.current?.scrollTo({ top: 0 })
+    setScrollTop(0)
     setContextMenu(null)
-  }, [chapter?.title])
+    autoFollowRef.current = true
+    measuredHeightsRef.current = new Map()
+    setMeasureTick((n) => n + 1)
+  }, [chapter?.title, chapter?.sentenceRange[0]])
 
   const openContextMenu = (
     event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
@@ -197,41 +352,55 @@ export default function ContentCards({
   }
 
   return (
-    <div ref={containerRef} data-content-cards className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-5 sm:px-6 lg:px-8">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 pb-8">
+    <div
+      ref={containerRef}
+      data-content-cards
+      className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-5 sm:px-6 lg:px-8"
+      onScroll={onScroll}
+    >
+      <div className="mx-auto flex w-full max-w-3xl flex-col pb-8">
         {!hasEquivalentChapterHeading(chapter) && (
-          <header data-chapter-title="true" className="mb-2 border-b border-gray-200 pb-4 dark:border-dark-border">
+          <header
+            data-chapter-title="true"
+            className="mb-2 border-b border-gray-200 pb-4 dark:border-dark-border"
+          >
             <p className="mb-1 text-xs font-medium text-gray-400 dark:text-gray-500">当前章节</p>
             <h1 className="text-2xl font-semibold leading-relaxed text-gray-950 dark:text-gray-50">
               {chapter.title}
             </h1>
           </header>
         )}
-        {chapter.blocks.map((block) => (
-          <div
-            key={block.blockId}
-            data-sentence-start={block.sentenceRange[0]}
-            tabIndex={0}
-            aria-label={`段落操作：${block.text.slice(0, 32)}`}
-            className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-            onContextMenu={(event) => handleContextMenu(event, block)}
-            onKeyDown={(event) => handleBlockKeyDown(event, block)}
-            onClick={() => {
-              // 点击段落：只设定播放起点，不自动 TTS
-              if (!onSeekToSentence) return
-              onSeekToSentence(block.sentenceRange[0])
-            }}
-          >
-            <ContentCard
-              block={block}
-              sentences={sentences}
-              currentSentenceIndex={currentSentenceIndex}
-              onSpeakRaw={onSpeakRaw}
-              onStopRaw={onStopRaw}
-              onSeekToSentence={onSeekToSentence}
-            />
-          </div>
-        ))}
+
+        {/* 虚拟列表：上下垫片 + 仅渲染可视窗口内段落 */}
+        <div style={{ height: padTop }} aria-hidden />
+        <div className="flex flex-col gap-3">
+          {visibleBlocks.map(({ block }) => (
+            <div
+              key={block.blockId}
+              data-vblock-id={block.blockId}
+              data-sentence-start={block.sentenceRange[0]}
+              tabIndex={0}
+              aria-label={`段落操作：${block.text.slice(0, 32)}`}
+              className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 reader-block-virtual"
+              onContextMenu={(event) => handleContextMenu(event, block)}
+              onKeyDown={(event) => handleBlockKeyDown(event, block)}
+              onClick={() => {
+                if (!onSeekToSentence) return
+                onSeekToSentence(block.sentenceRange[0])
+              }}
+            >
+              <ContentCard
+                block={block}
+                sentences={sentences}
+                currentSentenceIndex={currentSentenceIndex}
+                onSpeakRaw={onSpeakRaw}
+                onStopRaw={onStopRaw}
+                onSeekToSentence={onSeekToSentence}
+              />
+            </div>
+          ))}
+        </div>
+        <div style={{ height: padBottom }} aria-hidden />
       </div>
       <SelectionPopup
         containerRef={containerRef}

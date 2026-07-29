@@ -76,7 +76,24 @@ function sha256(value: string): string {
   return hash.map((word) => word.toString(16).padStart(8, '0')).join('')
 }
 
-/** SHA-256 of the newline-joined sentence content, truncated to 16 hex characters. */
+/**
+ * SHA-256 of the newline-joined sentence content, truncated to 16 hex characters.
+ * 主进程优先用 Node crypto 流式更新，避免 join 出数十 MB 字符串卡死事件循环。
+ * 结果与 `sha256(sentences.join('\\n')).slice(0, 16)` 一致。
+ */
 export function hashSentences(sentences: string[]): string {
+  // Electron 主进程 / Node 测试环境
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createHash } = require('node:crypto') as typeof import('node:crypto')
+    const h = createHash('sha256')
+    for (let i = 0; i < sentences.length; i++) {
+      if (i > 0) h.update('\n')
+      h.update(sentences[i] ?? '', 'utf8')
+    }
+    return h.digest('hex').slice(0, 16)
+  } catch {
+    // 渲染进程无 node:crypto 时回退
+  }
   return sha256(sentences.join('\n')).slice(0, 16)
 }

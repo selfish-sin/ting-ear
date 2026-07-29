@@ -1,6 +1,6 @@
 # 听伴 (TingEar) CONTEXT
 
-> 最近核对：2026-07-27 | 严格对照当前源码；AI 阅读 A–F、阅读交互基础、章节大纲 v3、整本 ingest 已实现
+> 最近核对：2026-07-28 | 严格对照当前源码；大纲 repository v4、原子写/日志批量、openExternal 白名单、设置导入导出
 
 ## 一分钟速览
 
@@ -13,12 +13,15 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `src/App.tsx` | 视图路由、`readerMode` 切换、沉浸开关、`AiPlaybackCapsule` / 完整底栏策略、autoResume | 改全局布局/模式入口/沉浸/启动恢复 |
 | `src/components/reader/AiPlaybackCapsule.tsx` | AI 阅读可拖拽播放胶囊；`shouldShowAiPlaybackCapsule` / `shouldShowFullPlaybackBar` | 改 AI 模式播放控件 |
 | `src/components/PlayerView.tsx` | 听书模式选章、句子列表、顶栏工具；沉浸时顶栏上移 | 改听书正文 UI |
-| `src/components/BookShelf.tsx` | 书架网格/列表、右键菜单、专辑与批量、继续阅读卡 | 改书架/专辑 |
+| `src/components/BookShelf.tsx` | 书架编排：状态/批量/专辑/右键；卡片 UI 在 `bookshelf/` | 改书架流程 |
+| `src/components/bookshelf/*` | 缩放常量、网格/列表卡、继续阅读、批量栏 | 改书架卡片 UI |
+| `src/components/SettingsModal.tsx` | 设置弹窗壳（tabs） | 改设置入口 |
+| `src/components/settings/*` | General/TTS/Appearance/Shortcuts/About/Ai 分面板 | 改各设置页 |
 | `src/components/ui/ContextMenu.tsx` | Portal 右键菜单（视口钳制、键盘、焦点恢复） | 改任何右键/溢出菜单 |
 | `src/components/reader/AiReaderView.tsx` | AI 阅读三栏；大纲面板、连续正文、AI 侧栏；旧书伪结构 | 改 AI 阅读布局/生命周期 |
 | `src/components/reader/ContentCards.tsx` / `ContentCard.tsx` | 章节标题去重、正文右键、连续排版、当前句/raw 高亮 | 改正文/高亮/滚动 |
 | `src/components/reader/ChapterOutlinePanel.tsx` | **唯一挂载**的当前章大纲 UI（生成/重试/改名） | 改大纲面板 |
-| `src/components/reader/ChapterOutline.tsx` / `SectionNav.tsx` | 旧实现，**未挂载**；勿重新接回 | 清理遗留时再读 |
+| `src/components/reader/ChapterOutline.tsx` / `SectionNav.tsx` | **已删除**（曾未挂载） | — |
 | `src/components/reader/ModeSwitch.tsx` / `ReaderHeader.tsx` | AI 阅读/听书切换；阅读页顶栏 | 改模式控件/页头 |
 | `src/components/ai/*` | 侧栏、消息、引用、选区、检索、nmem 横幅 | 改 AI 对话交互 |
 | `src/components/settings/AiSettingsPanel.tsx` / `src/aiSettings.ts` | AI 表单与默认值/深合并/路由正则 | 改 AI 配置或 prompt |
@@ -86,6 +89,8 @@ useTTS.playSentence
 - 三栏：`ChapterOutlinePanel` + `ContentCards` + `AiChatPanel`；沉浸时隐藏 chrome，AI 面板稳定挂载以免取消流式回答
 - 无 `structure` 的旧书：前端伪结构（章标题 heading + 每 5 句一段），**不写回**
 - 接受 structure 条件：`schemaVersion=1`、形状/类型/唯一 blockId、range 连续且在 sentences 边界内；否则 `generatePseudoStructure` 重建并重派生 `chapters`
+- 分章归一化（`chapterBuilder`）：能读原书书签/TOC 则优先，**仅合并过小章（min=35），不切超长章**（保留原书结构）；不能读（标题启发式/伪分章）才同时套用 **min=35 / max=400**。`refineChapters` 默认 `skipOversizedSplit=true`；TXT/HTML 走标题检测时显式传 `false`
+- 兜底标题统一 `第N部分`（中文数字，`buildPseudoChapterTitle`）：EPUB 目录锚点定位失败、TXT/HTML 未识别到任何章节边界时走尺寸伪分章，**不再造 `第N章` 假标题**。已导入旧书需「重建章节」（`book:reparse`）或重导入才生效
 - `structureMeta.contentHash`：句子换行拼接后 UTF-8 SHA-256 **前 16 位**（`contentHash.ts`）
 
 ## AI 对话 / RAG / 引用 / raw 朗读
@@ -100,22 +105,24 @@ aiStore.sendMessage
 
 - 200 响应中的 error envelope 或空正文算失败；主模型失败可试一次备用模型
 - nmem 断线只降级当前请求；面板横幅 + `statusCacheMs` 轮询
-- **ingest：整本一书一源**（`IngestService` + `IngestScheduler`），状态在 `ingest-status.json`；旧按章状态会触发整本重传。自动 ingest 不阻塞导入
+- **ingest：整本一书一源**（`IngestService` + `IngestScheduler`），状态在 `ingest-status.json`；旧按章状态会触发整本重传。自动 ingest 不阻塞导入。**本地 contentHash 是唯一重传依据**：hash 匹配且状态正常 → 直接信任本地、不查远程、不重传（绝不因 nmem 抖动/重启而每次打开全量重导）。`IngestScheduler` 有 **per-book in-flight 锁**（导入即时线 `tryIngest` 与探针线 `catchUp` 并发复用同一 Promise）；`ai:nmem:ingest` 统一走共享 scheduler（`getIngestScheduler`）。**坑：nmem 不按 source name 去重**，故内容变化重传时上传成功后 `deleteSource` 删旧源；`dedupeSources`/`ai:nmem:dedupe`（设置页「去重知识库」按钮，**纯手动**）按 `[bookId=]` 分组删多余副本，不改本地状态、不触发重传。已废弃 `verifyExisting`（曾因 listSources 不全导致全量误判重传）
 - 选区：去空白 >2 字显示 `SelectionPopup`；引用最多 5 条；「问 AI」持久请求展开侧栏并聚焦
 - 历史：`ai-history.json` 每书最多 200 条；损坏文件整体抛错，禁止静默覆盖
 - `speakRaw`：卡片/回答朗读，不写 `currentSentenceIndex`/历史/字幕；`rawSpeechActive` 隔离书籍会话
 
-## 章节大纲（v3）
+## 章节大纲（repository v4）
 
 | 模块 | 作用 |
 |---|---|
-| `outline-input.ts` | 从 `books.json` 重载当前章，校验 chapterKey，不信任 renderer 正文 |
-| `outline-generator.ts` | 短章策略、比例最低节数、偏移校验 |
+| `outline-input.ts` | 从分片库重载当前章，校验 chapterKey，不信任 renderer 正文；`sentences: string[]` |
+| `outline-generator.ts` | 纯 LLM 生成（短章策略、分块、偏移校验）；**不落盘** |
 | `outline-queue.ts` | 进程级 FIFO 单飞行 |
-| `outline-repository.ts` | `outlines/<bookId>.json`，`OUTLINE_CACHE_VERSION=3`，原子写 |
+| `outline-batch.ts` | 单章/批量生成编排，`generateChapterOutlineRecord` 写 repository |
+| `outline-repository.ts` | `outlines/<bookId>.json`，`OUTLINE_CACHE_VERSION=4`，原子写 |
 | IPC | `ai:outline:get/generate/update`（另有 legacy-generate 兼容） |
 
-切章只读缓存，不自动生成。缓存键：`bookId + chapterKey + sentenceContentHash`。
+切章只读缓存，不自动生成。缓存键：`bookId + chapterKey + sentenceContentHash`。  
+旧 generator 内整书 CACHE_VERSION=2 已移除，避免双缓存。
 
 ## 音量注意
 
@@ -131,7 +138,7 @@ npm run dev          # Vite 默认 5191
 npm run build / typecheck / lint / test
 ```
 
-数据目录 `%APPDATA%/ting-ear/听伴/`（或自定义）：`books.json`、`ai-history.json`、`settings.json`、`engines.json`、`bookmarks.json`、`history.json`、`albums.json`、`logs.json`、`ingest-status.json`、`outlines/`、`covers/`、`cache/`。路径统一 `getDataDir()`。启动时主进程同步活动 TTS 引擎为 `settings.ttsEngine`。
+数据目录 `%APPDATA%/ting-ear/听伴/`（或自定义）：分片书架 `library/index.json` + `library/books/{id}.json` + `progress.json`（进度高频小文件；旧 `books.json` 启动时自动迁移）；另有 `ai-history.json`、`settings.json`、`engines.json`、`bookmarks.json`、`history.json`、`albums.json`、`logs.json`、`ingest-status.json`、`outlines/`、`covers/`、`cache/`。路径统一 `getDataDir()`。写盘有空数组覆盖保护与 `.bak`；`settings.json` / logs 用原子写（tmp+rename）；日志批量 flush（约 1.5s 或 20 条）。启动时主进程同步活动 TTS 引擎为 `settings.ttsEngine`。默认 `windowAlwaysOnTop=false`。
 
 ## 断点恢复（autoResume）
 
@@ -141,7 +148,9 @@ npm run build / typecheck / lint / test
 
 `AppSettings.autoResume` 默认 true；`=== false` 才关闭。
 
-## 测试（`npm test` 串联）
+## 测试（`npm test`）
+
+`scripts/run-tests.mjs` 串行跑 `tests/*.test.ts`，**单文件失败不短路后续**。单文件：`npm run test:one -- tests/foo.test.ts`。
 
 清洗/数据：`textPreprocessor`、`bookData`、`bookStore`、`albumUtils`  
 解析/结构：`parserCompatibility`、`epubParserStructure`、`mdParserStructure`、`structureBuilder`、`structureVersionMismatch`  
@@ -149,17 +158,25 @@ npm run build / typecheck / lint / test
 AI/RAG：`llmCaller`、`ipcStreaming`、`settingsDeepMerge`、`aiHistory`、`aiStore`、`aiComponents`、`aiSettingsPanel`、`nmemBridge`、`nmemContract`、`spoilerFilter`、`ragOrchestration`、`ragComponents`、`selectionQuoteComponents`、`fullTextInject`  
 大纲：`outlineGenerator`、`outlineRepository`、`outlineQueue`、`outlineIntegration`、`outlineIpc`  
 ingest：`ingestWholeBook`  
-TTS：`ttsSkip`、`ttsSession`、`engineImport`
+TTS：`ttsSkip`、`ttsSession`、`engineImport`  
+安全/校验：`safeOpenExternal`、`ipcValidate`
 
 改清洗/分句后务必 `npm test`；改 IPC 后 `npm run typecheck`。
+
+## 安全与 IPC 注意
+
+- `shell.openExternal` 仅允许 `http:`/`https:`（`electron/utils/safeOpenExternal.ts`）
+- 关键书/删书 ID 走 `isBookId`；settings 保存要求 plain object
+- 设置导出/导入：`settings:export` / `settings:import`（**含 API Key**，不切换 dataDir）
 
 ## 当前状态与边界
 
 - 在线 Edge/千问/HTTP + 系统 Web Speech 临时兜底；引擎管理与导入导出可用
 - 清洗纯规则；音量 0~200%；封面 `COVER_STYLE_VERSION=v2-light`
 - AI 阅读 A–F、共享右键菜单、连续阅读排版、章节标题去重、全局 focus-visible 已完成
-- 大纲按当前章按需生成，缓存 v3；`ChapterOutlinePanel` 为唯一大纲 UI
-- 知识库 **整本**同步（非按章）；nmem 默认 `127.0.0.1:14242`
+- 大纲按当前章按需生成，缓存 **v4**；`ChapterOutlinePanel` 为唯一大纲 UI（旧 `ChapterOutline`/`SectionNav` 已删）
+- TTS 内存预取缓存 LRU 上限 50 句；听书大章仅渲染当前句附近窗口
+- 知识库 **整本**同步（非按章）；源名 `书名 [bookId=id]`（`parseSourceMetadata` 同时兼容旧前缀格式）；nmem 默认 `127.0.0.1:14242`
 - Electron 主进程 `fetch` 不读代理环境变量；检测到代理时模型请求走 axios（见 `llm-caller.ts`）
 - 智谱旧别名 `GLM-4.7-Flash` → 请求层映射 `glm-4.7`
-- MOBI 依赖本机 Calibre；PDF 仅文字层；不要把书籍/API Key/日志/缓存提交 Git
+- MOBI 依赖本机 Calibre；**PDF 仅文字层**（扫描版需 OCR，导入会提示）；不要把书籍/API Key/日志/缓存提交 Git
