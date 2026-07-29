@@ -484,8 +484,9 @@ export default function AiSettingsPanel({ value, onChange }: AiSettingsPanelProp
                         </button>
 
                         <label className="flex min-w-0 flex-1 items-center gap-1.5">
+                          {/* 模型名支持任意手输，datalist 仅提供已获取的建议 */}
                           <span className="shrink-0 text-xs text-gray-500 dark:text-gray-400">
-                            模型
+                            {PROVIDER_PRESETS.find((p) => p.provider === (editingEngine.provider || detectProvider(editingEngine.baseUrl)))?.label || '自定义'} 模型
                           </span>
                           <input
                             type="text"
