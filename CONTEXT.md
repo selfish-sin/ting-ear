@@ -1,6 +1,6 @@
 # 听伴 (TingEar) CONTEXT
 
-> 最近核对：2026-07-28 | 严格对照当前源码；大纲 repository v4、原子写/日志批量、openExternal 白名单、设置导入导出
+> 最近核对：2026-07-30 | 严格对照当前源码；设置 4Tab 定高、healBookLayout 打开热路径、大纲 repository v4、原子写/日志批量、openExternal 白名单、设置导入导出
 
 ## 一分钟速览
 
@@ -15,8 +15,8 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `src/components/PlayerView.tsx` | 听书模式选章、句子列表、顶栏工具；沉浸时顶栏上移 | 改听书正文 UI |
 | `src/components/BookShelf.tsx` | 书架编排：状态/批量/专辑/右键；卡片 UI 在 `bookshelf/` | 改书架流程 |
 | `src/components/bookshelf/*` | 缩放常量、网格/列表卡、继续阅读、批量栏 | 改书架卡片 UI |
-| `src/components/SettingsModal.tsx` | 设置弹窗壳（tabs） | 改设置入口 |
-| `src/components/settings/*` | General/TTS/Appearance/Shortcuts/About/Ai 分面板 | 改各设置页 |
+| `src/components/SettingsModal.tsx` | 设置弹窗壳（4 tabs：常规/朗读/AI/清洗），`h-[80vh]` 定高 | 改设置入口 |
+| `src/components/settings/*` | General/TTS/Ai 分面板（Appearance/Shortcuts/About 已删） | 改各设置页 |
 | `src/components/ui/ContextMenu.tsx` | Portal 右键菜单（视口钳制、键盘、焦点恢复） | 改任何右键/溢出菜单 |
 | `src/components/reader/AiReaderView.tsx` | AI 阅读三栏；大纲面板、连续正文、AI 侧栏；旧书伪结构 | 改 AI 阅读布局/生命周期 |
 | `src/components/reader/ContentCards.tsx` / `ContentCard.tsx` | 章节标题去重、正文右键、连续排版、当前句/raw 高亮 | 改正文/高亮/滚动 |
@@ -26,9 +26,9 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `src/components/ai/*` | 侧栏、消息、引用、选区、检索、nmem 横幅 | 改 AI 对话交互 |
 | `src/components/settings/AiSettingsPanel.tsx` / `src/aiSettings.ts` | AI 表单与默认值/深合并/路由正则 | 改 AI 配置或 prompt |
 | `src/hooks/useTTS.ts` | 书籍播放、ttsSkip、唯一 Audio、`speakRaw`/`stopRaw`、系统兜底 | 改 TTS 生命周期 |
-| `src/utils/audioOutput.ts` / `ttsSkip.ts` / `ttsSession.ts` / `contentHash.ts` | GainNode、跳过导航、raw 互斥、SHA-256 前 16 位 | 改音量/跳过/哈希 |
-| `src/utils/bookData.ts` | 分句/章节/structure 校验/pseudo 重建/PlayPref | 改文本数据或结构一致性 |
-| `src/stores/playerStore.ts` / `bookStore.ts` / `settingsStore.ts` / `aiStore.ts` | 播放、书籍、`readerMode`、AI 流状态 | 改状态默认值 |
+| `src/utils/audioOutput.ts` / `ttsSkip.ts` / `ttsSession.ts` / `contentHash.ts` / `uiReady.ts` | GainNode、跳过导航、raw 互斥、SHA-256 前 16 位、`waitForReaderReady` | 改音量/跳过/哈希/打开就绪 |
+| `src/utils/bookData.ts` | 分句/章节/structure 校验/pseudo 重建/PlayPref/`healBookLayoutForReading`/`normalizeAndHealBook` | 改文本数据或结构一致性 |
+| `src/stores/playerStore.ts` / `bookStore.ts` / `settingsStore.ts` / `aiStore.ts` | 播放（`prepareForBook`）、书籍（`enterPlayerSession`）、`readerMode`、AI 流状态 | 改状态默认值 |
 | `src/cleanRules.ts` / `src/shortcuts.ts` | 默认清洗规则；快捷键定义 | 改规则或键位 |
 | `electron/main.ts` / `preload.ts` | 启动、托盘、`window.api` | 改主进程或桥接 |
 | `electron/ipc/aiHandlers.ts` | `ai:chat/*`、`ai:nmem:*`、`ai:outline:*` | 改 AI/大纲 IPC |
@@ -87,10 +87,13 @@ useTTS.playSentence
 
 - 打开书时 `readerMode` 默认 `ai-reading`；模式切换**不**重置播放索引
 - 三栏：`ChapterOutlinePanel` + `ContentCards` + `AiChatPanel`；沉浸时隐藏 chrome，AI 面板稳定挂载以免取消流式回答
-- 无 `structure` 的旧书：前端伪结构（章标题 heading + 每 5 句一段），**不写回**
-- 接受 structure 条件：`schemaVersion=1`、形状/类型/唯一 blockId、range 连续且在 sentences 边界内；否则 `generatePseudoStructure` 重建并重派生 `chapters`
-- 分章归一化（`chapterBuilder`）：能读原书书签/TOC 则优先，**仅合并过小章（min=35），不切超长章**（保留原书结构）；不能读（标题启发式/伪分章）才同时套用 **min=35 / max=400**。`refineChapters` 默认 `skipOversizedSplit=true`；TXT/HTML 走标题检测时显式传 `false`
-- 兜底标题统一 `第N部分`（中文数字，`buildPseudoChapterTitle`）：EPUB 目录锚点定位失败、TXT/HTML 未识别到任何章节边界时走尺寸伪分章，**不再造 `第N章` 假标题**。已导入旧书需「重建章节」（`book:reparse`）或重导入才生效
+- **打开缓冲**：`isLoading` 时全局 `LoadingOverlay` 盖住；**禁止**卸载 `ContentCards`。就绪用 `waitForReaderReady`（等 `[data-content-cards]` 有高度），不是只等 rAF
+- **布局关口（防「修完又盖回去」）**：`isUnhealthyBookLayout` / `healBookLayoutForReading` / `normalizeAndHealBook`。读盘(`loadBookFile`)、导入、reparse、`loadFullBook`、进入阅读**同一把尺子**；导入时病态旧 structure **不得**因 contentHash 未变而沿用
+- **打开热路径**：heal → `enterPlayerSession` 一次写 store → `prepareForBook`；主文本治愈后后台 persist 瘦身
+- 无 `structure` / 巨书：章骨架（`blocks:[]`）+ 当前章 `ensureChapterBlocks` 懒建；`generatePseudoStructure` 对超大书也改骨架
+- 接受 structure：trusted 打开只做章级轻量检查；完整 block 校验留给非 trusted。structure 若单章超长**不得**覆盖已切开的 `chapters`
+- 分章（`buildChaptersByMode`）：`original` 保留书签并**切开 >400**；`merged` 套 35~400。`regroupStructuredChapters` **单章巨 blob 也必须切**（旧 early-return 是事故根因）。`refineChapters` 默认 `skipOversizedSplit=true` 仅兼容旧调用
+- 兜底标题 `第N部分`（`toChineseNumber` 支持到千）；无标题 MD 文集走伪分章，不造 `第N章`
 - `structureMeta.contentHash`：句子换行拼接后 UTF-8 SHA-256 **前 16 位**（`contentHash.ts`）
 
 ## AI 对话 / RAG / 引用 / raw 朗读
@@ -153,7 +156,8 @@ npm run build / typecheck / lint / test
 `scripts/run-tests.mjs` 串行跑 `tests/*.test.ts`，**单文件失败不短路后续**。单文件：`npm run test:one -- tests/foo.test.ts`。
 
 清洗/数据：`textPreprocessor`、`bookData`、`bookStore`、`albumUtils`  
-解析/结构：`parserCompatibility`、`epubParserStructure`、`mdParserStructure`、`structureBuilder`、`structureVersionMismatch`  
+解析/结构：`parserCompatibility`、`epubParserStructure`、`mdParserStructure`、`structureBuilder`、`structureVersionMismatch`、`chapterBuilderModes`  
+布局/分章：`healBookLayout`、`regroupSingleChapter`  
 阅读 UI：`readerComponents`、`contextMenuComponents`、`modeSwitchPlayback`、`chapterTitleEditing`  
 AI/RAG：`llmCaller`、`ipcStreaming`、`settingsDeepMerge`、`aiHistory`、`aiStore`、`aiComponents`、`aiSettingsPanel`、`nmemBridge`、`nmemContract`、`spoilerFilter`、`ragOrchestration`、`ragComponents`、`selectionQuoteComponents`、`fullTextInject`  
 大纲：`outlineGenerator`、`outlineRepository`、`outlineQueue`、`outlineIntegration`、`outlineIpc`  
