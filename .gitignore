@@ -5,6 +5,9 @@ node_modules/
 out/
 dist/
 
+# 用户数据（书籍、进度、封面等，从 AppData 迁移至项目目录）
+data/
+
 # TypeScript / Vite 增量编译缓存
 *.tsbuildinfo
 

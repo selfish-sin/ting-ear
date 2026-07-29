@@ -3,6 +3,7 @@ import type { BookData, Chapter } from '../global'
 import {
   clampSentenceIndex,
   findChapterIndex,
+  healBookLayoutForReading,
   normalizeBookCollection,
   normalizeBookData,
   normalizeBookTitle,
@@ -56,6 +57,15 @@ interface BookState {
   updateCurrentTimeMap: (timeMap: number[]) => void
   setCurrentView: (view: BookState['currentView']) => void
   setLoading: (loading: boolean, message?: string) => void
+  /**
+   * 打开阅读：一次 set 写入书/句/章/范围/视图，避免 activate 连打 6 次 set 触发多次重渲染。
+   * 调用方应已 normalize + heal。
+   */
+  enterPlayerSession: (
+    book: BookData,
+    range: { start: number; end: number } | null,
+    versionId: string | null
+  ) => void
   loadBooks: () => Promise<void>
   /** 按需加载单本书完整数据并替换内存 stub */
   loadFullBook: (bookId: string) => Promise<BookData | null>
@@ -298,6 +308,19 @@ export const useBookStore = create<BookState>((set, get) => ({
     })
   },
 
+  enterPlayerSession: (book, range, versionId) => {
+    const sentences = book.sentences || []
+    set({
+      currentBook: book,
+      sentences,
+      chapters: book.chapters || [],
+      sentenceRange: normalizeSentenceRange(range, sentences.length),
+      currentVersionId: versionId,
+      readerMode: 'ai-reading',
+      currentView: 'player'
+    })
+  },
+
   setSentences: (sentences) => set({ sentences: normalizeSentences(sentences) }),
   setChapters: (chapters) =>
     set((state) => ({ chapters: normalizeChapters(chapters, state.sentences.length) })),
@@ -389,7 +412,7 @@ export const useBookStore = create<BookState>((set, get) => ({
     try {
       const data = await window.api?.loadBookData(bookId)
       if (!data) return null
-      // 库内数据已规范化：trusted 跳过全文 SHA-256 / 重清洗 / pseudo 重建
+      // 主进程 loadSingleBook 已 heal；渲染侧再 trusted+heal 兜底（防旧主进程/热更新）
       const contentHash =
         data &&
         typeof data === 'object' &&
@@ -401,12 +424,13 @@ export const useBookStore = create<BookState>((set, get) => ({
         ...(typeof contentHash === 'string' ? { contentHash } : {})
       })
       if (!normalized) return null
-      // 替换内存中的 stub
+      const { book } = healBookLayoutForReading(normalized)
+      // 替换内存中的 stub（必须用治愈后的，禁止把 19 万 block 塞进 books[]）
       set((s) => ({
-        books: s.books.map((b) => (b.id === bookId ? normalized : b)),
-        currentBook: s.currentBook?.id === bookId ? normalized : s.currentBook
+        books: s.books.map((b) => (b.id === bookId ? book : b)),
+        currentBook: s.currentBook?.id === bookId ? book : s.currentBook
       }))
-      return normalized
+      return book
     } catch {
       return null
     }

@@ -867,7 +867,12 @@ export default function PlayerView({
       )}
 
       {/* Sentence list: 按窗口 slice 显示，但传给回调的是【全局】索引 */}
-      <div ref={containerRef} className="flex-1 overflow-y-auto px-3 sm:px-5 py-2 relative contain-content">
+      <div
+        ref={containerRef}
+        data-reader-ready
+        data-sentence-list
+        className="flex-1 overflow-y-auto px-3 sm:px-5 py-2 relative contain-content"
+      >
         {/* Top page nav — only for non-chaptered books */}
         {!hasChapters && (
           <div className="flex items-center justify-center gap-2 mb-2 text-xs text-gray-400">
@@ -891,10 +896,12 @@ export default function PlayerView({
           </div>
         )}
         {(() => {
-          // 大章窗口渲染：只挂当前句附近 DOM，减少长章卡顿（仍可点击窗口内句子）
-          const WINDOW = 120
+          // 正常分章后单章 ≤400 句：整章渲染，滚轮可滚完全章。
+          // 仅遗留「未治愈的巨章」才窗口裁剪，避免假列表（看得见提示却滚不进去）。
+          const FULL_RENDER_MAX = 500
+          const WINDOW = 150
           const rangeLen = bounds.end - bounds.start
-          const useWindow = rangeLen > WINDOW * 2
+          const useWindow = rangeLen > FULL_RENDER_MAX
           const focus = Math.max(bounds.start, Math.min(bounds.end - 1, currentSentenceIndex))
           const winStart = useWindow
             ? Math.max(bounds.start, focus - WINDOW)
@@ -906,7 +913,7 @@ export default function PlayerView({
           if (useWindow && winStart > bounds.start) {
             rows.push(
               <div key="win-head" className="text-center py-2 text-[11px] text-gray-400">
-                … 上方还有 {winStart - bounds.start} 句（滚动/跳转时会展开窗口）
+                … 上方还有 {winStart - bounds.start} 句（点句子或翻章可跳转）
               </div>
             )
           }

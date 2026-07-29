@@ -5,9 +5,6 @@ import CleanRulesSettings from './CleanRulesSettings'
 import AiSettingsPanel from './settings/AiSettingsPanel'
 import GeneralSettingsPanel from './settings/GeneralSettingsPanel'
 import TtsSettingsPanel from './settings/TtsSettingsPanel'
-import AppearanceSettingsPanel from './settings/AppearanceSettingsPanel'
-import ShortcutsSettingsPanel from './settings/ShortcutsSettingsPanel'
-import AboutSettingsPanel from './settings/AboutSettingsPanel'
 import { mergeAiSettings } from '../aiSettings'
 
 interface SettingsModalProps {
@@ -15,16 +12,13 @@ interface SettingsModalProps {
   showToast: (type: 'success' | 'error' | 'warning' | 'info', message: string) => void
 }
 
-type Tab = 'general' | 'tts' | 'ai' | 'appearance' | 'clean' | 'shortcuts' | 'about'
+type Tab = 'general' | 'tts' | 'ai' | 'clean'
 
 const tabs: Array<{ key: Tab; label: string }> = [
   { key: 'general', label: '常规' },
   { key: 'tts', label: '朗读' },
   { key: 'ai', label: 'AI' },
-  { key: 'appearance', label: '外观' },
-  { key: 'clean', label: '清洗' },
-  { key: 'shortcuts', label: '快捷键' },
-  { key: 'about', label: '关于' }
+  { key: 'clean', label: '清洗' }
 ]
 
 export default function SettingsModal({ onClose, showToast }: SettingsModalProps) {
@@ -36,9 +30,9 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
       {/* 仅遮罩，不响应点击关闭 —— 必须点右上角/底部关闭按钮 */}
       <div className="absolute inset-0 bg-black/50" aria-hidden="true" />
 
-      <div className="relative z-10 flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-gray-800">
-        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-700">
-          <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-100">设置</h2>
+      <div className="relative z-10 flex h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-gray-800">
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3 dark:border-gray-700">
+          <h2 className="text-base font-semibold text-gray-800 dark:text-gray-100">设置</h2>
           <button
             type="button"
             onClick={onClose}
@@ -50,13 +44,14 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
           </button>
         </div>
 
-        <div className="flex border-b border-gray-200 px-4 dark:border-gray-700">
+        {/* 标签可横向滚动，窄窗不挤成两行 */}
+        <div className="flex overflow-x-auto border-b border-gray-200 px-2 dark:border-gray-700">
           {tabs.map((tab) => (
             <button
               key={tab.key}
               type="button"
               onClick={() => setActiveTab(tab.key)}
-              className={`border-b-2 px-4 py-3 text-sm transition-colors ${
+              className={`shrink-0 border-b-2 px-3 py-2.5 text-sm transition-colors ${
                 activeTab === tab.key
                   ? 'border-primary font-medium text-primary'
                   : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
@@ -67,23 +62,20 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
           ))}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-5">
           {activeTab === 'general' && <GeneralSettingsPanel showToast={showToast} />}
           {activeTab === 'ai' && (
             <AiSettingsPanel value={mergeAiSettings(settings.ai)} onChange={(ai) => setSettings({ ai })} />
           )}
           {activeTab === 'tts' && <TtsSettingsPanel showToast={showToast} />}
-          {activeTab === 'appearance' && <AppearanceSettingsPanel />}
           {activeTab === 'clean' && <CleanRulesSettings showToast={showToast} />}
-          {activeTab === 'shortcuts' && <ShortcutsSettingsPanel showToast={showToast} />}
-          {activeTab === 'about' && <AboutSettingsPanel />}
         </div>
 
-        <div className="flex justify-end border-t border-gray-200 px-6 py-3 dark:border-gray-700">
+        <div className="flex justify-end border-t border-gray-200 px-5 py-2.5 dark:border-gray-700">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg bg-primary px-4 py-2 text-sm text-white hover:bg-primary/90"
+            className="rounded-lg bg-primary px-4 py-1.5 text-sm text-white hover:bg-primary/90"
           >
             关闭
           </button>

@@ -22,13 +22,20 @@ import type { EngineManager } from '../services/tts-engines/engine-manager'
 import type { BookData, CustomAlbum } from '../../src/global'
 import { validateAlbums } from '../../src/utils/albumUtils'
 import {
-  normalizeBookCollection,
+  buildSkeletonStructure,
+  healBookLayoutForReading,
+  isUnhealthyBookLayout,
+  MAX_STRUCTURE_BLOCKS_IN_MEMORY,
   normalizeBookData,
   normalizeChapters,
   normalizeSentences,
   resolveSourceBoundaries
 } from '../../src/utils/bookData'
-import { generatePseudoStructure, validateStructure } from '../services/parsers/structureBuilder'
+import {
+  generatePseudoStructure,
+  regroupStructuredChapters,
+  validateStructure
+} from '../services/parsers/structureBuilder'
 import {
   buildChaptersByMode,
   chaptersToBoundaries,
@@ -358,10 +365,25 @@ export function registerFileHandlers(
       }
 
       // === 结构化处理 ===
-      // 有解析产出的 structure（MD/EPUB）直接用；其他格式生成 pseudo
+      // 有解析产出的 structure（MD/EPUB）先按 original 切开超长章；其他格式生成 pseudo
       let finalStructure = parsedStructure
       let finalStructureMeta = parsedStructureMeta
-      if (!finalStructure) {
+      if (finalStructure?.length) {
+        const refined = regroupStructuredChapters(finalStructure, { mode: 'original' })
+        finalStructure = refined.structure
+        // 章表以 finalize 的 chapters 为准；若 structure 仍巨量 block 则改骨架入库
+        let blockCount = 0
+        for (const ch of finalStructure) blockCount += ch.blocks?.length || 0
+        if (blockCount > MAX_STRUCTURE_BLOCKS_IN_MEMORY) {
+          finalStructure = buildSkeletonStructure(chapters)
+          finalStructureMeta = finalStructureMeta
+            ? {
+                ...finalStructureMeta,
+                sourceFormat: `${finalStructureMeta.sourceFormat || 'import'}-skeleton`
+              }
+            : undefined
+        }
+      } else {
         const pseudo = generatePseudoStructure(sentences, chapters)
         finalStructure = pseudo.structure
         finalStructureMeta = pseudo.structureMeta
@@ -420,10 +442,13 @@ export function registerFileHandlers(
           originalSentences: contentChanged ? sentences : (existingBook?.originalSentences ?? sentences),
           editHistory: contentChanged ? undefined : existingBook?.editHistory,
           timeMap: contentChanged ? undefined : existingBook?.timeMap,
-          // 结构化：内容变了用新 structure，没变且旧 structure 有效则沿用
+          // 结构化：内容未变且旧 structure 健康才沿用；病态旧数据绝不「修完又盖回去」
           structure:
-            !contentChanged && existingStructureValid
-              ? existingBook?.structure
+            !contentChanged &&
+            existingStructureValid &&
+            existingBook &&
+            !isUnhealthyBookLayout(existingBook)
+              ? existingBook.structure
               : finalStructure,
           structureMeta: structureMetaForSave
         },
@@ -434,26 +459,31 @@ export function registerFileHandlers(
         return { success: false, error: '解析结果不包含可朗读的有效文本' }
       }
 
+      // 入库关口：统一治愈超长章 / 巨 structure（与打开路径同一把尺子）
+      let bookToSave = healBookLayoutForReading(book).book
+
       // 封面先写好再一次性落盘，避免 saveSingleBook 两次
-      if (epubCoverDataUrl && book.coverSource !== 'custom') {
+      if (epubCoverDataUrl && bookToSave.coverSource !== 'custom') {
         try {
           const coversDir = join(getDataDir(), 'covers')
           if (!existsSync(coversDir)) mkdirSync(coversDir, { recursive: true })
           const base64 = epubCoverDataUrl.replace(/^data:[^;]+;base64,/, '')
-          const coverPath = join(coversDir, `${book.id}.png`)
+          const coverPath = join(coversDir, `${bookToSave.id}.png`)
           writeFileSync(coverPath, Buffer.from(base64, 'base64'))
-          book.coverPath = coverPath
-          book.coverSource = 'auto'
+          bookToSave = { ...bookToSave, coverPath, coverSource: 'auto' }
         } catch {
           // 封面保存失败不影响导入
         }
       }
 
-      libraryStorage.saveSingleBook(book)
-      logService.info('Parser', `成功导入书籍：《${title}》(${ext}, ${sentences.length}句)`)
+      libraryStorage.saveSingleBook(bookToSave)
+      logService.info(
+        'Parser',
+        `成功导入书籍：《${title}》(${ext}, ${sentences.length}句, ${bookToSave.chapters.length}章)`
+      )
 
       // 后台 ingest，不阻塞导入返回
-      autoIngestBook(book)
+      autoIngestBook(bookToSave)
       emitProgress('done', `导入完成：${sentences.length} 句`)
       // PDF 仅文字层：句数极少时提示可能是扫描件
       const warning =
@@ -462,7 +492,7 @@ export function registerFileHandlers(
           : ext === 'pdf'
             ? '提示：PDF 仅提取文字层，扫描版图片页不会识别'
             : undefined
-      return { success: true, book, warning }
+      return { success: true, book: bookToSave, warning }
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error)
       logService.error('Parser', `导入失败: ${errMsg}`, errMsg)
@@ -926,13 +956,16 @@ export function registerFileHandlers(
         return { success: false, error: '解析结果无效，已保留原书数据' }
       }
 
+      // reparse 关口：与导入/打开同一把治愈尺子（切开超长 + 巨 structure 骨架化）
+      const bookToSave = healBookLayoutForReading(updatedBook).book
+
       const sourceLabel = canReparseFromFile ? '原文件' : '存库边界'
-      libraryStorage.saveSingleBook(updatedBook)
+      libraryStorage.saveSingleBook(bookToSave)
       logService.info(
         'Parser',
-        `迁移分章：《${book.title}》(${book.chapters.length}章 → ${chapters.length}章, ${mode}, ${sourceLabel})`
+        `迁移分章：《${book.title}》(${book.chapters.length}章 → ${bookToSave.chapters.length}章, ${mode}, ${sourceLabel})`
       )
-      return { success: true, book: updatedBook }
+      return { success: true, book: bookToSave }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       const stack = error instanceof Error ? error.stack : ''

@@ -52,51 +52,45 @@ export default function TtsSettingsPanel({ showToast }: Props) {
 
   return (
             <div className="space-y-5">
-              {/* API Key */}
+              {/* 千问 TTS API */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                  千问 API Key
-                </label>
-                <div className="flex items-center gap-2">
-                  <div className="relative flex-1">
-                    <input
-                      type={showApiKey ? 'text' : 'password'}
-                      value={settings.qwenApiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder="sk-xxxxxxxx"
-                      className="w-full px-3 py-2 pr-10 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                    />
+                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">千问 TTS</h3>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0 text-xs text-gray-500 dark:text-gray-400 w-16">API Key</span>
+                    <div className="relative flex-1">
+                      <input
+                        type={showApiKey ? 'text' : 'password'}
+                        value={settings.qwenApiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        placeholder="sk-xxxxxxxx"
+                        className="w-full px-2.5 py-1.5 pr-9 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/30 font-mono"
+                      />
+                      <button
+                        onClick={() => setShowApiKey((v) => !v)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      >
+                        {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
                     <button
-                      onClick={() => setShowApiKey((v) => !v)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      onClick={handleTestConnection}
+                      disabled={testing}
+                      className="shrink-0 px-2.5 py-1.5 text-xs border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
                     >
-                      {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {testing ? '测试中...' : '测试'}
                     </button>
                   </div>
-                  <button
-                    onClick={handleTestConnection}
-                    disabled={testing}
-                    className="px-3 py-2 text-sm bg-primary text-white rounded-lg hover:bg-primary/90 disabled:opacity-50"
-                  >
-                    {testing ? '测试中...' : '测试连接'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0 text-xs text-gray-500 dark:text-gray-400 w-16">Endpoint</span>
+                    <input
+                      type="text"
+                      value={settings.qwenEndpoint}
+                      onChange={(e) => setEndpoint(e.target.value)}
+                      className="flex-1 px-2.5 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/30 font-mono"
+                    />
+                  </div>
                 </div>
-                <p className="text-xs text-gray-400 mt-1">
-                  🔒 Key 仅存储在本地，不会上传至任何服务器
-                </p>
-              </div>
-
-              {/* Endpoint */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                  API Endpoint
-                </label>
-                <input
-                  type="text"
-                  value={settings.qwenEndpoint}
-                  onChange={(e) => setEndpoint(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/30 font-mono"
-                />
               </div>
 
               {/* Voice：复用 ControlBar 同款下沉式下拉（引擎名头部 + 性别/语言徽章 + 试听） */}

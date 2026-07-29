@@ -1,4 +1,0 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": "tests/outlineGenerator.test.ts", "reason": "Generator regression tests"}
-{"file": "tests/epubParserStructure.test.ts", "reason": "Dense TOC parser regression test"}
-{"file": "electron/services/ai/outline-input.ts", "reason": "Verify IPC never trusts renderer-provided chapter text and honors dynamic data directories."}

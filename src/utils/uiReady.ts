@@ -81,3 +81,49 @@ export async function runWithUiSettle<T>(
   await waitUntilUiSettled({ ...settle, startedAt })
   return result
 }
+
+export interface ReaderReadyOptions extends UiSettleOptions {
+  /** 最长等待阅读器挂载，默认 10000ms */
+  timeoutMs?: number
+  /** 滚动/正文容器选择器 */
+  selector?: string
+}
+
+/**
+ * 等真实阅读器首屏就绪（不是 loading 占位页）。
+ * 条件：存在可滚动正文容器且 clientHeight>0，再补几帧让虚拟列表量高。
+ */
+export async function waitForReaderReady(options: ReaderReadyOptions = {}): Promise<void> {
+  const minMs = options.minMs ?? 500
+  const frames = options.frames ?? 3
+  const timeoutMs = options.timeoutMs ?? 10000
+  const selector =
+    options.selector ?? '[data-content-cards], [data-reader-ready], [data-sentence-list]'
+  const startedAt = options.startedAt ?? performance.now()
+
+  if (options.yieldMacrotask !== false) {
+    await waitMs(0)
+  }
+  await waitAnimationFrames(1)
+
+  const deadline = performance.now() + timeoutMs
+  while (performance.now() < deadline) {
+    const el = document.querySelector(selector) as HTMLElement | null
+    if (el && el.clientHeight > 32) {
+      // 再让虚拟列表完成首轮 measure / 自动滚动
+      await waitAnimationFrames(frames)
+      if (options.yieldMacrotask !== false) {
+        await waitMs(16)
+        await waitAnimationFrames(1)
+      }
+      break
+    }
+    await waitMs(32)
+  }
+
+  const elapsed = performance.now() - startedAt
+  if (elapsed < minMs) {
+    await waitMs(minMs - elapsed)
+  }
+  await waitAnimationFrames(1)
+}

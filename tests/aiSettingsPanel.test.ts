@@ -16,25 +16,23 @@ async function run(): Promise<void> {
     })
   )
 
+  // 列表/缩略视图：不展开整页表单
   assert.match(markup, /AI 引擎/)
   assert.match(markup, /添加引擎/)
-  assert.match(markup, /API 地址/)
-  assert.match(markup, /API Key/)
-  assert.match(markup, /获取模型/)
-  assert.match(markup, /测试连接/)
-  assert.match(markup, /选择模型/)
+  assert.match(markup, /编辑/)
   assert.match(markup, /AI 对话使用/)
   assert.match(markup, /大纲生成使用/)
+  assert.match(markup, /知识库/)
+  assert.match(markup, /章节大纲/)
   assert.match(markup, /高级设置/)
-  assert.match(markup, /知识库地址/)
-  assert.match(markup, /测试知识库/)
-  assert.match(markup, /立即同步/)
-  assert.match(markup, /自动同步新书/)
-  assert.match(markup, /启用书内检索/)
-  assert.doesNotMatch(markup, /防剧透/)
+  // 模型名应出现在缩略卡摘要里
   assert.match(markup, new RegExp(AI_DEFAULTS.llm.model))
+  // 详情字段默认收起，避免首屏过长
+  assert.doesNotMatch(markup, /API Key/)
+  assert.doesNotMatch(markup, /获取模型/)
+  assert.doesNotMatch(markup, /防剧透/)
 
-  console.log('  ok renders model, knowledge base, retrieval, and chat settings')
+  console.log('  ok compact card list for engines / knowledge / outline')
 
   const preloadSource = readFileSync(new URL('../electron/preload.ts', import.meta.url), 'utf8')
   const aiHandlersSource = readFileSync(new URL('../electron/ipc/aiHandlers.ts', import.meta.url), 'utf8')
@@ -47,7 +45,17 @@ async function run(): Promise<void> {
   assert.match(fileHandlersSource, /ipcMain\.handle\('ai:nmem:sync-all'/)
   console.log('  ok keeps AI settings actions wired through preload and IPC')
 
-  console.log('AI settings panel result: 2 passed')
+  // 源码仍含详情编辑能力（点编辑后）
+  const panelSource = readFileSync(
+    new URL('../src/components/settings/AiSettingsPanel.tsx', import.meta.url),
+    'utf8'
+  )
+  for (const token of ['API Key', '获取模型', '测试连接', '选择模型', '测试知识库', '立即同步', '知识库地址']) {
+    assert.match(panelSource, new RegExp(token), `detail UI must still include ${token}`)
+  }
+  console.log('  ok detail editor still contains full engine fields')
+
+  console.log('AI settings panel result: 3 passed')
 }
 
 void run()

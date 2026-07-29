@@ -20,7 +20,11 @@ import {
 import { writeFile, rename, mkdir } from 'fs/promises'
 import { join } from 'path'
 import type { BookData } from '../../src/global'
-import { normalizeBookCollection, normalizeBookData } from '../../src/utils/bookData'
+import {
+  normalizeAndHealBook,
+  normalizeBookCollection,
+  normalizeBookData
+} from '../../src/utils/bookData'
 
 export interface BookProgressRecord {
   currentSentenceIndex: number
@@ -228,7 +232,13 @@ export class LibraryStorage {
       },
       progress[entry.id]
     )
-    return normalizeBookData(merged)
+    // loadBookFile 已 heal；合并索引字段后保持 trusted，禁止再跑全量 block 校验
+    return (
+      normalizeAndHealBook(merged, {
+        trusted: true,
+        contentHash: merged.structureMeta?.contentHash
+      }).book
+    )
   }
 
   /** 只保存/更新单本书（导入时用，避免遍历全部书籍） */
@@ -374,7 +384,32 @@ export class LibraryStorage {
   private loadBookFile(id: string): BookData | null {
     const raw = readJson<unknown>(this.bookPath(id), null)
     if (!raw) return null
-    return normalizeBookData(raw)
+    // 磁盘出口关口：trusted + 治愈超长章/巨 structure，禁止把病态布局原样灌进内存
+    const contentHash =
+      raw &&
+      typeof raw === 'object' &&
+      raw !== null &&
+      'structureMeta' in raw &&
+      (raw as { structureMeta?: { contentHash?: string } }).structureMeta?.contentHash
+    const { book, changed } = normalizeAndHealBook(raw, {
+      trusted: true,
+      ...(typeof contentHash === 'string' ? { contentHash } : {})
+    })
+    if (book && changed) {
+      // 静默瘦身写回：下次打开不再扛 19 万 block（fingerprint 会变，属预期）
+      try {
+        this.writeBookFile(book)
+        const index = this.loadIndex()
+        const idx = index.findIndex((e) => e.id === book.id)
+        if (idx >= 0) {
+          index[idx] = toIndexEntry(book)
+          this.saveIndex(index)
+        }
+      } catch {
+        /* 写回失败仍返回治愈后的内存副本 */
+      }
+    }
+    return book
   }
 
   private writeBookFile(book: BookData): void {
@@ -405,10 +440,14 @@ export class LibraryStorage {
         },
         progress[entry.id]
       )
-      const normalized = normalizeBookData(merged)
-      if (normalized) books.push(normalized)
+      // loadBookFile 已 heal；此处只合并索引字段，避免二次全量 isValidStructure
+      const { book } = normalizeAndHealBook(merged, {
+        trusted: true,
+        contentHash: merged.structureMeta?.contentHash
+      })
+      if (book) books.push(book)
     }
-    return normalizeBookCollection(books)
+    return books
   }
 
   /** 轻量书架：只读 index + progress，完全不碰单书文件（毫秒级） */
@@ -454,7 +493,12 @@ export class LibraryStorage {
       },
       progress[bookId]
     )
-    return normalizeBookData(merged)
+    return (
+      normalizeAndHealBook(merged, {
+        trusted: true,
+        contentHash: merged.structureMeta?.contentHash
+      }).book
+    )
   }
 
   /** 从旧版 books.json 迁移到分片布局 */

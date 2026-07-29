@@ -52,6 +52,13 @@ interface PlayerState {
   setUseSystemTTS: (flag: boolean) => void
   setCurrentAudio: (audio: HTMLAudioElement | null) => void
   setPageIndex: (pageIndex: number) => void
+  /** 打开书时一次写入播放头相关字段，减少多次 set 触发的重渲染 */
+  prepareForBook: (opts: {
+    totalSentences: number
+    sentenceIndex: number
+    chapterIndex: number
+    timeMap?: number[]
+  }) => void
   reset: () => void
   resetToQwenTTS: () => void
 }
@@ -107,6 +114,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setUseSystemTTS: (useSystemTTS) => set({ useSystemTTS }),
   setCurrentAudio: (currentAudio) => set({ currentAudio }),
   setPageIndex: (pageIndex) => set({ pageIndex }),
+  prepareForBook: ({ totalSentences, sentenceIndex, chapterIndex, timeMap }) => {
+    const pageSize = get().pageSize
+    set({
+      totalSentences,
+      currentSentenceIndex: sentenceIndex,
+      currentChapterIndex: chapterIndex,
+      pageIndex: Math.floor(sentenceIndex / Math.max(1, pageSize)),
+      timeMap: timeMap || [],
+      playState: 'idle',
+      rawSpeechActive: false
+    })
+  },
   setTimeMap: (timeMap) => set({ timeMap }),
   updateTimeMapEntry: (index, durationMs) =>
     set((s) => {

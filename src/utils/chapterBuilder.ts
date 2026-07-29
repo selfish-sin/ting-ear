@@ -51,15 +51,39 @@ const DEFAULT_PSEUDO = CHAPTER_PSEUDO_CHUNK
 
 const CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
 
-/** 把 1~99 的整数转为简体中文数字（用于兜底章节标题）。 */
+/** 把正整数转为简体中文数字（用于兜底章节标题；支持到 9999）。 */
 export function toChineseNumber(n: number): string {
-  if (n <= 0) return String(n)
-  if (n < 10) return CN_DIGITS[n]
-  if (n === 10) return '十'
-  if (n < 20) return `十${CN_DIGITS[n - 10]}`
-  const tens = Math.floor(n / 10)
-  const ones = n % 10
-  return `${CN_DIGITS[tens]}十${ones ? CN_DIGITS[ones] : ''}`
+  if (!Number.isFinite(n) || n <= 0) return String(n)
+  const num = Math.floor(n)
+  if (num < 10) return CN_DIGITS[num]
+  if (num === 10) return '十'
+  if (num < 20) return `十${CN_DIGITS[num - 10]}`
+  if (num < 100) {
+    const tens = Math.floor(num / 10)
+    const ones = num % 10
+    return `${CN_DIGITS[tens]}十${ones ? CN_DIGITS[ones] : ''}`
+  }
+  if (num < 1000) {
+    const hundreds = Math.floor(num / 100)
+    const rest = num % 100
+    if (rest === 0) return `${CN_DIGITS[hundreds]}百`
+    if (rest < 10) return `${CN_DIGITS[hundreds]}百零${CN_DIGITS[rest]}`
+    // 百位后的 10~19 要带「一」：五百一十二（不是五百十二）
+    if (rest < 20) {
+      return rest === 10
+        ? `${CN_DIGITS[hundreds]}百一十`
+        : `${CN_DIGITS[hundreds]}百一十${CN_DIGITS[rest - 10]}`
+    }
+    return `${CN_DIGITS[hundreds]}百${toChineseNumber(rest)}`
+  }
+  if (num < 10000) {
+    const thousands = Math.floor(num / 1000)
+    const rest = num % 1000
+    if (rest === 0) return `${CN_DIGITS[thousands]}千`
+    if (rest < 100) return `${CN_DIGITS[thousands]}千零${toChineseNumber(rest)}`
+    return `${CN_DIGITS[thousands]}千${toChineseNumber(rest)}`
+  }
+  return String(num)
 }
 
 /** 无结构信号时的兜底章节标题：第一部分、第二部分… */

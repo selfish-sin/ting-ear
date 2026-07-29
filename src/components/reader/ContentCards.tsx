@@ -202,14 +202,31 @@ export default function ContentCards({
     }
   }, [currentSentenceIndex])
 
+  // 二分：blocks 按 sentenceRange 递增，O(log n) 定位当前句所在块
+  const findBlockIndexForSentence = useCallback(
+    (sentenceIndex: number) => {
+      const list = chapter?.blocks
+      if (!list || list.length === 0) return -1
+      let lo = 0
+      let hi = list.length - 1
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1
+        const [start, end] = list[mid].sentenceRange
+        if (sentenceIndex < start) hi = mid - 1
+        else if (sentenceIndex >= end) lo = mid + 1
+        else return mid
+      }
+      return -1
+    },
+    [chapter?.blocks]
+  )
+
   // 智能滚动：目标不在可视区时滚动；用估算 offset 先定位虚拟窗口
   useEffect(() => {
     if (!chapter) return
     if (Date.now() - lastUserScrollAtRef.current < 2500) return
     if (!autoFollowRef.current) return
-    const activeIdx = chapter.blocks.findIndex(
-      (b) => currentSentenceIndex >= b.sentenceRange[0] && currentSentenceIndex < b.sentenceRange[1]
-    )
+    const activeIdx = findBlockIndexForSentence(currentSentenceIndex)
     if (activeIdx < 0) return
     const container = containerRef.current
     if (!container) return
@@ -224,7 +241,7 @@ export default function ContentCards({
       container.scrollTo({ top: next, behavior: 'auto' })
       setScrollTop(next)
     }
-  }, [currentSentenceIndex, chapter, offsets.tops, getBlockHeight])
+  }, [currentSentenceIndex, chapter, offsets.tops, getBlockHeight, findBlockIndexForSentence])
 
   // 切换章节时滚回顶部并清测量缓存
   useEffect(() => {

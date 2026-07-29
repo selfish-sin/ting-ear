@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 import { sanitizeControlChars } from './textPreprocessor'
-import { deriveSentences, deriveChapters, regroupStructuredChapters } from './structureBuilder'
+import { deriveSentences, regroupStructuredChapters } from './structureBuilder'
 import { hashSentences } from '../../../src/utils/contentHash'
 import type { BookData, StructuredChapter, StructureMeta } from '../../../src/global'
 
@@ -219,14 +219,15 @@ export function parseMarkdown(filePath: string): BookData {
   const structure = parseMarkdownToStructure(content)
   const allSentences = deriveSentences(structure)
 
-  // 原料边界 = MD 标题结构；入库默认 original（仅切超长）
-  const sourceBoundaries = deriveChapters(structure).map((c) => ({
-    title: c.title,
-    sentenceIndex: c.startIndex
-  }))
+  // 先按 original 规则切开超长章（含「只有 1 个正文」的无标题 MD），再记原料边界
   const refined = regroupStructuredChapters(structure, { mode: 'original' })
   const finalStructure = refined.structure
   const finalChapters = refined.chapters
+  // 原料边界优先用切分后的章起点；若仍是单 blob 则留给 finalize 伪分章
+  const sourceBoundaries = finalChapters.map((c) => ({
+    title: c.title,
+    sentenceIndex: c.startIndex
+  }))
 
   // Extract title from first chapter or filename
   let title = structure[0]?.title || ''

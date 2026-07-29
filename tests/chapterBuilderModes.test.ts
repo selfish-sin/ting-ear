@@ -18,7 +18,10 @@ console.log('\nChapter builder modes')
 test('toChineseNumber and part suffix', () => {
   assert.equal(toChineseNumber(1), '一')
   assert.equal(toChineseNumber(12), '十二')
+  assert.equal(toChineseNumber(100), '一百')
+  assert.equal(toChineseNumber(512), '五百一十二')
   assert.equal(buildPartSuffix(2), '（第二部分）')
+  assert.ok(!buildPartSuffix(512).includes('undefined'), 'part suffix must support n>99')
 })
 
 test('original keeps small bookmark chapters and splits oversized with 第N部分', () => {

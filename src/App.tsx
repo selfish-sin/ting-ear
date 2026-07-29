@@ -21,6 +21,7 @@ import {
   clampSentenceIndex,
   findChapterIndex,
   generatePseudoStructure,
+  healBookLayoutForReading,
   loadPlayPref,
   normalizeBookData,
   normalizeChapters,
@@ -55,7 +56,7 @@ import { useTextCleanStore } from './stores/textCleanStore'
 import { v4 as uuidv4 } from 'uuid'
 import type { BookData, ToastItem, Chapter, ChapterMode } from './global'
 import LoadingOverlay from './components/ui/LoadingOverlay'
-import { waitUntilUiSettled } from './utils/uiReady'
+import { waitForReaderReady, waitUntilUiSettled } from './utils/uiReady'
 
 export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
@@ -75,24 +76,17 @@ export default function App() {
   const currentBookId = currentBook?.id
   const currentView = useBookStore((s) => s.currentView)
   const readerMode = useBookStore((s) => s.readerMode)
-  const setCurrentBook = useBookStore((s) => s.setCurrentBook)
-  const setSentences = useBookStore((s) => s.setSentences)
-  const setChapters = useBookStore((s) => s.setChapters)
   const setCurrentView = useBookStore((s) => s.setCurrentView)
   const setLoading = useBookStore((s) => s.setLoading)
   const isLoading = useBookStore((s) => s.isLoading)
   const loadingMessage = useBookStore((s) => s.loadingMessage)
   const loadBooks = useBookStore((s) => s.loadBooks)
   const updateBookAndPersist = useBookStore((s) => s.updateBookAndPersist)
-  const setSentenceRange = useBookStore((s) => s.setSentenceRange)
-  const setCurrentVersionId = useBookStore((s) => s.setCurrentVersionId)
+  const enterPlayerSession = useBookStore((s) => s.enterPlayerSession)
 
   // playState 仅用于历史会话 effect；句索引不订阅到 App，避免每句整树重渲染
   const playState = usePlayerStore((s) => s.playState)
   const rawSpeechActive = usePlayerStore((s) => s.rawSpeechActive)
-  const setTotalSentences = usePlayerStore((s) => s.setTotalSentences)
-  const setCurrentSentenceIndex = usePlayerStore((s) => s.setCurrentSentenceIndex)
-  const setCurrentChapterIndex = usePlayerStore((s) => s.setCurrentChapterIndex)
   const setSpeed = usePlayerStore((s) => s.setSpeed)
   const setVolume = usePlayerStore((s) => s.setVolume)
   const setVoiceId = usePlayerStore((s) => s.setVoiceId)
@@ -174,11 +168,18 @@ export default function App() {
       requestedIndex?: number,
       versionId: string | null = null
     ) => {
-      const book = normalizeBookData(candidate)
-      if (!book) {
+      // trusted：跳过全文 hash / 全量 structure 校验（打开热路径）
+      const normalized = normalizeBookData(candidate, {
+        trusted: true,
+        contentHash: candidate.structureMeta?.contentHash
+      })
+      if (!normalized) {
         showToast('error', '该文章没有可朗读的有效内容')
         return false
       }
+
+      // 治愈单章巨书 / 病态 structure（如 1 章 × 19 万 block），再进阅读器
+      const { book, changed } = healBookLayoutForReading(normalized)
 
       tts.stop()
       const normalizedRange = normalizeSentenceRange(range, book.sentences.length)
@@ -188,34 +189,29 @@ export default function App() {
         normalizedRange
       )
       const chapterIndex = findChapterIndex(book.chapters, sentenceIndex)
-      const player = usePlayerStore.getState()
 
-      setCurrentBook(book)
-      setSentences(book.sentences)
-      setChapters(book.chapters)
-      setSentenceRange(normalizedRange)
-      setCurrentVersionId(versionId)
-      setTotalSentences(book.sentences.length)
-      setCurrentSentenceIndex(sentenceIndex)
-      setCurrentChapterIndex(chapterIndex)
-      player.setPageIndex(Math.floor(sentenceIndex / player.pageSize))
-      player.setTimeMap(book.timeMap || [])
-      setCurrentView('player')
+      // 各 store 一次写入，避免 6+ 次 set 连环重渲染
+      enterPlayerSession(book, normalizedRange, versionId)
+      usePlayerStore.getState().prepareForBook({
+        totalSentences: book.sentences.length,
+        sentenceIndex,
+        chapterIndex,
+        timeMap: book.timeMap || []
+      })
+
+      // 主文本布局被治愈：后台写回瘦身后的 chapters/structure（不阻塞遮罩）。
+      // 编辑记录版本 (versionId=uuid) 绝不落盘，避免把临时句子写进书库。
+      if (changed && (versionId === null || versionId === '__original__')) {
+        void updateBookAndPersist({
+          ...book,
+          currentSentenceIndex: sentenceIndex,
+          currentChapterIndex: chapterIndex
+        })
+      }
+
       return true
     },
-    [
-      setChapters,
-      setCurrentBook,
-      setCurrentChapterIndex,
-      setCurrentSentenceIndex,
-      setCurrentView,
-      setCurrentVersionId,
-      setSentenceRange,
-      setSentences,
-      setTotalSentences,
-      showToast,
-      tts
-    ]
+    [enterPlayerSession, showToast, tts, updateBookAndPersist]
   )
 
   // === Keyboard shortcuts ===
@@ -788,15 +784,20 @@ export default function App() {
             currentSentenceIndex: sentenceIndex,
             currentChapterIndex: findChapterIndex(chapters, sentenceIndex)
           },
-          book.structureMeta?.contentHash ? { contentHash: book.structureMeta.contentHash } : undefined
+          {
+            trusted: true,
+            ...(book.structureMeta?.contentHash
+              ? { contentHash: book.structureMeta.contentHash }
+              : {})
+          }
         )
         if (toSave) {
-          void updateBookAndPersist(toSave)
+          // 写回前再 heal，禁止预选页把超长章/巨 structure 持久化
+          void updateBookAndPersist(healBookLayoutForReading(toSave).book)
         }
       }
 
-      // 打开链路性能：无 recordId 时句子即导入原文，其 hash 与 book.structureMeta.contentHash 一致，
-      // 直接传入复用，跳过 normalize 内的全量 SHA-256（渲染进程纯 JS sha256，大书单次约 145ms）。
+      // 打开链路：trusted + 复用 contentHash，禁止再跑全量 block 校验
       const displayBook = normalizeBookData(
         {
           ...book,
@@ -808,9 +809,12 @@ export default function App() {
           structureMeta: canPersistChapters && activeChapters ? structureMeta : book.structureMeta,
           timeMap: recordId ? undefined : book.timeMap
         },
-        !recordId && book.structureMeta?.contentHash
-          ? { contentHash: book.structureMeta.contentHash }
-          : undefined
+        {
+          trusted: true,
+          ...(!recordId && book.structureMeta?.contentHash
+            ? { contentHash: book.structureMeta.contentHash }
+            : {})
+        }
       )
       if (!displayBook) {
         showToast('error', '所选版本没有可朗读内容')
@@ -821,8 +825,8 @@ export default function App() {
         ? (normalizedRange?.start ?? 0)
         : displayBook.currentSentenceIndex
       activateReadingBook(displayBook, normalizedRange, requestedIndex, recordId || '__original__')
-      // 关键：activate 后阅读器大树渲染仍卡主线程，遮罩必须撑到 paint 完成
-      await waitUntilUiSettled({ minMs: 700, frames: 4, startedAt })
+      // 关键：遮罩必须盖到真实正文容器挂载并完成首帧量高，而不是 loading 占位页
+      await waitForReaderReady({ minMs: 600, frames: 4, startedAt, timeoutMs: 12000 })
       } finally {
         setLoading(false)
       }

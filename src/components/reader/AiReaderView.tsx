@@ -137,7 +137,7 @@ export function AiReaderContent({
   currentBook,
   sentences,
   currentSentenceIndex,
-  isLoading,
+  isLoading: _isLoading,
   immersive = false,
   onSpeakRaw,
   onStopRaw,
@@ -637,22 +637,10 @@ export function AiReaderContent({
     }
   }, [sentences])
 
-  if (isLoading) {
-    return (
-      <div className="relative flex min-h-0 flex-1 flex-col bg-surface dark:bg-dark-bg">
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-          <Loader2 className="h-10 w-10 animate-spin text-primary" />
-          <div>
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-200">正在准备阅读器…</p>
-            <p className="mt-1 text-xs text-gray-400">加载正文结构、大纲与 AI 侧栏</p>
-          </div>
-          <div className="h-1 w-36 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
-            <div className="h-full w-1/2 animate-pulse rounded-full bg-primary/80" />
-          </div>
-        </div>
-      </div>
-    )
-  }
+  // 注意：不要在 isLoading 时卸载正文！
+  // 全局 LoadingOverlay 盖在上面时，真实 ContentCards 必须继续挂载，
+  // 否则 waitForReaderReady 只能等到占位页，遮罩一关立刻卡死滚轮。
+  // isLoading 仅用于禁用重操作（见大纲/全书按钮），不阻断首屏渲染。
   if (!currentBook || sentences.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center text-gray-400">

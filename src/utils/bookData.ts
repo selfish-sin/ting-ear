@@ -11,9 +11,18 @@ import type {
 import { hashSentences } from './contentHash'
 import {
   type Boundary,
+  CHAPTER_MAX_SENTENCES,
   buildChaptersByMode,
-  chaptersToBoundaries
+  chaptersToBoundaries,
+  rebuildChaptersForSentences
 } from './chapterBuilder'
+
+/** 打开/入库时：单章超过此句数视为「巨章」，必须切开 */
+export const OVERSIZED_CHAPTER_SENTENCES = CHAPTER_MAX_SENTENCES
+/** 全书 structure blocks 超过此数 → 改为骨架，按章懒建（防 19 万 block 卡死） */
+export const MAX_STRUCTURE_BLOCKS_IN_MEMORY = 2500
+/** 单章 blocks 超过此数 → 该章改懒建 */
+export const MAX_BLOCKS_PER_CHAPTER = 600
 
 export const BOOK_TITLE_MAX_LENGTH = 120
 export const MIN_READABLE_SENTENCE_LENGTH = 20
@@ -412,10 +421,44 @@ function nextPseudoBlockId(): string {
   return `pb-${Date.now().toString(36)}-${(pseudoBlockCounter++).toString(36)}`
 }
 
+/** 仅章骨架（blocks 空）：阅读器按当前章懒填充，避免巨章一次生成数万 DOM 数据 */
+export function buildSkeletonStructure(chapters: Chapter[]): StructuredChapter[] {
+  return chapters.map((chapter) => {
+    const end = chapter.startIndex + chapter.sentenceCount
+    return {
+      title: chapter.title,
+      level: 1,
+      blocks: [],
+      sentenceRange: [chapter.startIndex, end] as [number, number]
+    }
+  })
+}
+
 export function generatePseudoStructure(
   sentences: string[],
   chapters: Chapter[]
 ): { structure: StructuredChapter[]; structureMeta: StructureMeta } {
+  const totalSentences = sentences.length
+  const totalBlocksEstimate = chapters.reduce(
+    (n, ch) => n + 1 + Math.ceil(Math.max(0, ch.sentenceCount) / 5),
+    0
+  )
+  // 巨书：只建骨架，打开后按章 ensureChapterBlocks，避免入库/打开瞬间生成几十万 block
+  if (
+    totalSentences > OVERSIZED_CHAPTER_SENTENCES * 4 ||
+    totalBlocksEstimate > MAX_STRUCTURE_BLOCKS_IN_MEMORY ||
+    chapters.some((ch) => ch.sentenceCount > OVERSIZED_CHAPTER_SENTENCES * 2)
+  ) {
+    return {
+      structure: buildSkeletonStructure(chapters),
+      structureMeta: {
+        schemaVersion: 1,
+        contentHash: hashSentences(sentences),
+        sourceFormat: 'pseudo-skeleton'
+      }
+    }
+  }
+
   const blockSize = 5
   const structure: StructuredChapter[] = chapters.map((chapter) => {
     const end = chapter.startIndex + chapter.sentenceCount
@@ -454,6 +497,152 @@ export function generatePseudoStructure(
       contentHash: hashSentences(sentences),
       sourceFormat: 'pseudo'
     }
+  }
+}
+
+/** 布局是否病态（超长章 / 巨量 block）——各关口统一判断，禁止「修完又沿用旧坏数据」 */
+export function isUnhealthyBookLayout(book: Pick<BookData, 'chapters' | 'structure' | 'sentences'>): boolean {
+  const chapters = book.chapters || []
+  const total = book.sentences?.length || 0
+  if (total > 0 && chapters.length === 0) return true
+  if (chapters.some((c) => c.sentenceCount > OVERSIZED_CHAPTER_SENTENCES)) return true
+  if (
+    chapters.length <= 1 &&
+    total > OVERSIZED_CHAPTER_SENTENCES
+  ) {
+    return true
+  }
+  const structure = book.structure
+  if (!structure) return false
+  let totalBlocks = 0
+  let maxChapterBlocks = 0
+  for (const ch of structure) {
+    const n = ch.blocks?.length || 0
+    totalBlocks += n
+    if (n > maxChapterBlocks) maxChapterBlocks = n
+  }
+  if (totalBlocks > MAX_STRUCTURE_BLOCKS_IN_MEMORY || maxChapterBlocks > MAX_BLOCKS_PER_CHAPTER) {
+    return true
+  }
+  if (structure.length !== chapters.length) return true
+  return structure.some((ch, i) => {
+    const expectedStart = chapters[i].startIndex
+    const expectedEnd = chapters[i].startIndex + chapters[i].sentenceCount
+    return (
+      !ch.sentenceRange ||
+      ch.sentenceRange[0] !== expectedStart ||
+      ch.sentenceRange[1] !== expectedEnd
+    )
+  })
+}
+
+/**
+ * 磁盘/IPC 出入口统一：trusted normalize + 布局治愈。
+ * 所有「书从磁盘进内存 / 从主进程进渲染」应走这里，避免关口各自为政。
+ */
+export function normalizeAndHealBook(
+  value: unknown,
+  opts?: NormalizeBookOptions
+): { book: BookData | null; changed: boolean } {
+  const normalized = normalizeBookData(value, {
+    trusted: opts?.trusted !== false,
+    contentHash: opts?.contentHash
+  })
+  if (!normalized) return { book: null, changed: false }
+  return healBookLayoutForReading(normalized)
+}
+
+/**
+ * 打开阅读前治愈病态布局（不依赖重新导入）：
+ * 1) 单章/超长章 → 按 original/merged 规则重切（≤400 句）
+ * 2) structure 块过多或与 chapters 错位 → 改章骨架，当前章懒建 blocks
+ *
+ * 返回的 book 可直接进阅读器；changed=true 时建议后台 persist 瘦身。
+ */
+export function healBookLayoutForReading(book: BookData): { book: BookData; changed: boolean } {
+  const sentences = book.sentences || []
+  const total = sentences.length
+  if (total === 0) return { book, changed: false }
+
+  let chapters = book.chapters?.length
+    ? book.chapters
+    : [{ title: '正文', startIndex: 0, sentenceCount: total }]
+  let changed = false
+
+  // 任一章超长、或全书只有 1 章却远超上限 → 必须重切（标题叫什么都算）
+  const hasOversized = chapters.some((c) => c.sentenceCount > OVERSIZED_CHAPTER_SENTENCES)
+  const looksLikeBlob = chapters.length <= 1 && total > OVERSIZED_CHAPTER_SENTENCES
+
+  if (hasOversized || looksLikeBlob || chapters.length === 0) {
+    const mode = book.chapterMode === 'merged' ? 'merged' : 'original'
+    const rebuilt = rebuildChaptersForSentences(sentences, chapters, { mode })
+    chapters = rebuilt.map((c) => ({
+      title: c.title,
+      startIndex: c.startIndex,
+      sentenceCount: c.sentenceCount,
+      originalTitle: c.title
+    }))
+    changed = true
+  }
+
+  const structure = book.structure
+  let totalBlocks = 0
+  let maxChapterBlocks = 0
+  if (structure) {
+    for (const ch of structure) {
+      const n = ch.blocks?.length || 0
+      totalBlocks += n
+      if (n > maxChapterBlocks) maxChapterBlocks = n
+    }
+  }
+
+  const structureOutOfSync =
+    !structure ||
+    structure.length !== chapters.length ||
+    structure.some((ch, i) => {
+      const expectedStart = chapters[i].startIndex
+      const expectedEnd = chapters[i].startIndex + chapters[i].sentenceCount
+      return (
+        !ch.sentenceRange ||
+        ch.sentenceRange[0] !== expectedStart ||
+        ch.sentenceRange[1] !== expectedEnd
+      )
+    }) ||
+    totalBlocks > MAX_STRUCTURE_BLOCKS_IN_MEMORY ||
+    maxChapterBlocks > MAX_BLOCKS_PER_CHAPTER
+
+  let nextStructure = structure
+  let nextMeta = book.structureMeta
+  if (structureOutOfSync || changed) {
+    nextStructure = buildSkeletonStructure(chapters)
+    nextMeta = book.structureMeta
+      ? { ...book.structureMeta, schemaVersion: 1 }
+      : {
+          schemaVersion: 1 as const,
+          contentHash: '',
+          sourceFormat: 'healed-skeleton'
+        }
+    // contentHash 空时不编造（打开路径不扫全文）；有则保留
+    if (!nextMeta.contentHash && book.structureMeta?.contentHash) {
+      nextMeta = { ...nextMeta, contentHash: book.structureMeta.contentHash }
+    }
+    changed = true
+  }
+
+  if (!changed) return { book, changed: false }
+
+  return {
+    book: {
+      ...book,
+      chapters,
+      structure: nextStructure,
+      structureMeta: nextMeta,
+      currentChapterIndex: findChapterIndex(
+        chapters,
+        clampSentenceIndex(book.currentSentenceIndex, total)
+      )
+    },
+    changed: true
   }
 }
 
@@ -600,6 +789,26 @@ function isLooseStructureMeta(value: unknown): value is StructureMeta {
   )
 }
 
+/** trusted 打开：只验章级骨架，不扫每个 block（避免巨 structure 卡顿） */
+function isLooseStructureShape(value: unknown, sentenceCount: number): value is StructuredChapter[] {
+  if (!Array.isArray(value) || value.length === 0) return false
+  let cursor = 0
+  for (const chapter of value) {
+    if (
+      !isRecord(chapter) ||
+      typeof chapter.title !== 'string' ||
+      !Array.isArray(chapter.blocks) ||
+      !isIntegerRange(chapter.sentenceRange)
+    ) {
+      return false
+    }
+    const [start, end] = chapter.sentenceRange
+    if (start !== cursor || end < start || end > sentenceCount) return false
+    cursor = end
+  }
+  return cursor === sentenceCount
+}
+
 function normalizeBookDataUncached(
   value: unknown,
   opts?: NormalizeBookOptions
@@ -638,28 +847,31 @@ function normalizeBookDataUncached(
   const rawStructure = (value as Record<string, unknown>).structure
   const rawMeta = (value as Record<string, unknown>).structureMeta
   const hasStructureData = rawStructure !== undefined || rawMeta !== undefined
-  const structureShapeOk = isValidStructure(rawStructure, sentences.length)
 
-  // hash：优先调用方 / 库内 meta；仅在需要校验或重建时才全文哈希
-  let contentHash = opts?.contentHash
-  if (!contentHash && trusted && isLooseStructureMeta(rawMeta)) {
-    contentHash = rawMeta.contentHash
-  }
+  // trusted 打开路径：只做轻量形状检查，跳过全量 block 遍历（19 万 block 可达 100ms+）
+  const structureShapeOk = trusted
+    ? isLooseStructureShape(rawStructure, sentences.length)
+    : isValidStructure(rawStructure, sentences.length)
+
+  // hash：优先调用方 / 库内 meta；仅非 trusted 校验 meta 时才全文哈希
+  const contentHashForMeta =
+    opts?.contentHash ||
+    (trusted && isLooseStructureMeta(rawMeta) ? rawMeta.contentHash : undefined)
 
   if (structureShapeOk) {
     const metaOk = trusted
       ? isLooseStructureMeta(rawMeta)
-      : isValidStructureMeta(
-          rawMeta,
-          contentHash ?? (contentHash = hashSentences(sentences))
-        )
+      : isValidStructureMeta(rawMeta, contentHashForMeta || hashSentences(sentences))
     if (metaOk) {
-      structure = rawStructure.map((chapter, index) => ({
+      structure = (rawStructure as StructuredChapter[]).map((chapter, index) => ({
         ...chapter,
         title: chapters[index]?.customTitle || chapter.title
       }))
       structureMeta = rawMeta as StructureMeta
-      chapters = structure.map((chapter, index) => {
+      // 仅当 structure 章粒度健康时才用它覆盖 chapters。
+      // 否则保留已 normalize 的 chapters（finalize 可能已切成 ≤400），
+      // 避免「1 章 × 全书」的 structure 把分章结果盖掉（潘绥铭文集级灾难）。
+      const derived = structure.map((chapter, index) => {
         const metadata = chapters[index]
         return {
           title: metadata?.customTitle || chapter.title,
@@ -669,6 +881,12 @@ function normalizeBookDataUncached(
           ...(metadata?.customTitle ? { customTitle: metadata.customTitle } : {})
         }
       })
+      const structureOversized = derived.some(
+        (c) => c.sentenceCount > OVERSIZED_CHAPTER_SENTENCES
+      )
+      if (!structureOversized) {
+        chapters = derived
+      }
     } else if (hasStructureData && !trusted) {
       const pseudo = generatePseudoStructure(sentences, chapters)
       structure = pseudo.structure

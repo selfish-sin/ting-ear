@@ -39,34 +39,76 @@ export function deriveChapters(structure: StructuredChapter[]): Chapter[] {
 /**
  * 按分章模式重排 structure（保留 blocks）。
  * 默认 original：保留目录粒度，仅切超长章；merged 才套 35~400。
+ *
+ * 关键：即使 structure 只有 1 章，只要超长也必须切开。
+ * 旧实现 `length <= 1` 直接返回，导致无 # 标题的 MD 文集以「1 章 × 十几万 block」入库，
+ * 打开时主线程卡死。
  */
 export function regroupStructuredChapters(
   structure: StructuredChapter[],
   options?: { minSentences?: number; maxSentences?: number; mode?: ChapterMode }
 ): { structure: StructuredChapter[]; chapters: Chapter[] } {
-  const sourceChapters = deriveChapters(structure)
-  if (sourceChapters.length <= 1) return { structure, chapters: sourceChapters }
+  if (!structure.length) return { structure, chapters: [] }
 
+  const sourceChapters = deriveChapters(structure)
   const totalSentences =
     structure.length > 0 ? structure[structure.length - 1].sentenceRange[1] : 0
+  if (totalSentences <= 0) return { structure, chapters: sourceChapters }
+
   // 默认 original；若只传了旧 min/max 且 min>=35 则视为 merged
   const effectiveMode: ChapterMode =
     options?.mode ??
     (options?.minSentences !== undefined && options.minSentences >= 35 ? 'merged' : 'original')
-  const mergedChapters = buildChaptersByMode(
-    totalSentences,
-    chaptersToBoundaries(sourceChapters),
-    effectiveMode
-  )
+
+  // 单章「正文/全文」blob：边界视为空，走伪分章 + 超长切开
+  const looksLikeSingleBlob =
+    sourceChapters.length <= 1 &&
+    (sourceChapters.length === 0 ||
+      sourceChapters[0].sentenceCount >= totalSentences ||
+      /^(正文|全文|全书|未命名)$/.test((sourceChapters[0]?.title || '').trim()))
+
+  const boundaries = looksLikeSingleBlob ? [] : chaptersToBoundaries(sourceChapters)
+  const mergedChapters = buildChaptersByMode(totalSentences, boundaries, effectiveMode)
+
+  // 切分结果与原 structure 章范围一致 → 无需搬 block
+  const sameLayout =
+    mergedChapters.length === sourceChapters.length &&
+    mergedChapters.every(
+      (ch, i) =>
+        ch.startIndex === sourceChapters[i].startIndex &&
+        ch.sentenceCount === sourceChapters[i].sentenceCount
+    )
+  if (sameLayout) {
+    return {
+      structure: structure.map((ch, i) => ({
+        ...ch,
+        title: mergedChapters[i]?.title || ch.title
+      })),
+      chapters: mergedChapters
+    }
+  }
+
+  // 线性扫描分配 block（O(blocks + chapters)，避免每章 flatMap 全表）
+  const allBlocks = structure.flatMap((source) => source.blocks || [])
+  allBlocks.sort((a, b) => a.sentenceRange[0] - b.sentenceRange[0] || a.sentenceRange[1] - b.sentenceRange[1])
+
+  let bi = 0
   const regrouped = mergedChapters.map((chapter) => {
     const start = chapter.startIndex
     const end = start + chapter.sentenceCount
-    const blocks = structure.flatMap((source) => {
-      const [sourceStart, sourceEnd] = source.sentenceRange
-      const overlaps = sourceEnd > start && sourceStart < end
-      const isHeadingOnly = sourceStart === sourceEnd && sourceStart >= start && sourceStart < end
-      return overlaps || isHeadingOnly ? source.blocks : []
-    })
+    while (bi < allBlocks.length && allBlocks[bi].sentenceRange[1] <= start) bi += 1
+    const blocks = []
+    let j = bi
+    while (j < allBlocks.length) {
+      const block = allBlocks[j]
+      const [bs, be] = block.sentenceRange
+      if (bs >= end) break
+      // 与章节有重叠即纳入（含 heading-only 空 range 落在章内）
+      if (be > start || (bs === be && bs >= start && bs < end)) {
+        blocks.push(block)
+      }
+      j += 1
+    }
     return {
       title: chapter.title,
       level: 1,
