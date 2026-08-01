@@ -23,7 +23,7 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `src/components/reader/ChapterOutlinePanel.tsx` | **唯一挂载**的当前章大纲 UI（生成/重试/改名） | 改大纲面板 |
 | `src/components/reader/ChapterOutline.tsx` / `SectionNav.tsx` | **已删除**（曾未挂载） | — |
 | `src/components/reader/ModeSwitch.tsx` / `ReaderHeader.tsx` | AI 阅读/听书切换；阅读页顶栏 | 改模式控件/页头 |
-| `src/components/ai/*` | 侧栏、消息、引用、选区、检索、nmem 横幅 | 改 AI 对话交互 |
+| `src/components/ai/*` | 侧栏、消息、引用、选区、检索、nmem 横幅、`KnowledgeBaseButton`（每书本地知识库入口：未建/建中/已建+重建·删除） | 改 AI 对话交互 |
 | `src/components/settings/AiSettingsPanel.tsx` / `src/aiSettings.ts` | AI 表单与默认值/深合并/路由正则 | 改 AI 配置或 prompt |
 | `src/hooks/useTTS.ts` | 书籍播放、ttsSkip、唯一 Audio、`speakRaw`/`stopRaw`、系统兜底 | 改 TTS 生命周期 |
 | `src/utils/audioOutput.ts` / `ttsSkip.ts` / `ttsSession.ts` / `contentHash.ts` / `uiReady.ts` | GainNode、跳过导航、raw 互斥、SHA-256 前 16 位、`waitForReaderReady` | 改音量/跳过/哈希/打开就绪 |
@@ -35,6 +35,7 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `electron/ipc/fileHandlers.ts` | 导入/导出、JSON 读写、`getDataDir`、启动 ingest | 改导入/持久化 |
 | `electron/services/ai/llm-caller.ts` / `ai-service.ts` | SSE、错误分类、路由、RAG 编排、代理走 axios、智谱别名 | 改模型请求/检索编排 |
 | `electron/services/ai/nmem-bridge.ts` | nmem health/search/ingest HTTP | 改知识库协议 |
+| `electron/services/ai/local-ingest.ts` / `vector-store.ts` / `embedding-caller.ts` | **本地向量知识库**：按章分块(≤800字+2句重叠+章名拼进 embedding)→OpenAI 兼容 embedding→`vectors/{bookId}.json`(base64 Float32)；检索=进程内缓存(mtime 失效)+cosine+章节过滤+相对分数阈值 | 改本地索引/分块/检索 |
 | `electron/services/ai/ingest-service.ts` / `ingest-scheduler.ts` | **整本**一书一源同步、`ingest-status.json`、排队重试 | 改知识库导入 |
 | `electron/services/ai/outline-*.ts` | 生成规则、输入校验、FIFO 队列、v3 缓存 | 改大纲流水线 |
 | `electron/services/ai/ai-history.ts` / `ai-config.ts` | `ai-history.json`；主进程 AI 配置入口 | 改历史或配置读取 |
@@ -102,13 +103,26 @@ useTTS.playSentence
 aiStore.sendMessage
  -> ai:chat → AiService.chat
  -> classifyQuestion(selection→greeting→book_wide→chapter→current_sentence→general)
- -> nmem.search（按 bookId/路由/当前章硬过滤）
- -> sources 事件 → streamChat SSE chunks → done/error
+ -> combinedRetrieve：nmem.search ‖ 本地向量(searchBookVectors) 并行
+    -> chapter 类问题：本地向量只在该章算 cosine（下推过滤，避免 topK 槽位被别章占满）
+    -> 双源 RRF 倒数排名融合 + 前 100 字去重（nmem Rust 分数与本地 cosine 0..1 尺度不可比，不比绝对分数只比排名）
+ -> buildSourceRefs（按 bookId/路由/当前章硬过滤）→ sources 事件 → streamChat SSE chunks → done/error
 ```
 
 - 200 响应中的 error envelope 或空正文算失败；主模型失败可试一次备用模型
 - nmem 断线只降级当前请求；面板横幅 + `statusCacheMs` 轮询
-- **ingest：整本一书一源**（`IngestService` + `IngestScheduler`），状态在 `ingest-status.json`；旧按章状态会触发整本重传。自动 ingest 不阻塞导入。**本地 contentHash 是唯一重传依据**：hash 匹配且状态正常 → 直接信任本地、不查远程、不重传（绝不因 nmem 抖动/重启而每次打开全量重导）。`IngestScheduler` 有 **per-book in-flight 锁**（导入即时线 `tryIngest` 与探针线 `catchUp` 并发复用同一 Promise）；`ai:nmem:ingest` 统一走共享 scheduler（`getIngestScheduler`）。**坑：nmem 不按 source name 去重**，故内容变化重传时上传成功后 `deleteSource` 删旧源；`dedupeSources`/`ai:nmem:dedupe`（设置页「去重知识库」按钮，**纯手动**）按 `[bookId=]` 分组删多余副本，不改本地状态、不触发重传。已废弃 `verifyExisting`（曾因 listSources 不全导致全量误判重传）
+- **本地向量知识库**（`local-ingest`/`vector-store`/`embedding-caller`）：
+  - 分块：按章→句子边界对齐，≤800 字，**块间 2 句重叠**，**章名拼进 embedding 文本**（存储 `text` 仍是纯正文）；`VectorChunk` 带 `chapterTitle`（旧文件缺省回退「第 N 章」）
+  - 存储：`vectors/{bookId}.json`，向量 base64 Float32（**注意 `decodeVec` 必须用 `buf.buffer.slice(byteOffset,…)` 而非 `new Float32Array(buf.buffer)`——Buffer 走共享内存池，`.buffer` 比实际大，直接用会读出垃圾**）
+  - embedding 请求：**单批指数退避重试**（5xx/429/网络错误 4 次，800ms→1.6s→3.2s，4xx 不重试直接抛）；单批重试耗尽后 `ingestBookLocal` **降级跳过该批**保留已成功向量（按 chunk 索引收集，跳过批次不写入避免错位），全书所有批次失败才抛错。`IngestProgress.skipped` 报告跳过块数
+  - 检索：**进程内缓存**（`getCachedVectors`，按文件 mtime 失效，一次性解码全部 Float32Array，热路径跳过逐块 base64）；cosine topK + **相对分数阈值**（默认保留 ≥0.5×最高分，绝对地板 0.3，`minScoreRatio:0` 关闭→旧行为）
+  - **坑：embedding 模型/维度变更后必须重建知识库**——`assertVectorCompat` 校验维度与模型名，不一致抛 `VectorCompatError`（绝不截断维度照算 cosine 得垃圾分）；`combinedRetrieve`/`ai:vec:search` catch 后降级为空结果并 warn
+  - **坑（已修）**：本地向量结果 source 必须是 `[bookId=..][ch=..] 章名` 格式才能被 `parseSourceMetadata`/`buildSourceRefs` 保留；旧格式「本地向量·第X章」会被全量静默丢弃
+  - **入口**：`KnowledgeBaseButton`（AI 助手头部，每书常驻）→ `aiVecIngest`/`aiVecCancel`/`aiVecDelete`；已建点开给「重建/删除」。进度仍由 `NmemBanner` 渲染
+  - **坑（已修）**：`NmemBanner`「进行中」分支必须在 `offline`/`none`/`failed` 之前——否则未同步到 nmem 的书做本地向量化时进度条被「none」分支截胡永不显示
+  - **坑（已修）**：`ai:nmem:ingest` 不再自动连带 `ingestBookLocal`——本地向量化只由 `KnowledgeBaseButton` 的 `ai:vec:ingest` 发起。否则未点按钮也会发 `ai:vec:progress`，`KnowledgeBaseButton` 假显 building、`NmemBanner` 假显进度，无法辨识是否真正向量化过
+- **prompt 9 层组装**（`buildPromptMessages`）：system→webSearch→readerContext→chapterFullText→bookEvidence→webResults→selectedQuotes→history；**总字符预算 60000 守卫**，超限按优先级丢 chapterFullText→webResults→readerContext（证据/历史始终保留）
+- **ingest：整本一书一源**（`IngestService` + `IngestScheduler`），状态在 `ingest-status.json`；旧按章状态会触发整本重传。自动 ingest 不阻塞导入。**本地 contentHash 是唯一重传依据**：hash 匹配且状态正常 → 直接信任本地、不查远程、不重传（绝不因 nmem 抖动/重启而每次打开全量重导）。`IngestScheduler` 有 **per-book in-flight 锁** + **status 串行写队列**（防批量并行 tryIngest 覆盖 `ingest-status.json` 丢状态→探针再传升 nmem v2）。`ai:nmem:ingest` 统一走共享 scheduler。**坑：nmem 不按 name 去重，重传会升 version(v1/v2/v3) 或新建 src_***；上传成功后按 bookId 扫远程删兄弟源。`listSources` 必须读 `original_name`+`lifecycle_state` 并用 `offset/limit` 翻页（默认只 50 条）。`dedupeSources`/`ai:nmem:dedupe`（设置页，**纯手动**）按 `[bookId=]` 分组，保留 ready→高 version，删多余；会修正本地 sourceId 指向保留源。已废弃 `verifyExisting`
 - 选区：去空白 >2 字显示 `SelectionPopup`；引用最多 5 条；「问 AI」持久请求展开侧栏并聚焦
 - 历史：`ai-history.json` 每书最多 200 条；损坏文件整体抛错，禁止静默覆盖
 - `speakRaw`：卡片/回答朗读，不写 `currentSentenceIndex`/历史/字幕；`rawSpeechActive` 隔离书籍会话
@@ -159,7 +173,7 @@ npm run build / typecheck / lint / test
 解析/结构：`parserCompatibility`、`epubParserStructure`、`mdParserStructure`、`structureBuilder`、`structureVersionMismatch`、`chapterBuilderModes`  
 布局/分章：`healBookLayout`、`regroupSingleChapter`  
 阅读 UI：`readerComponents`、`contextMenuComponents`、`modeSwitchPlayback`、`chapterTitleEditing`  
-AI/RAG：`llmCaller`、`ipcStreaming`、`settingsDeepMerge`、`aiHistory`、`aiStore`、`aiComponents`、`aiSettingsPanel`、`nmemBridge`、`nmemContract`、`spoilerFilter`、`ragOrchestration`、`ragComponents`、`selectionQuoteComponents`、`fullTextInject`  
+AI/RAG：`llmCaller`、`ipcStreaming`、`settingsDeepMerge`、`aiHistory`、`aiStore`、`aiComponents`、`aiSettingsPanel`、`nmemBridge`、`nmemContract`、`spoilerFilter`、`ragOrchestration`、`ragComponents`、`selectionQuoteComponents`、`fullTextInject`、`vectorStore`  
 大纲：`outlineGenerator`、`outlineRepository`、`outlineQueue`、`outlineIntegration`、`outlineIpc`  
 ingest：`ingestWholeBook`  
 TTS：`ttsSkip`、`ttsSession`、`engineImport`  
@@ -181,6 +195,7 @@ TTS：`ttsSkip`、`ttsSession`、`engineImport`
 - 大纲按当前章按需生成，缓存 **v4**；`ChapterOutlinePanel` 为唯一大纲 UI（旧 `ChapterOutline`/`SectionNav` 已删）
 - TTS 内存预取缓存 LRU 上限 50 句；听书大章仅渲染当前句附近窗口
 - 知识库 **整本**同步（非按章）；源名 `书名 [bookId=id]`（`parseSourceMetadata` 同时兼容旧前缀格式）；nmem 默认 `127.0.0.1:14242`
+- 本地向量检索：双源 nmem‖local 并行 → **RRF 融合**（不比绝对分数，只比排名）；本地有进程内缓存、章节过滤、相对分数阈值；embedding 模型/维度变更须重建知识库（`VectorCompatError`）
 - Electron 主进程 `fetch` 不读代理环境变量；检测到代理时模型请求走 axios（见 `llm-caller.ts`）
 - 智谱旧别名 `GLM-4.7-Flash` → 请求层映射 `glm-4.7`
 - MOBI 依赖本机 Calibre；**PDF 仅文字层**（扫描版需 OCR，导入会提示）；不要把书籍/API Key/日志/缓存提交 Git
