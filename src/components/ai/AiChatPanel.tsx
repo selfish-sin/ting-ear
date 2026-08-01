@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Globe, Settings2, Sparkles, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Database, Globe, Settings2, Sparkles, Trash2 } from 'lucide-react'
 import type { AiChatMessage, AiSourceRef, BookData } from '../../global'
 import { useAiStore } from '../../stores/aiStore'
 import { useBookStore } from '../../stores/bookStore'
@@ -8,7 +8,41 @@ import { cn } from '../../utils/cn'
 import ChatInput from './ChatInput'
 import ChatMessages from './ChatMessages'
 import ConversationHistory from './ConversationHistory'
+import KnowledgeBaseButton from './KnowledgeBaseButton'
 import NmemBanner from './NmemBanner'
+
+import { mergeAiSettings } from '../../aiSettings'
+
+/** 输入框上方的快捷开关栏：nmem 外部知识库 + 网络搜索 */
+function ChatToggles() {
+  const ai = useSettingsStore((s) => s.settings.ai)
+  const setSettings = useSettingsStore((s) => s.setSettings)
+  const merged = mergeAiSettings(ai)
+
+  const toggleNmem = () => {
+    setSettings({ ai: { ...merged, nmem: { ...merged.nmem, enabled: !merged.nmem.enabled } } })
+  }
+  const toggleWebSearch = () => {
+    setSettings({ ai: { ...merged, webSearch: { ...merged.webSearch, enabled: !merged.webSearch.enabled } } })
+  }
+
+  const btnBase = 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors'
+  const onCls = 'bg-primary/10 text-primary'
+  const offCls = 'bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-500'
+
+  return (
+    <div className="flex items-center gap-1.5 border-t border-gray-100 px-3 py-1 dark:border-gray-700/50">
+      <button type="button" onClick={toggleNmem} className={`${btnBase} ${merged.nmem.enabled ? onCls : offCls}`} title="nmem 外部知识库">
+        <Database className="h-3 w-3" />
+        外部知识库
+      </button>
+      <button type="button" onClick={toggleWebSearch} className={`${btnBase} ${merged.webSearch.enabled ? onCls : offCls}`} title="联网搜索">
+        <Globe className="h-3 w-3" />
+        联网搜索
+      </button>
+    </div>
+  )
+}
 
 interface AiChatPanelContentProps {
   messages: AiChatMessage[]
@@ -21,6 +55,8 @@ interface AiChatPanelContentProps {
   nmemError?: string | null
   bookIngestStatus?: import('../../global').AiBookIngestStatus['status'] | 'checking'
   bookIngestError?: string | null
+  /** 是否正在主动同步本书到 nmem（仅主动同步显示远程进度条，自动后台 ingest 不显示） */
+  nmemManualSyncing?: boolean
   onRetryNmem?: () => Promise<void>
   onSyncBookToNmem?: () => Promise<boolean>
   onNavigateSource?: (source: AiSourceRef) => void
@@ -140,6 +176,7 @@ export function AiChatPanelContent({
   nmemError = null,
   bookIngestStatus = 'none',
   bookIngestError = null,
+  nmemManualSyncing = false,
   onRetryNmem = async () => undefined,
   onSyncBookToNmem,
   onNavigateSource = () => undefined,
@@ -232,6 +269,7 @@ export function AiChatPanelContent({
             </span>
             <WebSearchToggle />
             <ConversationHistory />
+            <KnowledgeBaseButton />
             <button
               type="button"
               onClick={() => void onClear()}
@@ -266,6 +304,7 @@ export function AiChatPanelContent({
             error={nmemError}
             bookIngestStatus={bookIngestStatus}
             bookIngestError={bookIngestError}
+            nmemManualSyncing={nmemManualSyncing}
             onRetry={onRetryNmem}
             onSyncBook={onSyncBookToNmem}
           />
@@ -281,6 +320,7 @@ export function AiChatPanelContent({
             onRegenerate={onRegenerate}
             onRetry={onRetryMessage}
           />
+          <ChatToggles />
           <ChatInput
             isStreaming={isStreaming}
             isConfigured={isConfigured}
@@ -312,6 +352,7 @@ export default function AiChatPanel({
     nmemError,
     bookIngestStatus,
     bookIngestError,
+    nmemManualSyncing,
     initialize,
     refreshNmemStatus,
     syncCurrentBookToNmem,
@@ -377,6 +418,7 @@ export default function AiChatPanel({
       nmemError={nmemError}
       bookIngestStatus={bookIngestStatus}
       bookIngestError={bookIngestError}
+      nmemManualSyncing={nmemManualSyncing}
       onRetryNmem={() => refreshNmemStatus(true)}
       onSyncBookToNmem={syncCurrentBookToNmem}
       onNavigateSource={navigateSource}

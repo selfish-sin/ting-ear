@@ -34,6 +34,13 @@ interface AiState {
   /** 本书知识库同步状态 */
   bookIngestStatus: AiBookIngestStatus['status'] | 'checking'
   bookIngestError: string | null
+  /**
+   * 用户是否正在「主动」同步本书到 nmem（点「同步本书」按钮触发）。
+   * 自动后台 ingest（导入时 autoIngestBook / 探针 catchUp）不置此标志，
+   * 用于让 NmemBanner 区分：只有主动同步才显示远程索引进度条，
+   * 自动后台同步不显示假加载条（避免用户误以为在做本地向量化）。
+   */
+  nmemManualSyncing: boolean
   quotes: string[]
   quoteRevision: number
   pendingChatFocusRequestId: number | null
@@ -378,6 +385,7 @@ export const useAiStore = create<AiState>((set, get) => {
     nmemError: null,
     bookIngestStatus: 'checking',
     bookIngestError: null,
+    nmemManualSyncing: false,
     quotes: [],
     quoteRevision: 0,
     pendingChatFocusRequestId: null,
@@ -466,7 +474,7 @@ export const useAiStore = create<AiState>((set, get) => {
     syncCurrentBookToNmem: async () => {
       const book = useBookStore.getState().currentBook
       if (!book || !window.api?.aiNmemIngest) return false
-      set({ bookIngestStatus: 'submitting', bookIngestError: null })
+      set({ bookIngestStatus: 'submitting', bookIngestError: null, nmemManualSyncing: true })
       try {
         const full =
           book.sentences.length > 0
@@ -475,17 +483,20 @@ export const useAiStore = create<AiState>((set, get) => {
         const result = await window.api.aiNmemIngest(full)
         if (result.success) {
           await get().refreshBookIngestStatus()
+          set({ nmemManualSyncing: false })
           return true
         }
         set({
           bookIngestStatus: 'failed',
-          bookIngestError: result.error || '同步失败'
+          bookIngestError: result.error || '同步失败',
+          nmemManualSyncing: false
         })
         return false
       } catch (error) {
         set({
           bookIngestStatus: 'failed',
-          bookIngestError: error instanceof Error ? error.message : String(error)
+          bookIngestError: error instanceof Error ? error.message : String(error),
+          nmemManualSyncing: false
         })
         return false
       }
