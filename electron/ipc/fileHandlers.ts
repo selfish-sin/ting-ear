@@ -1,7 +1,7 @@
 import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync, unlinkSync, readdirSync, statSync, copyFileSync } from 'fs'
 import { writeFile, rename, copyFile, stat as fsStat } from 'fs/promises'
-import { join, resolve } from 'path'
+import { join, resolve, isAbsolute } from 'path'
 import { app } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import { parseEpub } from '../services/parsers/epubParser'
@@ -100,6 +100,13 @@ export function getBackgroundsDirPath(): string {
   return dir
 }
 
+/** 校验自定义背景图相对路径：必须是 backgrounds/ 下的非越界路径。 */
+function isSafeBackgroundRelPath(p: unknown): p is string {
+  if (typeof p !== 'string' || p.length === 0 || p.length > 256) return false
+  if (isAbsolute(p) || /[a-zA-Z]:/.test(p) || p.includes('..')) return false
+  return p.startsWith('backgrounds/')
+}
+
 /** 把背景图源解析为 data URL；文件缺失返回 null。纯函数，供 IPC 与测试复用。 */
 export async function resolveBackgroundDataUrl(
   source: 'preset' | 'custom',
@@ -121,6 +128,8 @@ export async function resolveBackgroundDataUrl(
         : join(__dirname, '../../resources/backgrounds', preset.file)
     } else {
       if (!key) return null
+      // 校验自定义路径必须在 backgrounds/ 子树内，防越界读取任意文件
+      if (!isSafeBackgroundRelPath(key)) return null
       // 测试钩子：允许临时指定数据目录
       const base = process.env.TINGEAR_BG_TEST_DATADIR || getDataDir()
       absPath = join(base, key)
@@ -1166,6 +1175,9 @@ export function registerFileHandlers(
 
   ipcMain.handle('background:remove', async (_event, customPath: string) => {
     try {
+      if (!isSafeBackgroundRelPath(customPath)) {
+        return { success: false, error: 'invalid path' }
+      }
       const abs = join(getDataDir(), customPath)
       if (existsSync(abs)) unlinkSync(abs)
       return { success: true }

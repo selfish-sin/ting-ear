@@ -152,8 +152,12 @@ export default function App() {
       else document.documentElement.classList.remove('dark')
     }
     if (settings.theme === 'system') {
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-      applyTheme(prefersDark ? 'dark' : 'light')
+      const mq = window.matchMedia('(prefers-color-scheme: dark)')
+      applyTheme(mq.matches ? 'dark' : 'light')
+      // 订阅运行时 OS 主题切换，与 AppBackground.useIsDark 行为一致
+      const update = () => applyTheme(mq.matches ? 'dark' : 'light')
+      mq.addEventListener('change', update)
+      return () => mq.removeEventListener('change', update)
     } else {
       applyTheme(settings.theme)
     }
