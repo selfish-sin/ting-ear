@@ -17,6 +17,8 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `src/components/bookshelf/*` | 缩放常量、网格/列表卡、继续阅读、批量栏 | 改书架卡片 UI |
 | `src/components/SettingsModal.tsx` | 设置弹窗壳（4 tabs：常规/朗读/AI/清洗），`h-[80vh]` 定高 | 改设置入口 |
 | `src/components/settings/*` | General/TTS/Ai 分面板（Appearance/Shortcuts/About 已删） | 改各设置页 |
+| `src/backgroundPresets.ts` | 内置背景图预设元数据（id/name/file，6 张） | 改预设列表 |
+| `src/components/AppBackground.tsx` | 根层背景图+遮罩组件（z-0、pointer-events-none、disabled 返回 null） | 改背景渲染 |
 | `src/components/ui/ContextMenu.tsx` | Portal 右键菜单（视口钳制、键盘、焦点恢复） | 改任何右键/溢出菜单 |
 | `src/components/reader/AiReaderView.tsx` | AI 阅读三栏；大纲面板、连续正文、AI 侧栏；旧书伪结构 | 改 AI 阅读布局/生命周期 |
 | `src/components/reader/ContentCards.tsx` / `ContentCard.tsx` | 章节标题去重、正文右键、连续排版、当前句/raw 高亮 | 改正文/高亮/滚动 |
@@ -32,7 +34,7 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `src/cleanRules.ts` / `src/shortcuts.ts` | 默认清洗规则；快捷键定义 | 改规则或键位 |
 | `electron/main.ts` / `preload.ts` | 启动、托盘、`window.api` | 改主进程或桥接 |
 | `electron/ipc/aiHandlers.ts` | `ai:chat/*`、`ai:nmem:*`、`ai:outline:*` | 改 AI/大纲 IPC |
-| `electron/ipc/fileHandlers.ts` | 导入/导出、JSON 读写、`getDataDir`、启动 ingest | 改导入/持久化 |
+| `electron/ipc/fileHandlers.ts` | 导入/导出、JSON 读写、`getDataDir`、启动 ingest、背景图 IPC（list/add/resolve/remove） | 改导入/持久化 |
 | `electron/services/ai/llm-caller.ts` / `ai-service.ts` | SSE、错误分类、路由、RAG 编排、代理走 axios、智谱别名 | 改模型请求/检索编排 |
 | `electron/services/ai/nmem-bridge.ts` | nmem health/search/ingest HTTP | 改知识库协议 |
 | `electron/services/ai/local-ingest.ts` / `vector-store.ts` / `embedding-caller.ts` | **本地向量知识库**：按章分块(≤800字+2句重叠+章名拼进 embedding)→OpenAI 兼容 embedding→`vectors/{bookId}.json`(base64 Float32)；检索=进程内缓存(mtime 失效)+cosine+章节过滤+相对分数阈值 | 改本地索引/分块/检索 |
@@ -192,6 +194,7 @@ TTS：`ttsSkip`、`ttsSession`、`engineImport`
 
 - 在线 Edge/千问/HTTP + 系统 Web Speech 临时兜底；引擎管理与导入导出可用
 - 清洗纯规则；音量 0~200%；封面 `COVER_STYLE_VERSION=v2-light`
+- 应用背景图：`AppSettings.background`（默认关）；内置 6 预设在 `resources/backgrounds/`（打包到 `resourcesPath/backgrounds/`），上传图存 `{dataDir}/backgrounds/`；图源经 `background:resolve` 转 data URL；大块容器透明、卡片留底
 - AI 阅读 A–F、共享右键菜单、连续阅读排版、章节标题去重、全局 focus-visible 已完成
 - 大纲按当前章按需生成，缓存 **v4**；`ChapterOutlinePanel` 为唯一大纲 UI（旧 `ChapterOutline`/`SectionNav` 已删）
 - TTS 内存预取缓存 LRU 上限 50 句；听书大章仅渲染当前句附近窗口
@@ -200,3 +203,4 @@ TTS：`ttsSkip`、`ttsSession`、`engineImport`
 - Electron 主进程 `fetch` 不读代理环境变量；检测到代理时模型请求走 axios（见 `llm-caller.ts`）
 - 智谱旧别名 `GLM-4.7-Flash` → 请求层映射 `glm-4.7`
 - MOBI 依赖本机 Calibre；**PDF 仅文字层**（扫描版需 OCR，导入会提示）；不要把书籍/API Key/日志/缓存提交 Git
+
