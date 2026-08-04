@@ -11,6 +11,8 @@ files:
 extraResources:
   - from: electron/ocr
     to: ocr
+  - from: resources/backgrounds
+    to: backgrounds
 win:
   executableName: 听伴
   icon: icon.ico
