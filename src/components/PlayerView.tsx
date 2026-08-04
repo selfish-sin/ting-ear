@@ -620,7 +620,7 @@ export default function PlayerView({
 
   return (
     <div
-      className={`flex flex-col overflow-hidden bg-white dark:bg-dark-bg relative min-h-0 ${
+      className={`flex flex-col overflow-hidden bg-transparent relative min-h-0 ${
         immersive ? 'absolute inset-0' : 'flex-1'
       }`}
     >

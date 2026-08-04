@@ -48,7 +48,7 @@ export default function SideNav({ currentView, onViewChange, onOpenSettings }: S
 
   return (
     <aside
-      className={`h-full flex flex-col select-none bg-surface dark:bg-dark-surface border-r border-gray-200 dark:border-dark-border shrink-0 transition-[width] duration-200 ease-in-out ${expanded ? 'w-40' : 'w-12'}`}
+      className={`h-full flex flex-col select-none bg-surface/80 dark:bg-dark-surface/80 border-r border-gray-200 dark:border-dark-border shrink-0 transition-[width] duration-200 ease-in-out ${expanded ? 'w-40' : 'w-12'}`}
     >
       {/* Logo */}
       <div className="px-2 pt-3 pb-2 flex items-center gap-2 justify-center" style={expanded ? { justifyContent: 'flex-start', paddingLeft: '0.625rem' } : undefined}>
