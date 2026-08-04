@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Ban, Database, FolderOpen, Check, AlertCircle, RefreshCw, RotateCcw, ChevronDown, Trash2 } from 'lucide-react'
+import { Ban, Database, FolderOpen, Check, AlertCircle, RefreshCw, RotateCcw, ChevronDown, Trash2, ImageIcon, Upload } from 'lucide-react'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { PRESET_BACKGROUNDS } from '../../backgroundPresets'
 import { useBookStore } from '../../stores/bookStore'
 import { useHistoryStore } from '../../stores/historyStore'
 import { useLogStore } from '../../stores/logStore'
@@ -40,6 +41,8 @@ function Collapsible({ title, children, defaultOpen = false }: { title: string; 
 
 export default function GeneralSettingsPanel({ showToast }: Props) {
   const { settings, setSettings, setAlwaysOnTop, setFloatingBallEnabled, setTheme, setOpacity, setFontSize, setShortcuts } = useSettingsStore()
+  const setBackground = useSettingsStore((s) => s.setBackground)
+  const background = settings.background
 
   // --- 数据目录 ---
   const [dataDir, setDataDir] = useState('')
@@ -65,6 +68,10 @@ export default function GeneralSettingsPanel({ showToast }: Props) {
   }>({ running: false, progress: null, result: null })
   const [outlineForce, setOutlineForce] = useState(false)
 
+  // --- 背景预设缩略图 ---
+  const [presetThumbs, setPresetThumbs] = useState<Record<string, string>>({})
+  const [uploadingBg, setUploadingBg] = useState(false)
+
   useEffect(() => {
     Promise.all([window.api?.dataDirGet(), window.api?.dataDirGetDefault()]).then(([current, def]) => {
       if (current) setDataDir(current)
@@ -72,6 +79,25 @@ export default function GeneralSettingsPanel({ showToast }: Props) {
     })
     setDirHistory(settings.dataDirHistory || [])
   }, [settings.dataDirHistory])
+
+  // 加载背景预设缩略图（挂载时一次）
+  useEffect(() => {
+    let cancelled = false
+    Promise.all(
+      PRESET_BACKGROUNDS.map(async (p) => {
+        const url = await window.api?.backgroundResolve('preset', p.id)
+        return [p.id, url] as const
+      })
+    ).then((entries) => {
+      if (cancelled) return
+      const map: Record<string, string> = {}
+      for (const [id, url] of entries) if (url) map[id] = url
+      setPresetThumbs(map)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     if (!window.api?.onOutlineBatchProgress) return
@@ -194,6 +220,23 @@ export default function GeneralSettingsPanel({ showToast }: Props) {
     showToast('success', '数据目录已更新，重启应用后完全生效')
   }
 
+  // --- 背景图上传 ---
+  const handleUploadBackground = async () => {
+    if (uploadingBg) return
+    setUploadingBg(true)
+    try {
+      const result = await window.api?.backgroundAdd()
+      if (result?.success && result.customPath) {
+        setBackground({ source: 'custom', customPath: result.customPath, enabled: true })
+        showToast('success', '背景图已上传')
+      } else if (result?.error && result.error !== '取消选择') {
+        showToast('error', result.error)
+      }
+    } finally {
+      setUploadingBg(false)
+    }
+  }
+
   return (
     <div className="space-y-5">
       {/* ===== 外观（平铺） ===== */}
@@ -239,6 +282,139 @@ export default function GeneralSettingsPanel({ showToast }: Props) {
               type="range" min="0.4" max="1.0" step="0.05"
               value={settings.windowOpacity}
               onChange={(e) => setOpacity(parseFloat(e.target.value))}
+              className="w-full"
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* ===== 背景（平铺） ===== */}
+      <div>
+        <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-200">背景</h3>
+        <div className="flex flex-wrap gap-2">
+          {PRESET_BACKGROUNDS.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => setBackground({ source: 'preset', presetId: p.id, enabled: true })}
+              className={`relative h-16 w-24 overflow-hidden rounded-lg border-2 transition-all ${
+                background?.source === 'preset' && background?.presetId === p.id
+                  ? 'border-primary ring-2 ring-primary/30'
+                  : 'border-gray-200 hover:border-primary/40 dark:border-gray-700'
+              }`}
+              title={p.name}
+            >
+              {presetThumbs[p.id] ? (
+                <img src={presetThumbs[p.id]} alt={p.name} className="h-full w-full object-cover" />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center bg-gray-100 dark:bg-gray-800">
+                  <ImageIcon className="h-5 w-5 text-gray-300" />
+                </div>
+              )}
+            </button>
+          ))}
+          <button
+            onClick={handleUploadBackground}
+            disabled={uploadingBg}
+            className="flex h-16 w-24 flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-gray-300 text-xs text-gray-400 hover:border-primary/50 hover:text-primary disabled:opacity-50 dark:border-gray-600"
+            title="上传自定义背景图"
+          >
+            <Upload className="h-4 w-4" />
+            上传
+          </button>
+        </div>
+
+        <div className="mt-3 flex items-center gap-4">
+          <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={background?.enabled === true}
+              onChange={(e) => setBackground({ enabled: e.target.checked })}
+              className="h-4 w-4 accent-primary"
+            />
+            使用背景图
+          </label>
+          {background?.source === 'custom' && background.customPath && (
+            <button
+              onClick={async () => {
+                const cp = background.customPath
+                if (!cp) return
+                setBackground({ source: 'preset', presetId: null, enabled: false })
+                await window.api?.backgroundRemove(cp)
+                showToast('info', '已删除自定义背景图')
+              }}
+              className="flex items-center gap-1 text-xs text-gray-400 hover:text-red-500"
+            >
+              <Trash2 className="h-3 w-3" /> 删除当前自定义图
+            </button>
+          )}
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3">
+          <div>
+            <span className="mb-1 block text-xs text-gray-500 dark:text-gray-400">填充模式</span>
+            <div className="flex gap-1.5">
+              {(['cover', 'contain', 'stretch'] as const).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setBackground({ fit: f })}
+                  className={`px-2.5 py-1 text-xs rounded border ${
+                    background?.fit === f
+                      ? 'border-primary bg-primary/10 text-primary'
+                      : 'border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:border-primary/30'
+                  }`}
+                >
+                  {f === 'cover' ? '填充' : f === 'contain' ? '适应' : '拉伸'}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label className="block">
+            <span className="mb-1 block text-xs text-gray-500 dark:text-gray-400">背景模糊: {background?.blur ?? 0}px</span>
+            <input
+              type="range" min="0" max="20" step="1"
+              value={background?.blur ?? 0}
+              onChange={(e) => setBackground({ blur: parseInt(e.target.value) })}
+              className="w-full"
+            />
+          </label>
+          <div>
+            <span className="mb-1 block text-xs text-gray-500 dark:text-gray-400">遮罩颜色</span>
+            <div className="flex items-center gap-1.5">
+              {([
+                { v: 'auto', label: '自动' },
+                { v: '#000000', label: '黑' },
+                { v: '#ffffff', label: '白' }
+              ] as const).map((o) => (
+                <button
+                  key={o.v}
+                  onClick={() => setBackground({ overlayColor: o.v })}
+                  className={`px-2.5 py-1 text-xs rounded border ${
+                    (background?.overlayColor ?? 'auto') === o.v
+                      ? 'border-primary bg-primary/10 text-primary'
+                      : 'border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:border-primary/30'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+              <label className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
+                <input
+                  type="color"
+                  value={(background?.overlayColor ?? 'auto').startsWith('#') ? (background?.overlayColor as string) : '#1a1a2e'}
+                  onChange={(e) => setBackground({ overlayColor: e.target.value })}
+                  className="h-6 w-6 rounded cursor-pointer"
+                  title="自定义遮罩色"
+                />
+                自定义
+              </label>
+            </div>
+          </div>
+          <label className="block">
+            <span className="mb-1 block text-xs text-gray-500 dark:text-gray-400">遮罩透明: {Math.round((background?.overlayOpacity ?? 0.7) * 100)}%</span>
+            <input
+              type="range" min="0" max="1" step="0.05"
+              value={background?.overlayOpacity ?? 0.7}
+              onChange={(e) => setBackground({ overlayOpacity: parseFloat(e.target.value) })}
               className="w-full"
             />
           </label>
@@ -584,3 +760,5 @@ export default function GeneralSettingsPanel({ showToast }: Props) {
     </div>
   )
 }
+
+
