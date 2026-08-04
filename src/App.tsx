@@ -3,6 +3,7 @@ import TitleBar from './components/TitleBar'
 import SideNav from './components/SideNav'
 import BookShelf from './components/BookShelf'
 import PlayerView from './components/PlayerView'
+import AppBackground from './components/AppBackground'
 import AiReaderView from './components/reader/AiReaderView'
 import { shouldShowFullPlaybackBar } from './components/reader/AiPlaybackCapsule'
 import ControlBar from './components/ControlBar'
@@ -1015,6 +1016,7 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-gray-50 dark:bg-dark-bg relative">
+      <AppBackground />
       <LoadingOverlay
         visible={appBooting}
         message="正在打开听伴…"
@@ -1047,7 +1049,7 @@ export default function App() {
         </div>
 
         {/* Main content */}
-        <div className="flex-1 flex flex-col overflow-hidden min-h-0 bg-white dark:bg-dark-bg min-w-0">
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0 bg-transparent min-w-0">
           {currentView === 'shelf' && (
             <BookShelf
               onImportFile={handleImportFile}
