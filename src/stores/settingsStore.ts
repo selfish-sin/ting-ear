@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { DEFAULT_CLEAN_RULES } from '../cleanRules'
 import { DEFAULT_SHORTCUTS, normalizeShortcuts } from '../shortcuts'
-import type { AppSettings, FloatingBallSettings, ShortcutMap } from '../global'
+import type { AppSettings, FloatingBallSettings, ShortcutMap, BackgroundSettings } from '../global'
 import { mergeAiSettings } from '../aiSettings'
 
 const defaultFloatingBall: FloatingBallSettings = {
@@ -22,6 +22,17 @@ const defaultFloatingBall: FloatingBallSettings = {
   mode: 'ball'
 }
 
+const defaultBackground: BackgroundSettings = {
+  enabled: false,
+  source: 'preset',
+  presetId: null,
+  customPath: null,
+  fit: 'cover',
+  blur: 0,
+  overlayColor: 'auto',
+  overlayOpacity: 0.7
+}
+
 interface SettingsState {
   settings: AppSettings
 
@@ -36,6 +47,7 @@ interface SettingsState {
   setFloatingBallEnabled: (enabled: boolean) => void
   setFloatingBallSettings: (partial: Partial<FloatingBallSettings>) => void
   setShortcuts: (shortcuts: ShortcutMap) => void
+  setBackground: (partial: Partial<BackgroundSettings>) => void
   loadSettings: () => Promise<void>
   saveSettings: () => Promise<void>
 }
@@ -58,7 +70,8 @@ export const defaultSettings: AppSettings = {
   dataDir: '',
   dataDirHistory: [],
   autoResume: false,
-  ai: mergeAiSettings()
+  ai: mergeAiSettings(),
+  background: defaultBackground
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -135,6 +148,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     get().saveSettings()
   },
 
+  setBackground: (partial) => {
+    set((s) => ({
+      settings: {
+        ...s.settings,
+        background: { ...(s.settings.background ?? defaultBackground), ...partial }
+      }
+    }))
+    get().saveSettings()
+  },
+
   loadSettings: async () => {
     try {
       const loaded = await window.api?.loadSettings()
@@ -159,7 +182,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
               loadedSettings.cleanRules && loadedSettings.cleanRules.length > 0
                 ? loadedSettings.cleanRules
                 : DEFAULT_CLEAN_RULES,
-            ai: mergeAiSettings(loadedSettings.ai)
+            ai: mergeAiSettings(loadedSettings.ai),
+            background: { ...defaultBackground, ...(loadedSettings.background || {}) }
           }
         })
         // Apply window settings

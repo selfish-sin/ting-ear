@@ -825,6 +825,25 @@ export interface FloatingBallSettings {
   mode: 'ball' | 'hover' | 'mini'
 }
 
+export interface BackgroundSettings {
+  /** 是否启用背景图（关则纯色，回到现在） */
+  enabled: boolean
+  /** 用内置预设还是用户上传 */
+  source: 'preset' | 'custom'
+  /** 预设 id（如 'aurora'）；source=preset 时生效 */
+  presetId: string | null
+  /** 自定义图在数据目录下的相对路径（如 'backgrounds/xxx.jpg'）；source=custom 时生效 */
+  customPath: string | null
+  /** 填充模式：cover 填满裁切 / contain 完整留白 / stretch 拉伸 */
+  fit: 'cover' | 'contain' | 'stretch'
+  /** 背景图高斯模糊 px，0–20，默认 0 */
+  blur: number
+  /** 'auto' = 按主题自动（浅色白 / 深色黑）；否则为 hex 色如 '#1a1a2e' */
+  overlayColor: 'auto' | string
+  /** 遮罩透明度 0–1，默认 0.7 */
+  overlayOpacity: number
+}
+
 export interface AppSettings {
   ttsEngine: string // 引擎ID，内置: edge/qwen/system，也支持自定义引擎ID
   qwenApiKey: string
@@ -854,6 +873,8 @@ export interface AppSettings {
   autoResume?: boolean
   /** AI 阅读助手配置 */
   ai?: AiSettings
+  /** 应用背景图配置 */
+  background?: BackgroundSettings
 }
 
 /** 全局快捷键动作 */
