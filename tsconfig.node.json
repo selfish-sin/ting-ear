@@ -17,6 +17,7 @@
     "src/cleanRules.ts",
     "src/aiSettings.ts",
     "src/aiProvider.ts",
+    "src/backgroundPresets.ts",
     "src/webSearch.ts",
     "src/shortcuts.ts",
     "src/utils/albumUtils.ts",

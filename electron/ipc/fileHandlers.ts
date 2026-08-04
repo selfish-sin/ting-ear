@@ -21,6 +21,7 @@ import type { SettingsService } from '../services/settings-service'
 import type { EngineManager } from '../services/tts-engines/engine-manager'
 import type { BookData, CustomAlbum } from '../../src/global'
 import { validateAlbums } from '../../src/utils/albumUtils'
+import { PRESET_BACKGROUNDS } from '../../src/backgroundPresets'
 import {
   buildSkeletonStructure,
   healBookLayoutForReading,
@@ -86,6 +87,55 @@ export function getIngestScheduler(): IngestScheduler | null {
 /** 进程退出前同步落盘未写回的阅读进度（防抖窗口内的最后数据） */
 export function flushLibraryProgressOnQuit(): void {
   libraryStorageInstance?.flushProgressSync()
+}
+
+/** 数据目录下的 backgrounds/ 绝对路径（已确保存在）。导出供测试。 */
+export function getBackgroundsDirPath(): string {
+  // 测试钩子：允许临时指定数据目录（与 resolveBackgroundDataUrl 一致）
+  const base = process.env.TINGEAR_BG_TEST_DATADIR || getDataDir()
+  const dir = join(base, 'backgrounds')
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
+}
+
+/** 把背景图源解析为 data URL；文件缺失返回 null。纯函数，供 IPC 与测试复用。 */
+export async function resolveBackgroundDataUrl(
+  source: 'preset' | 'custom',
+  key: string | null
+): Promise<string | null> {
+  try {
+    let absPath: string | null = null
+    if (source === 'preset') {
+      const preset = PRESET_BACKGROUNDS.find((p) => p.id === key)
+      if (!preset) return null
+      let packaged = false
+      try {
+        packaged = app?.isPackaged === true
+      } catch {
+        packaged = false
+      }
+      absPath = packaged
+        ? join(process.resourcesPath, 'backgrounds', preset.file)
+        : join(__dirname, '../../resources/backgrounds', preset.file)
+    } else {
+      if (!key) return null
+      // 测试钩子：允许临时指定数据目录
+      const base = process.env.TINGEAR_BG_TEST_DATADIR || getDataDir()
+      absPath = join(base, key)
+    }
+    if (!existsSync(absPath)) return null
+    const buf = readFileSync(absPath)
+    const ext = absPath.toLowerCase().endsWith('.png')
+      ? 'png'
+      : absPath.toLowerCase().endsWith('.webp')
+        ? 'webp'
+        : 'jpeg'
+    return `data:image/${ext};base64,${buf.toString('base64')}`
+  } catch {
+    return null
+  }
 }
 
 /** 设置自定义数据目录（供 SettingsService 在加载配置后调用） */
@@ -1014,6 +1064,14 @@ export function registerFileHandlers(
     return coversDir
   }
 
+  function getBackgroundsDir(): string {
+    const dir = join(getDataDir(), 'backgrounds')
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true })
+    }
+    return dir
+  }
+
   // Save a cover image (base64 data URL or file path) for a book
   ipcMain.handle('cover:save', async (_event, bookId: string, dataUrl: string) => {
     try {
@@ -1071,6 +1129,48 @@ export function registerFileHandlers(
       return `data:image/png;base64,${base64}`
     } catch {
       return null
+    }
+  })
+
+  // === 背景图 ===
+  ipcMain.handle('background:list', async () => {
+    return PRESET_BACKGROUNDS.map((p) => ({ id: p.id, name: p.name }))
+  })
+
+  ipcMain.handle('background:add', async () => {
+    try {
+      const win = BrowserWindow.getFocusedWindow()
+      if (!win) return { success: false, error: '无活动窗口' }
+      const result = await dialog.showOpenDialog(win, {
+        title: '选择背景图片',
+        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+        properties: ['openFile']
+      })
+      if (result.canceled || result.filePaths.length === 0) {
+        return { success: false, error: '取消选择' }
+      }
+      const srcPath = result.filePaths[0]
+      const ext = srcPath.toLowerCase().split('.').pop() || 'jpg'
+      const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
+      const dest = join(getBackgroundsDir(), name)
+      copyFileSync(srcPath, dest)
+      return { success: true, customPath: `backgrounds/${name}` }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('background:resolve', async (_event, source: 'preset' | 'custom', key: string | null) => {
+    return resolveBackgroundDataUrl(source, key)
+  })
+
+  ipcMain.handle('background:remove', async (_event, customPath: string) => {
+    try {
+      const abs = join(getDataDir(), customPath)
+      if (existsSync(abs)) unlinkSync(abs)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: String(error) }
     }
   })
 
