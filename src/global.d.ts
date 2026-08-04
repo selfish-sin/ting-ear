@@ -362,6 +362,15 @@ export interface Api {
   dataDirValidate: (dirPath: string) => Promise<{ valid: boolean; error?: string; path: string }>
   /** 迁移数据到新目录 */
   dataDirMigrate: (newDir: string) => Promise<{ success: boolean; migrated?: boolean; oldPath?: string; newPath?: string; error?: string; message?: string }>
+  // === 背景图 ===
+  /** 列出内置预设（id+name），文件名不暴露给渲染进程 */
+  backgroundList: () => Promise<Array<{ id: string; name: string }>>
+  /** 上传自定义背景图：弹文件选择框，复制到数据目录，返回相对路径 */
+  backgroundAdd: () => Promise<{ success: boolean; customPath?: string; error?: string }>
+  /** 解析图源为 data URL；文件缺失返回 null */
+  backgroundResolve: (source: 'preset' | 'custom', key: string | null) => Promise<string | null>
+  /** 删除自定义背景图文件 */
+  backgroundRemove: (customPath: string) => Promise<{ success: boolean; error?: string }>
 }
 
 declare global {

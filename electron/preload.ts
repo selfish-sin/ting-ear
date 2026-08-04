@@ -422,7 +422,18 @@ const api = {
     ipcRenderer.invoke('dataDir:validate', dirPath) as Promise<{ valid: boolean; error?: string; path: string }>,
   /** 迁移数据到新目录 */
   dataDirMigrate: (newDir: string) =>
-    ipcRenderer.invoke('dataDir:migrate', newDir) as Promise<{ success: boolean; migrated?: boolean; oldPath?: string; newPath?: string; error?: string; message?: string }>
+    ipcRenderer.invoke('dataDir:migrate', newDir) as Promise<{ success: boolean; migrated?: boolean; oldPath?: string; newPath?: string; error?: string; message?: string }>,
+
+  // === 背景图 ===
+  /** 列出内置预设（id+name），文件名不暴露给渲染进程 */
+  backgroundList: () => ipcRenderer.invoke('background:list'),
+  /** 上传自定义背景图：弹文件选择框，复制到数据目录，返回相对路径 */
+  backgroundAdd: () => ipcRenderer.invoke('background:add'),
+  /** 解析图源为 data URL；文件缺失返回 null */
+  backgroundResolve: (source: 'preset' | 'custom', key: string | null) =>
+    ipcRenderer.invoke('background:resolve', source, key),
+  /** 删除自定义背景图文件 */
+  backgroundRemove: (customPath: string) => ipcRenderer.invoke('background:remove', customPath)
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to renderer
