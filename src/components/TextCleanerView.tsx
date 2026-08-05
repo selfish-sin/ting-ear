@@ -310,7 +310,7 @@ export default function TextCleanerView({
         <p className="text-sm">从书架右键选择「清洗格式」或从快速文本粘贴内容</p>
         <button
           onClick={onBackToShelf}
-          className="mt-4 px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90 transition-colors"
+          className="mt-4 px-4 py-2 bg-primary text-[rgb(var(--on-primary-rgb))] rounded-lg hover:bg-primary/90 transition-colors"
         >
           返回书架
         </button>
@@ -319,9 +319,9 @@ export default function TextCleanerView({
   }
 
   return (
-    <div className="flex-1 flex flex-col bg-gray-50 dark:bg-gray-900 min-h-0 overflow-hidden">
+    <div className="flex-1 flex flex-col bg-transparent min-h-0 overflow-hidden">
       {/* 顶部工具栏 */}
-      <div className="flex items-center gap-3 px-4 py-3 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+      <div className="panel-chrome flex items-center gap-3 px-4 py-3 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
         <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200 flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-primary" />
           文本清洗
@@ -370,7 +370,7 @@ export default function TextCleanerView({
         {cleanedText && (
           <button
             onClick={handleApply}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-[rgb(var(--on-primary-rgb))] rounded-md hover:bg-primary/90 transition-colors"
           >
             <Save className="w-3.5 h-3.5" />
             应用
@@ -391,7 +391,7 @@ export default function TextCleanerView({
       <div className="flex-1 flex min-h-0">
         {/* 左侧：原始文本 / 手动编辑 */}
         <div className="flex-1 flex flex-col border-r border-gray-200 dark:border-gray-700 min-h-0">
-          <div className="px-3 py-1.5 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-xs text-gray-500 flex-shrink-0">
+          <div className="panel-chrome px-3 py-1.5 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-xs text-gray-500 flex-shrink-0">
             原始文本 · {sourceText.length} 字
           </div>
           <div className="flex-1 p-4 overflow-y-auto text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap font-mono min-h-0">

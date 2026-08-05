@@ -17,10 +17,22 @@ assert.deepEqual(parseSourceMetadata('测试之书 [bookId=book-1]'), {
 })
 // 兼容旧前缀格式
 assert.deepEqual(parseSourceMetadata('[bookId=book-1] 测试之书'), {
-
   bookId: 'book-1',
   chapterIndex: -1,
   chapterTitle: '测试之书'
+})
+
+// nmem original_name 常带 .md 后缀，不得解析失败
+assert.deepEqual(parseSourceMetadata('先知三部曲 [bookId=book-abc].md'), {
+  bookId: 'book-abc',
+  chapterIndex: -1,
+  chapterTitle: '先知三部曲'
+})
+// 兜底：标签夹在其它文字中
+assert.deepEqual(parseSourceMetadata('prefix 书名 [bookId=book-x] suffix'), {
+  bookId: 'book-x',
+  chapterIndex: -1,
+  chapterTitle: 'prefix 书名  suffix'
 })
 
 const memories: NmemMemory[] = [
@@ -63,8 +75,9 @@ const basicPayload: AiChatPayload = {
   bookTitle: '测试',
   messages: [{ role: 'user', content: '辩证法是什么' }]
 }
-assert.equal(buildRetrievalQuery(basicPayload), '辩证法是什么')
-console.log('  ok uses user question alone')
+// 书名会并入 query，便于全书级命中正确源
+assert.equal(buildRetrievalQuery(basicPayload), '测试 辩证法是什么')
+console.log('  ok uses book title + user question')
 
 const contextPayload: AiChatPayload = {
   ...basicPayload,

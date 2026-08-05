@@ -56,6 +56,9 @@ function cleanInlineMarkdown(text: string): string {
  * 逐行解析 Markdown 为结构化章节。
  * 每个 heading 开启新章；block 按类型标注。
  */
+// 非正文区段标题（如 batch_ocr 输出的书签目录），整段跳过不入 structure
+const SKIP_SECTION_TITLES = new Set(['书签'])
+
 export function parseMarkdownToStructure(raw: string): StructuredChapter[] {
   const lines = raw.split(/\r?\n/)
   const chapters: StructuredChapter[] = []
@@ -63,6 +66,7 @@ export function parseMarkdownToStructure(raw: string): StructuredChapter[] {
   let paragraphLines: string[] = []
   let inCodeBlock = false
   let codeLines: string[] = []
+  let skipLevel = 0 // >0 时处于跳过区段，值为该区段标题级别
 
   const flushParagraph = (): void => {
     if (paragraphLines.length === 0 || !ctx.chapter) return
@@ -119,19 +123,37 @@ export function parseMarkdownToStructure(raw: string): StructuredChapter[] {
     const headerMatch = trimmed.match(/^(#{1,6})\s+(.+)/)
     if (headerMatch) {
       const level = headerMatch[1].length
-      if (level === 1 || !ctx.chapter) ensureChapter(headerMatch[2].trim(), level)
+      const headingText = headerMatch[2].trim()
+
+      // 跳过区段：遇到同级或更高级标题时退出
+      if (skipLevel > 0) {
+        if (level > skipLevel) continue // 仍属跳过区段
+        skipLevel = 0 // 退出跳过
+      }
+
+      // 进入跳过区段
+      if (SKIP_SECTION_TITLES.has(headingText)) {
+        flushParagraph()
+        skipLevel = level
+        continue
+      }
+
+      if (level === 1 || !ctx.chapter) ensureChapter(headingText, level)
       else flushParagraph()
       // heading 本身也作为一个 block（用于卡片渲染）
       ctx.chapter!.blocks.push({
         blockId: uuidv4(),
         type: 'heading',
         level,
-        text: headerMatch[2].trim(),
+        text: headingText,
         ttsSkip: false,
         sentenceRange: [0, 0]
       })
       continue
     }
+
+    // 跳过区段内的非标题行
+    if (skipLevel > 0) continue
 
     // 脚注
     const footnoteMatch = trimmed.match(/^\[\^(\w+)\]:?\s*(.*)/)
@@ -229,10 +251,8 @@ export function parseMarkdown(filePath: string): BookData {
     sentenceIndex: c.startIndex
   }))
 
-  // Extract title from first chapter or filename
-  let title = structure[0]?.title || ''
-  const fileName = filePath.split(/[\\/]/).pop()?.replace(/\.md$/i, '') || ''
-  if (!title || title === '正文') title = fileName
+  // MD 无内嵌元数据，直接用文件名作为书名
+  const title = filePath.split(/[\\/]/).pop()?.replace(/\.md$/i, '') || structure[0]?.title || '未命名'
 
   const structureMeta: StructureMeta = {
     schemaVersion: 1,

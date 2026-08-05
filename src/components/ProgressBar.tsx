@@ -184,33 +184,34 @@ export default function ProgressBar({ onSeek, onPause, onResume }: ProgressBarPr
   )
 
   return (
-    <div className="px-3 sm:px-4 pt-1.5 pb-0.5 flex-shrink-0 bg-white dark:bg-dark-surface border-t border-gray-100 dark:border-dark-border">
+    <div className="flex-shrink-0 bg-transparent px-3 sm:px-4 pt-1.5 pb-0.5">
       <div
         ref={trackRef}
-        className="relative h-1.5 bg-gray-200 dark:bg-dark-muted rounded-full cursor-pointer group"
+        className="group relative h-1.5 cursor-pointer rounded-full bg-black/10 dark:bg-white/15"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
       >
+        {/* 进度条：主题色点缀 */}
         <div
           className="absolute top-0 left-0 h-full rounded-full bg-primary transition-all duration-100"
           style={{ width: `${displayProgress}%` }}
         />
         <div
-          className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-primary rounded-full border-2 border-white dark:border-dark-surface shadow-sm"
+          className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full border-2 border-white bg-primary shadow-sm dark:border-white/90"
           style={{ left: `${displayProgress}%`, marginLeft: '-6px' }}
         />
         {hoverTimeMs !== null && totalDurationMs > 0 && (
           <div
-            className="absolute -top-8 bg-gray-800 text-white text-[10px] px-1.5 py-0.5 rounded shadow pointer-events-none -translate-x-1/2 whitespace-nowrap z-20"
+            className="pointer-events-none absolute -top-8 z-20 -translate-x-1/2 whitespace-nowrap rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-white shadow"
             style={{ left: `${(hoverTimeMs / totalDurationMs) * 100}%` }}
           >
             {formatTime(hoverTimeMs)}
-            {hoverChapter && <span className="text-white/70 ml-1">{hoverChapter.title}</span>}
+            {hoverChapter && <span className="ml-1 text-white/70">{hoverChapter.title}</span>}
           </div>
         )}
       </div>
-      <div className="flex items-center justify-between mt-1 text-[10px] sm:text-[11px] text-gray-400 dark:text-gray-500 tabular-nums">
+      <div className="mt-1 flex items-center justify-between text-[10px] tabular-nums text-gray-500 dark:text-gray-400 sm:text-[11px]">
         <span>
           {formatTime(isDragging && hoverTimeMs != null ? hoverTimeMs : currentTimeMs)} /{' '}
           {formatTime(totalDurationMs)}

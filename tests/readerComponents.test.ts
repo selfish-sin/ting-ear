@@ -83,7 +83,7 @@ async function run(): Promise<void> {
     assert.match(structuredMarkup, /data-chapter-title="true"/)
     assert.match(structuredMarkup, /第二段正文/)
     assert.match(structuredMarkup, /data-active="true"/)
-    assert.match(structuredMarkup, /AI 助手/)
+    assert.match(structuredMarkup, /AI 对话/)
 
     const immersiveMarkup = renderToStaticMarkup(
       createElement(AiReaderContent, {
@@ -94,9 +94,13 @@ async function run(): Promise<void> {
         immersive: true
       })
     )
-    assert.match(immersiveMarkup, /data-ai-chat-host="mounted"/)
-    assert.match(immersiveMarkup, /class="hidden"/)
-    assert.match(immersiveMarkup, /AI 助手/)
+    assert.match(immersiveMarkup, /data-chapter-title="true"/)
+    // AI 侧栏懒挂载：首次点开才挂（避免进书就跑 initialize），静态渲染不出现在输出里
+    assert.doesNotMatch(immersiveMarkup, /data-ai-chat-host="mounted"/)
+    assert.match(
+      readFileSync(join(process.cwd(), 'src/components/reader/AiReaderView.tsx'), 'utf8'),
+      /const \[aiPanelMounted, setAiPanelMounted\] = useState\(false\)/
+    )
 
     const legacyBook = createBook(false)
     const fallbackMarkup = renderToStaticMarkup(

@@ -1,5 +1,11 @@
 import { LibraryStorage } from '../library-storage'
-import { ChapterOutlineRepository, type ChapterOutlineRecord, type ChapterOutlineStatus } from './outline-repository'
+import {
+  ChapterOutlineRepository,
+  OUTLINE_SCHEMA_LEGACY,
+  OUTLINE_SCHEMA_BRIEF,
+  type ChapterOutlineRecord,
+  type ChapterOutlineStatus
+} from './outline-repository'
 import { OutlineGenerator, isShortChapter, calculateMinimumSections, type ChapterOutline } from './outline-generator'
 import { outlineGenerationQueue } from './outline-queue'
 import { chapterKey, chapterDisplayTitle } from '../../../src/utils/bookData'
@@ -7,14 +13,30 @@ import { hashSentences } from '../../../src/utils/contentHash'
 import type { BookData } from '../../../src/global'
 
 /**
- * 单章大纲生成 + 落盘（outline-repository v4）。同时被 `ai:outline:generate` 与批量任务复用，
+ * 单章大纲生成 + 落盘。同时被 `ai:outline:generate` 与批量任务复用，
  * 保证单章生成与「全部书更新」的行为完全一致。
  * sentences 与 CanonicalOutlineInput / BookData.sentences 一致，为 string[]。
+ *
+ * 缓存策略（性价比第一）：
+ * - force=false 且 hash 命中 generated/short_chapter → skipped（0 次 LLM）
+ * - schemaVersion 旧也算命中（软失效）；禁止因「产物形态旧」重算
+ * - 仅 force=true 或无可用缓存时才调 LLM
  */
 export interface ChapterOutlineResult {
   status: 'generated' | 'short_chapter' | 'failed' | 'skipped'
   record?: ChapterOutlineRecord
   error?: string
+  /** 缓存诊断：hit=复用磁盘 / miss=需生成 / force=强制重算 / write=新写入 */
+  cache?: 'hit' | 'miss' | 'force' | 'write'
+}
+
+function logOutlineCache(
+  event: 'hit' | 'miss' | 'force' | 'write' | 'fail',
+  input: { bookId: string; chapterIndex: number; chapterKey: string },
+  detail?: string
+): void {
+  const base = `[outline-cache] ${event} book=${input.bookId} ch=${input.chapterIndex} key=${input.chapterKey}`
+  console.info(detail ? `${base} ${detail}` : base)
 }
 
 export async function generateChapterOutlineRecord(
@@ -29,8 +51,13 @@ export async function generateChapterOutlineRecord(
   if (!force) {
     const previous = repo.load(input.bookId, input.chapterKey, contentHash)
     if (previous && (previous.status === 'generated' || previous.status === 'short_chapter')) {
-      return { status: 'skipped', record: previous }
+      // 软失效：legacy schema 同样 hit，绝不因缺 thesis/summary 而重烧 LLM
+      logOutlineCache('hit', input, `schema=${previous.schemaVersion ?? OUTLINE_SCHEMA_LEGACY} sections=${previous.sections.length}`)
+      return { status: 'skipped', record: previous, cache: 'hit' }
     }
+    logOutlineCache('miss', input, previous ? `stale_status=${previous.status}` : 'no_record')
+  } else {
+    logOutlineCache('force', input)
   }
 
   const outline: ChapterOutline = await outlineGenerationQueue.enqueue(() =>
@@ -38,6 +65,7 @@ export async function generateChapterOutlineRecord(
   )
 
   if (outline.error) {
+    logOutlineCache('fail', input, outline.error)
     return { status: 'failed', error: outline.error }
   }
 
@@ -49,6 +77,8 @@ export async function generateChapterOutlineRecord(
     contentHash,
     status,
     minimumSections: calculateMinimumSections(input.sentences.length),
+    // ChapterBrief 形态：含 thesis/whyItMatters/hinges（章级字段仅在有值时写入）
+    schemaVersion: OUTLINE_SCHEMA_BRIEF,
     sections: outline.sections.map((section, index) => ({
       id: `${input.chapterKey}-${contentHash}-${index}`,
       originalTitle: section.title,
@@ -56,10 +86,14 @@ export async function generateChapterOutlineRecord(
       summary: section.summary,
       startOffset: section.startOffset
     })),
+    thesis: outline.thesis,
+    whyItMatters: outline.whyItMatters,
+    hinges: outline.hinges,
     generatedAt: new Date().toISOString()
   }
   repo.save(record)
-  return { status, record }
+  logOutlineCache('write', input, `status=${status} schema=${OUTLINE_SCHEMA_BRIEF} sections=${record.sections.length}${outline.thesis ? ' +brief' : ''}`)
+  return { status, record, cache: force ? 'force' : 'write' }
 }
 
 export interface OutlineBatchProgress {

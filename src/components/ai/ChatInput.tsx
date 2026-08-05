@@ -66,7 +66,7 @@ export default function ChatInput({
             type="button"
             onClick={() => void submit()}
             disabled={!isConfigured || !text.trim()}
-            className="icon-btn h-8 w-8 flex-shrink-0 bg-primary text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            className="icon-btn h-8 w-8 flex-shrink-0 bg-primary text-[rgb(var(--on-primary-rgb))] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             title="发送"
             aria-label="发送消息"
           >

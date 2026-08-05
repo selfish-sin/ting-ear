@@ -349,13 +349,15 @@ export function AiReaderContent({
     // outlineStates / chapterRecords 故意不进依赖，避免自触发循环
   }, [requestBookId, requestChapterIndex, requestChapterKey])
 
-  const generateOutline = useCallback(() => {
+  const generateOutline = useCallback((force?: boolean) => {
     if (!request || !window.api?.aiOutlineGenerate) return
     if (bookOutlineRunningRef.current) {
       window.alert('全书大纲正在生成中，请稍候或先取消。')
       return
     }
     const key = request.chapterKey
+    // 无缓存 → force=false（缓存层 miss 才生成，不浪费）；有缓存 → force=true（用户主动重生成/升级）
+    const effectiveForce = force ?? chapterRecords.has(key)
     setOutlineStates((state) => ({
       ...state,
       [key]: { loading: false, generating: true, progress: 8, error: undefined }
@@ -373,7 +375,7 @@ export function AiReaderContent({
     }, 400)
     activeIntervalsRef.current.push(tick)
 
-    window.api.aiOutlineGenerate({ ...request, force: true }).then((result) => {
+    window.api.aiOutlineGenerate({ ...request, force: effectiveForce }).then((result) => {
       window.clearInterval(tick)
       if (result.record) setChapterRecords((records) => new Map(records).set(key, result.record!))
       loadedKeysRef.current.add(key)
@@ -667,7 +669,7 @@ export function AiReaderContent({
       : 0
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col bg-surface dark:bg-dark-bg">
+    <div className="relative flex min-h-0 flex-1 flex-col bg-transparent">
       <ReaderHeader
         immersive={immersive}
         left={hasMultipleChapters ? <div className="relative"><button type="button" onClick={() => setChapterDropdownOpen((value) => !value)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-white/5"><span className="max-w-[12rem] truncate">{chapterTitle}</span><ChevronDown className="h-3 w-3 opacity-50" /></button>{chapterDropdownOpen && <div className="absolute left-0 top-full z-dropdown mt-1 max-h-72 w-56 overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-dark-border dark:bg-dark-raised">{structure.map((item, index) => <button key={`${item.sentenceRange[0]}-${index}`} type="button" onClick={() => { navigateToChapter(index); setChapterDropdownOpen(false) }} className={`flex w-full items-center px-3 py-1.5 text-left text-xs ${index === activeChapter ? 'bg-primary/10 font-medium text-primary' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5'}`}><span className="truncate">{item.title}</span></button>)}</div>}</div> : undefined}
@@ -789,25 +791,28 @@ export function AiReaderContent({
             chapterCustomTitle={chapterIdentity.customTitle}
           />
         )}
-        <main className="flex min-w-0 flex-1 flex-col">
-          <ContentCards
-            chapter={chapter}
-            sentences={sentences}
-            currentSentenceIndex={currentSentenceIndex}
-            onSpeakRaw={onSpeakRaw}
-            onStopRaw={onStopRaw}
-            onSeekToSentence={seekOnly}
-            onPlayFromSentence={playFrom}
-            onGenerateBookOutlines={() => {
-              void generateBookOutlines({ force: false })
-            }}
-            onForceGenerateBookOutlines={() => {
-              void generateBookOutlines({ force: true })
-            }}
-            bookOutlineRunning={Boolean(bookOutlineJob)}
-          />
+        <main className="flex min-w-0 flex-1 flex-col p-2 sm:p-2.5">
+          {/* 正文舞台：加厚毛玻璃垫，字可读，四周仍透出底图色彩 */}
+          <div className="reader-stage panel-readable flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl">
+            <ContentCards
+              chapter={chapter}
+              sentences={sentences}
+              currentSentenceIndex={currentSentenceIndex}
+              onSpeakRaw={onSpeakRaw}
+              onStopRaw={onStopRaw}
+              onSeekToSentence={seekOnly}
+              onPlayFromSentence={playFrom}
+              onGenerateBookOutlines={() => {
+                void generateBookOutlines({ force: false })
+              }}
+              onForceGenerateBookOutlines={() => {
+                void generateBookOutlines({ force: true })
+              }}
+              bookOutlineRunning={Boolean(bookOutlineJob)}
+            />
+          </div>
           {!immersive && (
-            <div className="flex flex-shrink-0 items-center gap-2 border-t border-gray-200 bg-white px-3 py-1.5 dark:border-dark-border dark:bg-dark-surface">
+            <div className="mt-2 flex flex-shrink-0 items-center gap-2 rounded-xl border border-black/5 bg-white/40 px-3 py-1.5 backdrop-blur-sm dark:border-white/10 dark:bg-dark-surface/35">
               {hasMultipleChapters ? (
                 <>
                   <button

@@ -2,11 +2,19 @@ import assert from 'node:assert/strict'
 import {
   AiService,
   buildPromptMessages,
-  classifyQuestion
+  buildSourceRefs,
+  classifyQuestion,
+  parseSourceMetadata
 } from '../electron/services/ai/ai-service'
 import { NmemBridgeError } from '../electron/services/ai/nmem-bridge'
 import { AI_DEFAULTS } from '../src/aiSettings'
-import type { AiChatPayload, AiHistoryRepository, AiPromptMessage } from '../src/global'
+import type { AiChatPayload, AiHistoryRepository, AiPromptMessage, AiSettings } from '../src/global'
+
+/** 旧预检索路径测试用：关闭 agent tool-calling */
+const PREFETCH_DEFAULTS: AiSettings = {
+  ...AI_DEFAULTS,
+  agent: { mode: 'prefetch', maxToolRounds: 4 }
+}
 
 interface SentEvent {
   channel: string
@@ -129,7 +137,7 @@ async function run(): Promise<void> {
 
   let selectionRetrieved = false
   const selectionService = new AiService({
-    getSettings: () => AI_DEFAULTS,
+    getSettings: () => PREFETCH_DEFAULTS,
     history,
     retrieve: async () => {
       selectionRetrieved = true
@@ -146,7 +154,7 @@ async function run(): Promise<void> {
   const sent: SentEvent[] = []
   let prompt: AiPromptMessage[] = []
   const service = new AiService({
-    getSettings: () => AI_DEFAULTS,
+    getSettings: () => PREFETCH_DEFAULTS,
     history,
     retrieve: async () => [
       {
@@ -197,7 +205,7 @@ async function run(): Promise<void> {
   const offlineEvents: SentEvent[] = []
   let streamedWhileOffline = false
   const offlineService = new AiService({
-    getSettings: () => AI_DEFAULTS,
+    getSettings: () => PREFETCH_DEFAULTS,
     history,
     retrieve: async () => {
       throw new NmemBridgeError('nmem_offline', '知识库未连接')
@@ -219,13 +227,37 @@ async function run(): Promise<void> {
   )
   console.log('  ok degrades to direct chat when nmem is offline')
 
+  // 回归：本地向量结果的新源格式 [bookId=..][ch=..] 章名 必须被 buildSourceRefs 保留。
+  // 旧格式「本地向量·第X章」不匹配 parseSourceMetadata，曾导致本地结果被全量静默丢弃。
+  // library:src_ 本身不可解析（须由 nmem-bridge 解析后再进 buildSourceRefs）。
+  {
+    assert.equal(parseSourceMetadata('本地向量·第2章'), null, 'old local-vec source is unparseable (the bug)')
+    assert.equal(parseSourceMetadata('library:src_64460b18'), null, 'library:src_ needs nmem resolve first')
+    assert.ok(parseSourceMetadata('Trotsky [bookId=book-1].md'), 'nmem .md suffix must parse')
+    const localMeta = parseSourceMetadata('[bookId=book-1][ch=1] 第二章')
+    assert.deepEqual(localMeta, {
+      bookId: 'book-1',
+      chapterIndex: 1,
+      chapterTitle: '第二章'
+    })
+    const localRefs = buildSourceRefs(
+      [
+        { id: 'vec-0', content: '本地命中片段', source: '[bookId=book-1][ch=1] 第二章', score: 0.42 }
+      ],
+      { bookId: 'book-1', currentChapterIndex: 1, category: 'chapter' }
+    )
+    assert.equal(localRefs.length, 1, 'new local-vec source must survive buildSourceRefs')
+    assert.equal(localRefs[0].chapterTitle, '第二章')
+    console.log('  ok local-vec source format is retained by buildSourceRefs (regression)')
+  }
+
   const cancelEvents: SentEvent[] = []
   let retrievalStarted!: () => void
   const started = new Promise<void>((resolve) => {
     retrievalStarted = resolve
   })
   const cancellationService = new AiService({
-    getSettings: () => AI_DEFAULTS,
+    getSettings: () => PREFETCH_DEFAULTS,
     history,
     retrieve: async (_query, _limit, signal) => {
       retrievalStarted()
@@ -259,8 +291,8 @@ async function run(): Promise<void> {
 
   let guardedPrompt: AiPromptMessage[] = []
   const settingsWithBudget = {
-    ...AI_DEFAULTS,
-    retrieval: { ...AI_DEFAULTS.retrieval, maxContextChars: 40 }
+    ...PREFETCH_DEFAULTS,
+    retrieval: { ...PREFETCH_DEFAULTS.retrieval, maxContextChars: 40 }
   } as unknown as typeof AI_DEFAULTS
   const guardedService = new AiService({
     getSettings: () => settingsWithBudget,
@@ -289,6 +321,32 @@ async function run(): Promise<void> {
   assert.ok((evidenceMessage?.content.length || 0) < 300)
   assert.equal(evidenceMessage?.content.includes('超长证据'.repeat(50)), false)
   console.log('  ok bounds retrieved text and marks it as untrusted evidence')
+
+  // 总预算守卫：全文注入 + 证据叠加超限时，按优先级丢全文（与证据高度重复），证据保留
+  {
+    const hugeFullText: AiChatPayload = {
+      ...payload('请总结'),
+      autoContext: '书籍：测试\n章节：一\n当前句：一句',
+      injectFullText: true,
+      fullText: '正文段落。'.repeat(40000) // 24 万字，远超 60000 预算
+    }
+    const prompt = buildPromptMessages(AI_DEFAULTS, hugeFullText, [
+      {
+        index: 1,
+        memoryId: 'ev-1',
+        content: '证据片段',
+        source: '[bookId=book-1][ch=1] 第二章',
+        score: 0.9,
+        bookId: 'book-1',
+        chapterIndex: 1,
+        chapterTitle: '第二章'
+      }
+    ])
+    assert.equal(prompt.some((m) => m.content.includes('<chapter-full-text>')), false, 'fullText must be dropped when over budget')
+    assert.equal(prompt.some((m) => m.content.includes('<book-evidence>')), true, 'evidence must survive')
+    assert.ok(prompt.reduce((s, m) => s + m.content.length, 0) <= 60000 + 100, 'total must respect the budget guard')
+    console.log('  ok total-char budget guard drops full-text before evidence')
+  }
 
   console.log('RAG orchestration result: 6 passed')
 }

@@ -131,7 +131,7 @@ function hashStr(s: string): number {
 /**
  * 封面缓存键：含样式版本号，升级配色方案后自动触发重新生成。
  */
-const COVER_STYLE_VERSION = 'v2-light'
+const COVER_STYLE_VERSION = 'v3-light'
 
 export function computeCoverHash(title: string, author?: string): string {
   const raw = `${COVER_STYLE_VERSION}|${title.trim()}|${(author || '').trim()}`
@@ -294,11 +294,11 @@ export function generateCoverDataUrl(
   ctx.globalAlpha = 1
 
   // ── 标题区域 ──
-  const padX = 28
+  const padX = 24
   const titleMaxW = w - padX * 2 - 12
   const authorH = author && author.trim() ? 36 : 0
-  const titleAreaTop = 42
-  const titleAreaBottom = h - 36 - authorH
+  const titleAreaTop = 36
+  const titleAreaBottom = h - 30 - authorH
   const titleAreaH = titleAreaBottom - titleAreaTop
   const fontFamily = '"Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif'
 
@@ -311,18 +311,18 @@ export function generateCoverDataUrl(
   const split = splitTitle(title)
 
   if (split) {
-    const sepH = 16
+    const sepH = 12
     const subRatio = 0.48
     let mainSize = 16
     let mainLines: string[] = []
     let subSize = 12
     let subLines: string[] = []
 
-    for (let fs = 42; fs >= 15; fs -= 1) {
-      const sfs = Math.max(12, Math.round(fs * subRatio))
-      const mL = wrapText(ctx, split.main, titleMaxW, 3, fs, fontFamily)
-      const sL = wrapText(ctx, split.sub, titleMaxW, 3, sfs, fontFamily)
-      const totalH = mL.length * fs * 1.28 + sepH + sL.length * sfs * 1.38
+    for (let fs = 34; fs >= 12; fs -= 1) {
+      const sfs = Math.max(10, Math.round(fs * subRatio))
+      const mL = wrapText(ctx, split.main, titleMaxW, 4, fs, fontFamily)
+      const sL = wrapText(ctx, split.sub, titleMaxW, 4, sfs, fontFamily)
+      const totalH = mL.length * fs * 1.22 + sepH + sL.length * sfs * 1.3
       if (totalH <= titleAreaH) {
         mainSize = fs
         mainLines = mL
@@ -332,14 +332,14 @@ export function generateCoverDataUrl(
       }
     }
     if (mainLines.length === 0) {
-      mainLines = wrapText(ctx, split.main, titleMaxW, 3, 16, fontFamily)
-      mainSize = 16
-      subSize = 12
-      subLines = wrapText(ctx, split.sub, titleMaxW, 3, 12, fontFamily)
+      mainLines = wrapText(ctx, split.main, titleMaxW, 4, 12, fontFamily)
+      mainSize = 12
+      subSize = 10
+      subLines = wrapText(ctx, split.sub, titleMaxW, 4, 10, fontFamily)
     }
 
-    const mainLH = mainSize * 1.28
-    const subLH = subSize * 1.38
+    const mainLH = mainSize * 1.22
+    const subLH = subSize * 1.3
     const totalH = mainLines.length * mainLH + sepH + subLines.length * subLH
     let y = titleAreaTop + (titleAreaH - totalH) / 2 + mainLH / 2
 
@@ -368,13 +368,13 @@ export function generateCoverDataUrl(
       y += subLH
     }
   } else {
-    const maxLines = 5
+    const maxLines = 7
     let bestSize = 16
     let bestLines: string[] = []
 
-    for (let fs = 40; fs >= 14; fs -= 1) {
+    for (let fs = 32; fs >= 11; fs -= 1) {
       const lines = wrapText(ctx, title, titleMaxW, maxLines, fs, fontFamily)
-      const lh = fs * 1.32
+      const lh = fs * 1.24
       if (lines.length * lh <= titleAreaH) {
         bestSize = fs
         bestLines = lines
@@ -382,13 +382,13 @@ export function generateCoverDataUrl(
       }
     }
     if (bestLines.length === 0) {
-      bestLines = wrapText(ctx, title, titleMaxW, maxLines, 14, fontFamily)
-      bestSize = 14
+      bestLines = wrapText(ctx, title, titleMaxW, maxLines, 11, fontFamily)
+      bestSize = 11
     }
 
     ctx.font = `600 ${bestSize}px ${fontFamily}`
     ctx.fillStyle = pal.title
-    const lh = bestSize * 1.32
+    const lh = bestSize * 1.24
     const totalH = bestLines.length * lh
     const startY = titleAreaTop + (titleAreaH - totalH) / 2 + lh / 2
     for (let i = 0; i < bestLines.length; i++) {

@@ -39,7 +39,8 @@ interface AiPlaybackCapsuleProps {
 }
 
 /**
- * AI 阅读模式播放控件：固定在阅读顶栏，不再悬浮遮挡正文。
+ * AI 阅读模式播放控件：固定在阅读顶栏。
+ * 主色描边/底，避免在花背景上发「死灰」。
  */
 export default function AiPlaybackCapsule({
   playState: playStateProp,
@@ -68,6 +69,9 @@ export default function AiPlaybackCapsule({
     : '点击正文设定起点'
 
   const isHeader = variant === 'header'
+  // 胶囊整体中性透明；只有主播放键用主题色点缀
+  const sideBtn =
+    'flex h-6 w-6 items-center justify-center rounded text-gray-500 transition-colors hover:bg-primary/10 hover:text-primary dark:text-gray-400'
 
   return (
     <div
@@ -75,36 +79,24 @@ export default function AiPlaybackCapsule({
       data-playback-variant={variant}
       className={
         isHeader
-          ? 'flex h-7 max-w-[min(18rem,42vw)] items-center gap-0.5 rounded-md border border-gray-200 bg-gray-50 px-0.5 dark:border-dark-border dark:bg-dark-muted'
-          : 'flex h-9 items-center gap-0.5 rounded-lg border border-gray-200 bg-white px-1 dark:border-dark-border dark:bg-dark-surface'
+          ? 'flex h-7 max-w-[min(18rem,42vw)] items-center gap-0.5 rounded-md border border-black/5 bg-black/[0.03] px-0.5 dark:border-white/10 dark:bg-white/[0.06]'
+          : 'flex h-9 items-center gap-0.5 rounded-lg border border-black/5 bg-black/[0.03] px-1 dark:border-white/10 dark:bg-white/[0.06]'
       }
       title={preview || '点击正文句子设定播放起点，再按播放'}
     >
-      <button
-        type="button"
-        onClick={onPrevSentence}
-        className="flex h-6 w-6 items-center justify-center rounded text-gray-500 transition-colors hover:bg-gray-200/80 hover:text-gray-800 dark:text-gray-300 dark:hover:bg-white/10 dark:hover:text-white"
-        title="上一句"
-        aria-label="上一句"
-      >
+      <button type="button" onClick={onPrevSentence} className={sideBtn} title="上一句" aria-label="上一句">
         <SkipBack className="h-3.5 w-3.5" />
       </button>
       <button
         type="button"
         onClick={playing ? onPause : onPlay}
-        className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-white transition-opacity hover:opacity-90"
+        className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-[rgb(var(--on-primary-rgb))] shadow-sm transition-opacity hover:opacity-90"
         title={playing ? '暂停' : `播放：${previewText}`}
         aria-label={playing ? '暂停' : '播放'}
       >
         {playing ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3 fill-current" />}
       </button>
-      <button
-        type="button"
-        onClick={onNextSentence}
-        className="flex h-6 w-6 items-center justify-center rounded text-gray-500 transition-colors hover:bg-gray-200/80 hover:text-gray-800 dark:text-gray-300 dark:hover:bg-white/10 dark:hover:text-white"
-        title="下一句"
-        aria-label="下一句"
-      >
+      <button type="button" onClick={onNextSentence} className={sideBtn} title="下一句" aria-label="下一句">
         <SkipForward className="h-3.5 w-3.5" />
       </button>
       <span

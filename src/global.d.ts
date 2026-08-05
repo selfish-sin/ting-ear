@@ -122,6 +122,29 @@ export interface Api {
   }>
   aiConvLoad: (bookId: string, convId: string) => Promise<AiHistoryMessage[]>
   aiConvCreate: (bookId: string, title?: string) => Promise<AiConversation>
+  /** 恢复该书上次会话；没有才新建 */
+  aiConvEnsure: (bookId: string) => Promise<AiConversation>
+  aiMcpListTools: () => Promise<{
+    success: boolean
+    tools: Array<{
+      exposedName: string
+      name: string
+      serverId: string
+      serverName: string
+      description: string
+    }>
+    error?: string
+    message?: string
+    /** 分服务错误（部分失败时仍可能有 tools） */
+    errors?: string[]
+  }>
+  aiMcpProbe: (server: AiMcpServerConfig) => Promise<{
+    success: boolean
+    ok: boolean
+    toolCount: number
+    tools: string[]
+    error?: string
+  }>
   aiConvSave: (bookId: string, convId: string, messages: AiHistoryMessage[]) => Promise<{ success: boolean }>
   aiConvDelete: (bookId: string, convId: string) => Promise<{ success: boolean }>
   aiConvRename: (bookId: string, convId: string, title: string) => Promise<{ success: boolean; error?: string }>
@@ -148,8 +171,27 @@ export interface Api {
     removed?: number
     kept?: number
     groups?: number
+    scanned?: number
     error?: string
   }>
+  aiVecStatus: (bookId: string) => Promise<{ exists: boolean; running: boolean }>
+  aiVecIngest: (book: BookData) => Promise<{ success: boolean; error?: string }>
+  aiVecDelete: (bookId: string) => Promise<{ success: boolean }>
+  aiVecCancel: (bookId: string) => Promise<{ success: boolean; error?: string }>
+  aiVecSearch: (
+    bookId: string,
+    query: string,
+    topK?: number,
+    maxChars?: number
+  ) => Promise<{ results: Array<{ text: string; chapter: number; score: number }> }>
+  onVecProgress: (callback: (progress: {
+    bookId: string
+    phase: 'chunking' | 'embedding' | 'saving' | 'done' | 'error'
+    current: number
+    total: number
+    totalChunks: number
+    error?: string
+  }) => void) => () => void
   aiListModels: (config: AiLlmSettings) => Promise<{
     success: boolean
     models?: string[]
@@ -391,6 +433,14 @@ export interface Chapter {
 
 export type ChapterOutlineStatus = 'queued' | 'generating' | 'generated' | 'short_chapter' | 'failed'
 
+/** 阿基米德支点：本章中「一处理解关键」的句偏移 + 为何是支点 */
+export interface ChapterHinge {
+  /** 句偏移（相对章首） */
+  at: number
+  /** 为何这是支点：一句话说明思想张力或认知转折 */
+  insight: string
+}
+
 export interface ChapterOutlineSection {
   id: string
   originalTitle: string
@@ -408,6 +458,18 @@ export interface ChapterOutlineRecord {
   status: ChapterOutlineStatus
   minimumSections: number
   sections: ChapterOutlineSection[]
+  /**
+   * 产物形态版本（软标记）。
+   * 1/缺省 = 旧目录式；2 = ChapterBrief（thesis/whyItMatters/hinges）。
+   * 旧 schema 仍算缓存命中，禁止因此强制重算 LLM。
+   */
+  schemaVersion?: number
+  /** schema=2：本章一句话主张 */
+  thesis?: string
+  /** schema=2：读懂本章差在哪（为何重要） */
+  whyItMatters?: string
+  /** schema=2：1～3 个阿基米德支点 */
+  hinges?: ChapterHinge[]
   generatedAt?: string
   error?: string
 }
@@ -605,17 +667,81 @@ export interface HistoryEntry {
   sentenceRange?: { start: number; end: number } | null
 }
 
-export type AiMessageRole = 'system' | 'user' | 'assistant'
+export type AiMessageRole = 'system' | 'user' | 'assistant' | 'tool'
+
+/** OpenAI 兼容 tool call（agent 循环用，一般不落盘历史） */
+export interface AiToolCall {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
+}
 
 export interface AiPromptMessage {
   role: AiMessageRole
   content: string
+  /** role=tool 时关联的 call id */
+  tool_call_id?: string
+  /** 可选函数名 */
+  name?: string
+  /** role=assistant 且请求工具时 */
+  tool_calls?: AiToolCall[]
 }
 
-export interface AiHistoryMessage extends AiPromptMessage {
+/** MCP 外部工具服务配置 */
+export interface AiMcpServerConfig {
+  id: string
+  name: string
+  enabled: boolean
+  transport: 'stdio' | 'http'
+  /** stdio：可执行文件（如 uvx / npx / python） */
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  cwd?: string
+  /** http：JSON-RPC 端点 */
+  url?: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+  description?: string
+}
+
+export interface AiMcpSettings {
+  /** 总开关：关闭则不拉起任何 MCP 进程 */
+  enabled: boolean
+  servers: AiMcpServerConfig[]
+}
+
+export interface AiAgentSettings {
+  /**
+   * auto：有可用工具则走 tool-calling agent；否则旧预检索
+   * tools：强制 agent（无工具则纯对话）
+   * prefetch：旧行为，宿主先查再答、不下发 tools
+   */
+  mode: 'auto' | 'tools' | 'prefetch'
+  /** agent 最大工具轮数 */
+  maxToolRounds: number
+}
+
+/** 落盘历史：不含 tool 轮中间消息 */
+export interface AiHistoryMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
   /** 稳定消息 ID；旧历史可能缺失，加载时会补齐 */
   id?: string
   sources?: AiSourceRef[]
+  /** 联网搜索结果（与书内 sources 分离，刷新后仍保留） */
+  webSources?: AiWebSourceRef[]
+  /** 本轮是否启用了联网搜索 */
+  webSearchUsed?: boolean
+  /** 本轮工具调用痕迹（含 MCP） */
+  toolTraces?: AiToolTrace[]
+  /** 模型原生思考链（DeepSeek-R1 等 reasoning_content） */
+  reasoning?: string
+  /** @deprecated 旧伪思考模式字段，加载时忽略 */
+  thinkingMode?: boolean
   retrievalStatus?: 'done' | 'offline' | 'error' | 'skipped'
   retrievalError?: string
 }
@@ -646,6 +772,7 @@ export interface AiEngine extends AiLlmSettings {
 }
 
 export interface AiNmemSettings {
+  enabled: boolean
   baseUrl: string
   autoIngest: boolean
   healthTimeoutMs: number
@@ -654,8 +781,19 @@ export interface AiNmemSettings {
   statusCacheMs: number
 }
 
+export interface AiEmbeddingSettings {
+  baseUrl: string
+  apiKey: string
+  model: string
+  /** 向量维度，0 = 使用模型默认 */
+  dimension: number
+  /** 批量 ingest 每批条数 */
+  batchSize: number
+}
+
 export interface AiSettings {
   nmem: AiNmemSettings
+  embedding: AiEmbeddingSettings
   /** @deprecated 向后兼容，优先使用 engines */
   llm: AiLlmSettings
   engines: AiEngine[]
@@ -663,19 +801,61 @@ export interface AiSettings {
     chat: string
     outline: string
   }
+  /** 真 MCP 宿主（stdio/HTTP） */
+  mcp: AiMcpSettings
+  /** 工具调用 agent */
+  agent: AiAgentSettings
   webSearch: {
     enabled: boolean
     /** 联网搜索系统提示词（可在高级设置编辑） */
     prompt: string
     /**
-     * 搜索后端：与 LLM provider 解耦。
-     * auto = 智谱引擎用原生 tool，其它仅提示；zhipu-native / none 见 webSearch 模块
+     * 搜索后端：与对话模型完全解耦。
+     * - auto：按可用 Key 自动切换（Ollama → 智谱 → DuckDuckGo）
+     * - ollama / zhipu / ddg：强制指定
+     * - zhipu-native：旧兼容（对话引擎为智谱时下发 tool）
+     * - none：不发起真实搜索
      */
-    backend?: 'auto' | 'zhipu-native' | 'none'
+    backend?: 'auto' | 'ollama' | 'zhipu' | 'zhipu-native' | 'ddg' | 'none'
+    /** 每次搜索最多返回条数 1–10 */
+    maxResults?: number
+    /** Ollama Cloud API Key（https://ollama.com/settings/keys） */
+    ollamaApiKey?: string
+    /** 默认 https://ollama.com */
+    ollamaBaseUrl?: string
+    /**
+     * 智谱独立搜索 Key（可选）。
+     * 不填则回退到「引擎列表里第一个智谱引擎」的 Key。
+     * 可与对话模型完全无关。
+     */
+    zhipuApiKey?: string
+    /** 智谱 API 地址，默认 open.bigmodel.cn */
+    zhipuBaseUrl?: string
+    /**
+     * 用户自定义外部源（URL 白名单 / 偏好展示名）。
+     * 本地桌面端：status 默认 approved。
+     */
+    customSources?: AiExternalSourceConfig[]
+    /**
+     * Semantic Scholar 学术论文检索（免费，社科/理工通用）。
+     * 可与普通联网并行；无需 Key，可选填 Key 提高配额。
+     */
+    academicEnabled?: boolean
+    semanticScholarApiKey?: string
+    /**
+     * SciVerse（sciverse.space）学术元搜索。
+     * 需 Bearer Token；免费起步配额。与 Semantic Scholar 可并行。
+     */
+    sciverseEnabled?: boolean
+    sciverseApiKey?: string
+    /** 默认 https://api.sciverse.space */
+    sciverseBaseUrl?: string
   }
   retrieval: {
     enabled: boolean
+    /** 本轮最多引用几条书内记忆（检索 topK） */
     topK: number
+    /** 注入模型的书内证据总字符上限 */
     maxContextChars: number
   }
   chat: {
@@ -712,6 +892,8 @@ export interface AiChatPayload {
   injectFullText?: boolean
   /** 待注入的当前章正文 */
   fullText?: string
+  /** 本轮是否开启思考模式（分步推理提示） */
+  thinkingMode?: boolean
 }
 
 export type AiQuestionCategory =
@@ -733,6 +915,43 @@ export interface AiSourceRef {
   chapterTitle: string
 }
 
+/** 联网 / 外部信息源条目（挂在助手消息上，可点击展开） */
+export interface AiWebSourceRef {
+  index: number
+  title: string
+  url: string
+  snippet: string
+  /** ollama | zhipu | ddg | custom */
+  provider: string
+  /** 权威新闻 / 学术数据库 / 网页 等 */
+  sourceType: string
+  fetchedAt: string
+}
+
+/** 本轮工具调用痕迹（内置 + MCP），给 UI 展示「到底调了什么」 */
+export interface AiToolTrace {
+  /** 工具名，如 search_book / web_search / mcp_zotero_xxx */
+  name: string
+  ok: boolean
+  durationMs?: number
+  /** 一行摘要，如「命中 3 条」「失败: 超时」 */
+  summary?: string
+}
+
+/** 用户可配置的外部源偏好项 */
+export interface AiExternalSourceConfig {
+  id: string
+  name: string
+  /** 域名或完整 URL */
+  url: string
+  sourceType: string
+  /** approved | pending | rejected — 本地默认 approved */
+  status: 'approved' | 'pending' | 'rejected'
+  /** 可选权重 0–100，仅影响展示排序，不改检索算法 */
+  weight?: number
+  createdAt: string
+}
+
 export interface AiTextPart {
   type: 'text'
   text: string
@@ -747,6 +966,13 @@ export interface AiChatMessage {
   requestId?: string
   error?: string
   sources?: AiSourceRef[]
+  webSources?: AiWebSourceRef[]
+  webSearchUsed?: boolean
+  /** 本轮工具调用痕迹（含 MCP） */
+  toolTraces?: AiToolTrace[]
+  /** 模型原生思考过程全文 */
+  reasoning?: string
+  thinkingMode?: boolean
   retrievalStatus?: 'searching' | 'done' | 'offline' | 'error' | 'skipped'
   retrievalError?: string
 }
@@ -754,7 +980,10 @@ export interface AiChatMessage {
 export interface AiChatChunkEvent {
   requestId: string
   seq: number
-  text: string
+  /** 回答正文增量 */
+  text?: string
+  /** 原生思考链增量 */
+  reasoning?: string
 }
 
 export interface AiChatDoneEvent {
@@ -772,6 +1001,11 @@ export interface AiChatSourcesEvent {
   requestId: string
   status: 'searching' | 'done' | 'offline' | 'error' | 'skipped'
   sources: AiSourceRef[]
+  /** 本轮联网结果（可与书内检索并行到达） */
+  webSources?: AiWebSourceRef[]
+  webSearchUsed?: boolean
+  /** 本轮已执行的工具（逐步推送） */
+  toolTraces?: AiToolTrace[]
   error?: string
 }
 
@@ -834,23 +1068,44 @@ export interface FloatingBallSettings {
   mode: 'ball' | 'hover' | 'mini'
 }
 
+/**
+ * 应用背景（三层：底层纯色 → 可选底图 → 组件半透明）。
+ * 设置页只暴露精简项；下列带 ? 的旧字段读入时兼容，写入时可不带。
+ */
 export interface BackgroundSettings {
-  /** 是否启用背景图（关则纯色，回到现在） */
+  /** 是否启用背景图（关则只显示底层纯色） */
   enabled: boolean
   /** 用内置预设还是用户上传 */
   source: 'preset' | 'custom'
-  /** 预设 id（如 'aurora'）；source=preset 时生效 */
+  /** 预设 id；source=preset 时生效 */
   presetId: string | null
-  /** 自定义图在数据目录下的相对路径（如 'backgrounds/xxx.jpg'）；source=custom 时生效 */
+  /** 自定义图相对路径；source=custom 时生效 */
   customPath: string | null
-  /** 填充模式：cover 填满裁切 / contain 完整留白 / stretch 拉伸 */
-  fit: 'cover' | 'contain' | 'stretch'
-  /** 背景图高斯模糊 px，0–20，默认 0 */
+  /** 背景图模糊 px，0–20 */
   blur: number
-  /** 'auto' = 按主题自动（浅色白 / 深色黑）；否则为 hex 色如 '#1a1a2e' */
-  overlayColor: 'auto' | string
-  /** 遮罩透明度 0–1，默认 0.7 */
+  /**
+   * 底图压暗程度 0–1（遮罩不透明度）。
+   * 遮罩色固定跟日夜：浅色白罩 / 深色黑罩。
+   */
   overlayOpacity: number
+  /**
+   * 最底层纯色：auto=跟日夜；fromImage=从底图取样；或 #RRGGBB
+   */
+  baseColor?: 'auto' | 'fromImage' | string
+  /** fromImage 取样缓存 */
+  baseColorCached?: string | null
+  /** 侧栏/工具条等组件不透明度 0.15–1，默认 0.72 */
+  panelOpacity?: number
+  /**
+   * 阅读正文遮罩浓度 0.5–1，默认 0.9。
+   * AI 阅读 + 听书共用 .reader-stage
+   */
+  contentOpacity?: number
+  /** 组件/正文毛玻璃（更强模糊） */
+  glass?: boolean
+
+  /** 兼容旧配置：frost 开关读入用（旧 settings.json 可能带 panelEffect=frost） */
+  panelEffect?: string
 }
 
 export interface AppSettings {

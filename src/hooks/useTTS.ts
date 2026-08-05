@@ -68,7 +68,7 @@ interface TTSResult {
  */
 export function useTTS({ showToast }: UseTTSOptions) {
   // 使用 selector 避免订阅整个 store（timeMap/pageIndex 等变化不应触发重渲染）
-  const currentSentenceIndex = usePlayerStore((s) => s.currentSentenceIndex)
+  // currentSentenceIndex 不订阅为响应式（否则每句推进都重渲染 App），改用 subscribe 同步 ref
   const speed = usePlayerStore((s) => s.speed)
   const volume = usePlayerStore((s) => s.volume)
   const isMuted = usePlayerStore((s) => s.isMuted)
@@ -187,7 +187,14 @@ export function useTTS({ showToast }: UseTTSOptions) {
     currentBookRef.current = currentBook
     boundsRef.current = useBookStore.getState().getRangeBounds()
   }, [sentences, currentBook])
-  useEffect(() => { currentIndexRef.current = currentSentenceIndex }, [currentSentenceIndex])
+  // 非响应式同步 currentSentenceIndex → ref（不触发 App 重渲染）
+  useEffect(() => {
+    currentIndexRef.current = usePlayerStore.getState().currentSentenceIndex
+    const unsub = usePlayerStore.subscribe((s) => {
+      currentIndexRef.current = s.currentSentenceIndex
+    })
+    return unsub
+  }, [])
   useEffect(() => { apiKeyRef.current = settings.qwenApiKey }, [settings.qwenApiKey])
   useEffect(() => { endpointRef.current = settings.qwenEndpoint }, [settings.qwenEndpoint])
   useEffect(() => {

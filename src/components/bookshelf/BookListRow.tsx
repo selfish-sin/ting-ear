@@ -16,6 +16,9 @@ interface Props {
   onMenuButtonClick: (e: React.MouseEvent<HTMLButtonElement>, book: BookData) => void
   onKeyDown: (e: React.KeyboardEvent<HTMLElement>, book: BookData) => void
   onCoverError?: (book: BookData) => void
+  onSelectPointerDown: (id: string, e: React.PointerEvent) => void
+  onSelectPointerEnter: (id: string) => void
+  onSelectPointerUp: (id: string, e: React.PointerEvent) => void
 }
 
 export default function BookListRow({
@@ -31,27 +34,41 @@ export default function BookListRow({
   onContextMenu,
   onMenuButtonClick,
   onKeyDown,
-  onCoverError
+  onCoverError,
+  onSelectPointerDown,
+  onSelectPointerEnter,
+  onSelectPointerUp
 }: Props) {
   return (
     <div
+      data-book-id={book.id}
+      onPointerDown={(e) => onSelectPointerDown(book.id, e)}
+      onPointerEnter={() => onSelectPointerEnter(book.id)}
+      onPointerUp={(e) => onSelectPointerUp(book.id, e)}
+      onPointerCancel={(e) => onSelectPointerUp(book.id, e)}
       onClick={() => {
         if (multiSelectMode) onToggleSelect(book.id)
       }}
       onContextMenu={(e) => onContextMenu(e, book)}
       onKeyDown={(e) => onKeyDown(e, book)}
       tabIndex={0}
-      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border transition-all cursor-pointer book-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border transition-all cursor-pointer book-card select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+        multiSelectMode ? 'touch-none' : ''
+      } ${
         selected
           ? 'border-primary bg-primary/5 dark:bg-primary/10'
           : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-dark-surface hover:shadow-md hover:border-primary/30'
       }`}
+      style={{ WebkitUserSelect: 'none', userSelect: 'none' }}
     >
       <button
+        type="button"
+        data-no-drag-select
         onClick={(e) => onToggleSelect(book.id, e)}
+        onPointerDown={(e) => e.stopPropagation()}
         className={`flex-shrink-0 w-6 h-6 rounded flex items-center justify-center transition-all ${
           selected
-            ? 'bg-primary text-white shadow-sm'
+            ? 'bg-primary text-[rgb(var(--on-primary-rgb))] shadow-sm'
             : 'bg-white/80 dark:bg-gray-800/80 text-gray-300 hover:text-primary'
         }`}
         title={selected ? '取消选择' : '选择'}
@@ -68,8 +85,9 @@ export default function BookListRow({
         {coverUrl ? (
           <img
             src={coverUrl}
-            alt={book.title}
-            className="w-full h-full object-cover"
+            alt=""
+            draggable={false}
+            className="w-full h-full object-cover pointer-events-none"
             onError={() => onCoverError?.(book)}
           />
         ) : (
@@ -84,7 +102,9 @@ export default function BookListRow({
         }}
       >
         <div className="flex items-center gap-2">
-          <h4 className="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">{book.title}</h4>
+          <h4 className="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">
+            {book.title}
+          </h4>
           <span
             className={`text-[10px] px-1.5 py-0.5 rounded ${
               FORMAT_BADGE_COLORS[book.format] || 'bg-gray-100 text-gray-600'
@@ -98,7 +118,10 @@ export default function BookListRow({
         </p>
       </div>
       <button
+        type="button"
+        data-no-drag-select
         onClick={(e) => onToggleFavorite(book.id, e)}
+        onPointerDown={(e) => e.stopPropagation()}
         className={`flex-shrink-0 p-1 rounded ${
           favorited
             ? 'text-amber-400'
@@ -110,7 +133,9 @@ export default function BookListRow({
       </button>
       <button
         type="button"
+        data-no-drag-select
         onClick={(e) => onMenuButtonClick(e, book)}
+        onPointerDown={(e) => e.stopPropagation()}
         className="icon-btn-sm flex-shrink-0"
         aria-label="更多书籍操作"
         title="更多操作"
@@ -119,7 +144,10 @@ export default function BookListRow({
       </button>
       <div className="w-32 flex-shrink-0">
         <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-          <div className="h-full bg-primary rounded-full" style={{ width: `${book.progressPercent}%` }} />
+          <div
+            className="h-full bg-primary rounded-full"
+            style={{ width: `${book.progressPercent}%` }}
+          />
         </div>
         <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5 text-right">
           {book.progressPercent.toFixed(0)}%

@@ -397,7 +397,7 @@ export default function ScreenshotOverlay() {
           <button
             onClick={() => void handleConfirm()}
             disabled={submitting}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary hover:bg-primary-600 text-white text-sm font-medium transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary hover:bg-primary-600 text-[rgb(var(--on-primary-rgb))] text-sm font-medium transition-colors disabled:opacity-50"
             title="识别文字 (Enter)"
           >
             {submitting ? (

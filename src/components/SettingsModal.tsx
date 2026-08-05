@@ -3,6 +3,7 @@ import { X } from 'lucide-react'
 import { useSettingsStore } from '../stores/settingsStore'
 import CleanRulesSettings from './CleanRulesSettings'
 import AiSettingsPanel from './settings/AiSettingsPanel'
+import BackgroundSettingsPanel from './settings/BackgroundSettingsPanel'
 import GeneralSettingsPanel from './settings/GeneralSettingsPanel'
 import TtsSettingsPanel from './settings/TtsSettingsPanel'
 import { mergeAiSettings } from '../aiSettings'
@@ -12,10 +13,11 @@ interface SettingsModalProps {
   showToast: (type: 'success' | 'error' | 'warning' | 'info', message: string) => void
 }
 
-type Tab = 'general' | 'tts' | 'ai' | 'clean'
+type Tab = 'general' | 'background' | 'tts' | 'ai' | 'clean'
 
 const tabs: Array<{ key: Tab; label: string }> = [
   { key: 'general', label: '常规' },
+  { key: 'background', label: '背景' },
   { key: 'tts', label: '朗读' },
   { key: 'ai', label: 'AI' },
   { key: 'clean', label: '清洗' }
@@ -64,6 +66,7 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
 
         <div className="flex-1 overflow-y-auto p-5">
           {activeTab === 'general' && <GeneralSettingsPanel showToast={showToast} />}
+          {activeTab === 'background' && <BackgroundSettingsPanel showToast={showToast} />}
           {activeTab === 'ai' && (
             <AiSettingsPanel value={mergeAiSettings(settings.ai)} onChange={(ai) => setSettings({ ai })} />
           )}
@@ -75,7 +78,7 @@ export default function SettingsModal({ onClose, showToast }: SettingsModalProps
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg bg-primary px-4 py-1.5 text-sm text-white hover:bg-primary/90"
+            className="rounded-lg bg-primary px-4 py-1.5 text-sm text-[rgb(var(--on-primary-rgb))] hover:bg-primary/90"
           >
             关闭
           </button>

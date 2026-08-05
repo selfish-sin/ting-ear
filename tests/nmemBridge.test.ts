@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import { AI_DEFAULTS } from '../src/aiSettings'
-import { NmemBridge, NmemBridgeError } from '../electron/services/ai/nmem-bridge'
+import {
+  NmemBridge,
+  NmemBridgeError,
+  extractNmemSourceId,
+  normalizeNmemSourceLabel
+} from '../electron/services/ai/nmem-bridge'
 
 const originalFetch = globalThis.fetch
 
@@ -8,6 +13,12 @@ async function run(): Promise<void> {
   console.log('\nnmem bridge')
 
   try {
+    assert.equal(extractNmemSourceId('library:src_64460b18'), 'src_64460b18')
+    assert.equal(extractNmemSourceId('src_abc'), 'src_abc')
+    assert.equal(extractNmemSourceId('书名 [bookId=x]'), null)
+    assert.equal(normalizeNmemSourceLabel('书 [bookId=b1].md'), '书 [bookId=b1]')
+    console.log('  ok extractNmemSourceId / normalizeNmemSourceLabel')
+
     const requests: Array<{ url: string; init?: RequestInit }> = []
     globalThis.fetch = async (input, init) => {
       requests.push({ url: String(input), init })
@@ -56,6 +67,44 @@ async function run(): Promise<void> {
     })
     console.log('  ok follows the health, search, and ingest HTTP contract')
 
+    // 回归：source=library:src_xxx 必须解析为含 [bookId=] 的 original_name
+    {
+      const resolveRequests: string[] = []
+      globalThis.fetch = async (input) => {
+        const url = String(input)
+        resolveRequests.push(url)
+        if (url.includes('/memories/search')) {
+          return Response.json({
+            memories: [
+              {
+                id: 'm-lib',
+                content: '托洛茨基相关正文',
+                source: 'library:src_64460b18',
+                score: 0.88
+              }
+            ]
+          })
+        }
+        if (url.includes('/sources/src_64460b18')) {
+          return Response.json({
+            id: 'src_64460b18',
+            original_name: '先知三部曲 [bookId=book-trotsky].md',
+            lifecycle_state: 'indexed'
+          })
+        }
+        return new Response('{"status":"ok"}')
+      }
+      const resolveBridge = new NmemBridge(() => AI_DEFAULTS.nmem)
+      const resolved = await resolveBridge.search('托洛茨基', 3)
+      assert.equal(resolved.length, 1)
+      assert.equal(resolved[0].source, '先知三部曲 [bookId=book-trotsky]')
+      assert.ok(
+        resolveRequests.some((u) => u.includes('/sources/src_64460b18')),
+        'must resolve library:src via GET /sources/{id}'
+      )
+      console.log('  ok resolves library:src_xxx to original_name with bookId')
+    }
+
     globalThis.fetch = async () => {
       throw new TypeError('fetch failed')
     }
@@ -96,7 +145,79 @@ async function run(): Promise<void> {
     )
     console.log('  ok enforces the configured timeout')
 
-    console.log('nmem bridge result: 4 passed')
+    // listSources：读 original_name + lifecycle_state，并按 offset/limit 翻页拉全量
+    {
+      const pageRequests: string[] = []
+      // 构造 150 条，强制至少 2 页（page size=100）
+      const all = Array.from({ length: 150 }, (_, i) => ({
+        id: `src_${i}`,
+        original_name: `书${i} [bookId=book-${i}].md`,
+        lifecycle_state: i === 0 ? 'indexed' : i === 1 ? 'processing' : 'indexed',
+        version: i === 1 ? 2 : 1
+      }))
+      // 再塞一条仅 name 字段的兼容项到第 0 页替换
+      all[2] = {
+        id: 'src_legacy',
+        // @ts-expect-error 故意不写 original_name，测 name 回退
+        name: 'legacy-name-only',
+        status: 'ready',
+        version: 1
+      } as (typeof all)[0] & { name: string; status: string }
+
+      globalThis.fetch = async (input) => {
+        const url = String(input)
+        pageRequests.push(url)
+        if (url.includes('/sources?')) {
+          const u = new URL(url)
+          const offset = Number(u.searchParams.get('offset') || '0')
+          const limit = Number(u.searchParams.get('limit') || '50')
+          const slice = all.slice(offset, offset + limit)
+          return Response.json({ sources: slice, total: all.length })
+        }
+        return new Response('{"status":"ok"}')
+      }
+      const listBridge = new NmemBridge(() => AI_DEFAULTS.nmem)
+      const sources = await listBridge.listSources()
+      assert.equal(sources.length, 150)
+      const byId = new Map(sources.map((s) => [s.id, s]))
+      assert.equal(byId.get('src_0')?.name, '书0 [bookId=book-0].md')
+      assert.equal(byId.get('src_0')?.status, 'ready', 'indexed → ready')
+      assert.equal(byId.get('src_1')?.status, 'processing')
+      assert.equal(byId.get('src_1')?.version, 2)
+      assert.equal(byId.get('src_legacy')?.name, 'legacy-name-only')
+      assert.ok(pageRequests.some((u) => u.includes('offset=0')))
+      assert.ok(
+        pageRequests.some((u) => u.includes('offset=100')),
+        'must request second page at offset=100'
+      )
+      console.log('  ok listSources maps original_name/lifecycle_state and paginates')
+    }
+
+    // listSources：API 忽略 offset 反复同一页时不得死循环
+    {
+      let hits = 0
+      globalThis.fetch = async () => {
+        hits++
+        return Response.json({
+          sources: [
+            {
+              id: 'src_stuck',
+              original_name: '卡住 [bookId=x].md',
+              lifecycle_state: 'indexed',
+              version: 1
+            }
+          ],
+          total: 999
+        })
+      }
+      const stuckBridge = new NmemBridge(() => AI_DEFAULTS.nmem)
+      const sources = await stuckBridge.listSources()
+      assert.equal(sources.length, 1)
+      assert.ok(hits <= 3, `must stop when page yields no new ids (hits=${hits})`)
+      console.log('  ok listSources stops when pagination stalls')
+    }
+
+    console.log('nmem bridge result: 6 passed')
   } finally {
     globalThis.fetch = originalFetch
   }

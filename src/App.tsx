@@ -49,6 +49,13 @@ import {
 import PlayerOSD from './components/PlayerOSD'
 import { useOsdStore } from './stores/osdStore'
 import { useSettingsStore } from './stores/settingsStore'
+import {
+  clampContentOpacity,
+  clampPanelOpacity,
+  resolvePanelBlur,
+  resolvePanelEffect,
+  resolvePanelRgb
+} from './panelSurface'
 import { useLogStore } from './stores/logStore'
 import { useHistoryStore } from './stores/historyStore'
 import { useFloatingBallStore } from './stores/floatingBallStore'
@@ -145,7 +152,7 @@ export default function App() {
     }
   }, [currentView, loadHistory])
 
-  // === Theme handling ===
+  // === Theme handling（浅/深色；主题色固定太古蓝，纯 CSS 变量） ===
   useEffect(() => {
     const applyTheme = (theme: 'light' | 'dark') => {
       if (theme === 'dark') document.documentElement.classList.add('dark')
@@ -154,7 +161,7 @@ export default function App() {
     if (settings.theme === 'system') {
       const mq = window.matchMedia('(prefers-color-scheme: dark)')
       applyTheme(mq.matches ? 'dark' : 'light')
-      // 订阅运行时 OS 主题切换，与 AppBackground.useIsDark 行为一致
+      // 订阅运行时 OS 主题切换，与 useIsDark 行为一致
       const update = () => applyTheme(mq.matches ? 'dark' : 'light')
       mq.addEventListener('change', update)
       return () => mq.removeEventListener('change', update)
@@ -162,6 +169,73 @@ export default function App() {
       applyTheme(settings.theme)
     }
   }, [settings.theme])
+
+  // === 统一遮罩变量：组件 + 阅读正文（AI/听书共用 --reader-a）===
+  useEffect(() => {
+    const root = document.documentElement
+    const bg = settings.background
+    const clear = () => {
+      root.removeAttribute('data-panel-on')
+      root.removeAttribute('data-panel-fx')
+      root.style.removeProperty('--panel-rgb')
+      root.style.removeProperty('--panel-a')
+      root.style.removeProperty('--panel-blur')
+      root.style.removeProperty('--reader-a')
+    }
+    const base = bg?.baseColor ?? 'auto'
+    // 有底图/自定义底层色时开组件半透明；阅读遮罩浓度始终写入
+    const panelOn = Boolean(bg?.enabled) || (base !== 'auto')
+    const readerA = clampContentOpacity(bg?.contentOpacity)
+    root.style.setProperty('--reader-a', String(readerA))
+
+    if (!panelOn) {
+      root.removeAttribute('data-panel-on')
+      root.removeAttribute('data-panel-fx')
+      root.style.removeProperty('--panel-rgb')
+      root.style.removeProperty('--panel-a')
+      root.style.removeProperty('--panel-blur')
+      return () => {
+        root.style.removeProperty('--reader-a')
+      }
+    }
+
+    const apply = (isDark: boolean) => {
+      const rgb = resolvePanelRgb(isDark)
+      const a = clampPanelOpacity(bg?.panelOpacity)
+      const fx = resolvePanelEffect(bg)
+      root.setAttribute('data-panel-on', '1')
+      root.setAttribute('data-panel-fx', fx)
+      root.style.setProperty('--panel-rgb', rgb)
+      root.style.setProperty('--panel-a', String(a))
+      root.style.setProperty('--panel-blur', resolvePanelBlur(a, fx))
+      root.style.setProperty('--reader-a', String(readerA))
+    }
+
+    if (settings.theme === 'dark') {
+      apply(true)
+      return clear
+    }
+    if (settings.theme === 'light') {
+      apply(false)
+      return clear
+    }
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    apply(mq.matches)
+    const onChange = () => apply(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => {
+      mq.removeEventListener('change', onChange)
+      clear()
+    }
+  }, [
+    settings.background?.enabled,
+    settings.background?.baseColor,
+    settings.background?.panelOpacity,
+    settings.background?.contentOpacity,
+    settings.background?.glass,
+    settings.background?.panelEffect,
+    settings.theme
+  ])
 
   // === TTS hook ===
   const tts = useTTS({ showToast })
@@ -391,18 +465,8 @@ export default function App() {
     }
   }, [tts])
 
-  // === AI 阅读模式：停止 TTS，但保留阅读位置（不 reset 到范围起点）===
-  useEffect(() => {
-    if (readerMode === 'ai-reading') tts.pause()
-  }, [readerMode, tts])
-
-  // === 切到阅读器且处于 AI 阅读时，禁止残留的书籍 TTS 继续响 ===
-  useEffect(() => {
-    if (currentView === 'player' && readerMode === 'ai-reading') {
-      const state = usePlayerStore.getState().playState
-      if (state === 'playing') tts.pause()
-    }
-  }, [currentView, readerMode, tts])
+  // 模式切换（听书 ↔ AI 阅读）不打断播放：索引与 playState 保留，
+  // AI 模式用 AiPlaybackCapsule 继续控播。用户可自行暂停。
 
   // === 实时日志推送（主进程 → 渲染进程） ===
   useEffect(() => {
@@ -661,10 +725,14 @@ export default function App() {
     }
   }, [currentBook?.id])
 
+  // 并发/批量导入：引用计数，避免「先结束的一本 setLoading(false)」或
+  // 迟到的 import-progress 在 finally 之后又 setLoading(true) 导致遮罩卡死
+  const importInFlightRef = useRef(0)
+
   // === 导入进度（主进程推送） ===
   useEffect(() => {
     const cleanup = window.api?.onImportProgress((data) => {
-      if (data?.detail) {
+      if (data?.detail && importInFlightRef.current > 0) {
         useBookStore.getState().setLoading(true, data.detail)
       }
     })
@@ -674,8 +742,15 @@ export default function App() {
   }, [])
 
   // === Import file handler ===
+  // 返回导入成功的书（失败 null），供书架在专辑内导入时自动加入专辑
+  // quiet：批量时抑制每本成功 toast，只保留错误
+  // holdLoading：批量串行时中间几本不要关掉遮罩，避免闪一下
   const handleImportFile = useCallback(
-    async (filePath: string) => {
+    async (
+      filePath: string,
+      options?: { quiet?: boolean; holdLoading?: boolean }
+    ): Promise<BookData | null> => {
+      importInFlightRef.current += 1
       setLoading(true, '正在解析书籍…')
       try {
         const result = (await window.api?.importFile(filePath)) as {
@@ -693,9 +768,9 @@ export default function App() {
           })
           if (!newBook) {
             showToast('error', '导入结果不包含可朗读文本')
-            return
+            return null
           }
-          // Add to books array
+          // 主进程已落盘；此处只更新内存书架
           useBookStore.getState().addBook(newBook)
 
           // Auto-generate cover if none exists
@@ -710,17 +785,23 @@ export default function App() {
           }
           if (result.warning) {
             showToast('warning', result.warning)
-          } else {
+          } else if (!options?.quiet) {
             showToast('success', `已导入《${newBook.title}》`)
           }
+          return newBook
         } else {
           showToast('error', result?.error || '导入失败')
+          return null
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
         showToast('error', `导入失败：${msg}`)
+        return null
       } finally {
-        setLoading(false)
+        importInFlightRef.current = Math.max(0, importInFlightRef.current - 1)
+        if (importInFlightRef.current === 0 && !options?.holdLoading) {
+          setLoading(false)
+        }
       }
     },
     [setLoading, showToast]
@@ -1018,8 +1099,10 @@ export default function App() {
     }
   }, [])
 
+  // isolate：为 AppBackground 的 -z-10 建立叠层上下文
+  // 底层纯色 / 背景图由 AppBackground 负责；这里透明，避免盖住自定义底色
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden bg-gray-50 dark:bg-dark-bg relative">
+    <div className="h-screen w-screen flex flex-col overflow-hidden bg-transparent relative isolate">
       <AppBackground />
       <LoadingOverlay
         visible={appBooting}
@@ -1135,22 +1218,25 @@ export default function App() {
 
               {shouldShowFullPlaybackBar(readerMode) && (
                 <div
-                  className={`z-30 bg-white dark:bg-dark-surface transition-transform duration-200 ease-out ${
+                  className={`z-30 transition-transform duration-200 ease-out ${
                     playerImmersive
                       ? 'absolute bottom-0 left-0 right-0 translate-y-full pointer-events-none'
-                      : 'flex-shrink-0 translate-y-0'
+                      : 'flex-shrink-0 translate-y-0 px-2 pb-2 sm:px-2.5'
                   }`}
                 >
-                  <ProgressBar onSeek={tts.seekTo} onPause={tts.pause} onResume={tts.play} />
-                  <ControlBar
-                    onPlay={tts.play}
-                    onPause={tts.pause}
-                    onStop={tts.stop}
-                    onPrevSentence={tts.prevSentence}
-                    onNextSentence={tts.nextSentence}
-                    onSkipChapter={handleSkipChapter}
-                    showToast={showToast}
-                  />
+                  {/* 与正文 reader-stage 同左右边距；半透明；主题色只点缀播放/进度 */}
+                  <div className="overflow-hidden rounded-xl border border-black/5 bg-white/40 shadow-soft backdrop-blur-md dark:border-white/10 dark:bg-dark-surface/35">
+                    <ProgressBar onSeek={tts.seekTo} onPause={tts.pause} onResume={tts.play} />
+                    <ControlBar
+                      onPlay={tts.play}
+                      onPause={tts.pause}
+                      onStop={tts.stop}
+                      onPrevSentence={tts.prevSentence}
+                      onNextSentence={tts.nextSentence}
+                      onSkipChapter={handleSkipChapter}
+                      showToast={showToast}
+                    />
+                  </div>
                 </div>
               )}
 

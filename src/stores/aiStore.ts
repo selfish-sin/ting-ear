@@ -79,7 +79,7 @@ interface AiState {
 let listenerCleanups: Array<() => void> = []
 /** 期望的下一个 seq；乱序 chunk 先缓冲 */
 let nextSequence = 0
-const seqBuffer = new Map<number, string>()
+const seqBuffer = new Map<number, { text?: string; reasoning?: string }>()
 let initializationGeneration = 0
 let nextChatFocusRequestId = 0
 
@@ -100,6 +100,10 @@ function toHistoryMessages(messages: AiChatMessage[]): AiHistoryMessage[] {
       role: message.role,
       content: textOf(message),
       sources: message.sources,
+      webSources: message.webSources,
+      webSearchUsed: message.webSearchUsed,
+      toolTraces: message.toolTraces,
+      reasoning: message.reasoning,
       retrievalStatus:
         message.retrievalStatus === 'searching' ? 'skipped' : message.retrievalStatus,
       retrievalError: message.retrievalError
@@ -115,6 +119,10 @@ function toChatMessage(message: AiHistoryMessage): AiChatMessage | null {
     createdAt: new Date().toISOString(),
     status: 'complete',
     sources: message.sources,
+    webSources: message.webSources,
+    webSearchUsed: message.webSearchUsed,
+    toolTraces: message.toolTraces,
+    reasoning: message.reasoning,
     retrievalStatus: message.retrievalStatus,
     retrievalError: message.retrievalError
   }
@@ -147,20 +155,25 @@ function updateAssistant(
   )
 }
 
-function appendChunkText(messages: AiChatMessage[], requestId: string, text: string): AiChatMessage[] {
+function appendChunkPart(
+  messages: AiChatMessage[],
+  requestId: string,
+  part: { text?: string; reasoning?: string }
+): AiChatMessage[] {
   const msgs = messages
   const last = msgs[msgs.length - 1]
+  const apply = (m: AiChatMessage): AiChatMessage => ({
+    ...m,
+    parts: part.text
+      ? [{ type: 'text', text: `${textOf(m)}${part.text}` }]
+      : m.parts,
+    reasoning: part.reasoning ? `${m.reasoning || ''}${part.reasoning}` : m.reasoning
+  })
   if (!last || last.requestId !== requestId) {
-    return updateAssistant(msgs, requestId, (m) => ({
-      ...m,
-      parts: [{ type: 'text', text: `${textOf(m)}${text}` }]
-    }))
+    return updateAssistant(msgs, requestId, apply)
   }
   const updated = [...msgs]
-  updated[msgs.length - 1] = {
-    ...last,
-    parts: [{ type: 'text', text: `${textOf(last)}${text}` }]
-  }
+  updated[msgs.length - 1] = apply(last)
   return updated
 }
 
@@ -209,7 +222,19 @@ export const useAiStore = create<AiState>((set, get) => {
         set((state) => ({
           messages: updateAssistant(state.messages, event.requestId, (message) => ({
             ...message,
+            // 书内 sources：有数组就更新（含空数组表示检索完成但无命中）
             sources: event.sources,
+            // 联网结果：后到的补丁可能只带 webSources；空数组不覆盖已有结果
+            webSources:
+              event.webSources && event.webSources.length > 0
+                ? event.webSources
+                : message.webSources,
+            webSearchUsed:
+              event.webSearchUsed !== undefined ? event.webSearchUsed : message.webSearchUsed,
+            toolTraces:
+              event.toolTraces && event.toolTraces.length > 0
+                ? event.toolTraces
+                : message.toolTraces,
             retrievalStatus: event.status,
             retrievalError: event.error
           })),
@@ -232,14 +257,15 @@ export const useAiStore = create<AiState>((set, get) => {
         if (event.requestId !== get().currentRequestId) return
         // 乱序缓冲：按 seq 重组，避免 IPC 乱序导致后续全部静默丢弃
         if (event.seq < nextSequence) return
-        seqBuffer.set(event.seq, event.text)
+        if (!event.text && !event.reasoning) return
+        seqBuffer.set(event.seq, { text: event.text, reasoning: event.reasoning })
         set((state) => {
           let messages = state.messages
           while (seqBuffer.has(nextSequence)) {
-            const text = seqBuffer.get(nextSequence)!
+            const part = seqBuffer.get(nextSequence)!
             seqBuffer.delete(nextSequence)
             nextSequence += 1
-            messages = appendChunkText(messages, event.requestId, text)
+            messages = appendChunkPart(messages, event.requestId, part)
           }
           return { messages }
         })
@@ -252,8 +278,8 @@ export const useAiStore = create<AiState>((set, get) => {
           seqBuffer.clear()
           set((state) => {
             let messages = state.messages
-            for (const [, text] of ordered) {
-              messages = appendChunkText(messages, event.requestId, text)
+            for (const [, part] of ordered) {
+              messages = appendChunkPart(messages, event.requestId, part)
             }
             return { messages }
           })
@@ -328,6 +354,8 @@ export const useAiStore = create<AiState>((set, get) => {
       status: 'streaming',
       parts: [{ type: 'text', text: '' }],
       sources: [],
+      webSources: [],
+      webSearchUsed: Boolean(aiSettings?.webSearch?.enabled),
       retrievalStatus: 'searching',
       error: undefined
     }
@@ -513,6 +541,30 @@ export const useAiStore = create<AiState>((set, get) => {
         const [convResult, nmem, ingest] = await Promise.all([
           (async () => {
             try {
+              // ensure：有历史则恢复 active，无则建一条；绝不并发狂建空会话
+              const ensured = window.api?.aiConvEnsure
+                ? await window.api.aiConvEnsure(bookId)
+                : null
+              if (ensured) {
+                const listed = await window.api?.aiConvList(bookId)
+                const activeId = ensured.id
+                const conversations = listed?.conversations?.length
+                  ? listed.conversations
+                  : [
+                      {
+                        id: ensured.id,
+                        title: ensured.title,
+                        createdAt: ensured.createdAt,
+                        messageCount: ensured.messages?.length ?? 0
+                      }
+                    ]
+                const history = await window.api?.aiConvLoad(bookId, activeId)
+                const messages = (history || [])
+                  .map(toChatMessage)
+                  .filter((m): m is AiChatMessage => !!m)
+                return { activeId, conversations, messages, error: null as unknown }
+              }
+              // 兼容旧 preload 无 ensure
               const listed = await window.api?.aiConvList(bookId)
               if (!listed) {
                 return { activeId: null as string | null, conversations: [] as ConvSummary[], messages: [] as AiChatMessage[], error: null as unknown }
@@ -754,15 +806,17 @@ export const useAiStore = create<AiState>((set, get) => {
       let activeConvId = listed?.activeId ?? null
 
       if (conversations.length === 0) {
-        const created = await window.api?.aiConvCreate(bookId)
-        if (created) {
-          activeConvId = created.id
+        const ensured = window.api?.aiConvEnsure
+          ? await window.api.aiConvEnsure(bookId)
+          : await window.api?.aiConvCreate(bookId)
+        if (ensured) {
+          activeConvId = ensured.id
           conversations = [
             {
-              id: created.id,
-              title: created.title,
-              createdAt: created.createdAt,
-              messageCount: 0
+              id: ensured.id,
+              title: ensured.title,
+              createdAt: ensured.createdAt,
+              messageCount: 'messages' in ensured ? (ensured.messages?.length ?? 0) : 0
             }
           ]
         }

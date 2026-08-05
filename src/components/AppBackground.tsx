@@ -1,40 +1,24 @@
 import { useEffect, useState } from 'react'
 import { useSettingsStore } from '../stores/settingsStore'
-
-/** 解析当前主题是否为深色（与 App.tsx 的逻辑一致） */
-function useIsDark(): boolean {
-  const theme = useSettingsStore((s) => s.settings.theme)
-  const [isDark, setIsDark] = useState(false)
-  useEffect(() => {
-    if (theme === 'dark') {
-      setIsDark(true)
-      return
-    }
-    if (theme === 'light') {
-      setIsDark(false)
-      return
-    }
-    // system
-    const mq = window.matchMedia('(prefers-color-scheme: dark)')
-    const update = () => setIsDark(mq.matches)
-    update()
-    mq.addEventListener('change', update)
-    return () => mq.removeEventListener('change', update)
-  }, [theme])
-  return isDark
-}
+import { useIsDark } from '../hooks/useIsDark'
+import {
+  extractAverageColorFromDataUrl,
+  resolveBaseColor
+} from '../utils/extractImageColor'
 
 /**
- * 全应用根层背景图。disabled 或图片缺失时返回 null，由根 div 纯色兜底。
- * 渲染：<img> 背景层 + 半透明遮罩层；pointer-events-none 不挡交互。
+ * 根层背景两层：
+ *  ① 底层纯色（跟日夜 / 取自图 / 自定义）
+ *  ② 可选底图 + 压暗遮罩（遮罩色固定跟日夜）
+ * 组件层在 App 其它子树之上。
  */
 export default function AppBackground() {
   const background = useSettingsStore((s) => s.settings.background)
+  const setBackground = useSettingsStore((s) => s.setBackground)
   const isDark = useIsDark()
   const [imgUrl, setImgUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
 
-  // 图源变化时重新解析为 data URL
   useEffect(() => {
     if (!background?.enabled) {
       setImgUrl(null)
@@ -59,33 +43,58 @@ export default function AppBackground() {
     }
   }, [background?.enabled, background?.source, background?.presetId, background?.customPath])
 
-  if (!background?.enabled || !imgUrl || failed) return null
+  // 取自背景图：加载后取样
+  useEffect(() => {
+    if (background?.baseColor !== 'fromImage') return
+    if (!background?.enabled || !imgUrl || failed) return
+    let cancelled = false
+    void extractAverageColorFromDataUrl(imgUrl).then((hex) => {
+      if (cancelled || !hex) return
+      const prev = background.baseColorCached
+      if (prev && prev.toUpperCase() === hex.toUpperCase()) return
+      setBackground({ baseColorCached: hex })
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    background?.baseColor,
+    background?.enabled,
+    background?.source,
+    background?.presetId,
+    background?.customPath,
+    imgUrl,
+    failed,
+    setBackground
+  ])
 
-  const overlayHex =
-    background.overlayColor === 'auto' ? (isDark ? '#000000' : '#ffffff') : background.overlayColor
-
-  const objectFit =
-    background.fit === 'stretch' ? 'fill' : background.fit === 'contain' ? 'contain' : 'cover'
+  const baseHex = resolveBaseColor(background?.baseColor, isDark, background?.baseColorCached)
+  const showImage = Boolean(background?.enabled && imgUrl && !failed)
+  // 压暗：浅色用白罩、深色用黑罩（不再单独选遮罩色）
+  const overlayHex = isDark ? '#000000' : '#ffffff'
+  const dim = typeof background?.overlayOpacity === 'number' ? background.overlayOpacity : 0.55
+  const blur = background?.blur ?? 0
 
   return (
-    <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
-      <img
-        src={imgUrl}
-        alt=""
-        aria-hidden="true"
-        className="w-full h-full"
-        style={{
-          objectFit,
-          filter: background.blur > 0 ? `blur(${background.blur}px)` : undefined,
-          // blur 露出边缘，略微放大遮住透明边
-          transform: background.blur > 0 ? 'scale(1.05)' : undefined
-        }}
-        onError={() => setFailed(true)}
-      />
-      <div
-        className="absolute inset-0"
-        style={{ backgroundColor: overlayHex, opacity: background.overlayOpacity }}
-      />
+    <div className="absolute inset-0 -z-10 overflow-hidden pointer-events-none" aria-hidden="true">
+      <div className="absolute inset-0" style={{ backgroundColor: baseHex }} />
+      {showImage && (
+        <>
+          <img
+            src={imgUrl!}
+            alt=""
+            aria-hidden="true"
+            className="absolute inset-0 h-full w-full object-cover"
+            style={{
+              filter: blur > 0 ? `blur(${blur}px)` : undefined,
+              transform: blur > 0 ? 'scale(1.05)' : undefined
+            }}
+            onError={() => setFailed(true)}
+          />
+          <div className="absolute inset-0" style={{ backgroundColor: overlayHex, opacity: dim }} />
+        </>
+      )}
     </div>
   )
 }

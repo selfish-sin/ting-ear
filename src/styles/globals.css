@@ -4,10 +4,27 @@
 
 /* ── Base ── */
 @layer base {
+  /* 主题色固定「太古蓝」#4F6EF7；变体由静态变量提供，无运行时切换 */
+  :root {
+    --primary-rgb: 79, 110, 247;
+    --primary-300-rgb: 141, 161, 250;
+    --primary-600-rgb: 65, 90, 203;
+    --primary-700-rgb: 54, 75, 168;
+    --primary-hex: #4f6ef7;
+    /* 实心主色按钮前景（图标/文字）：浅色主题用深变体 primary-700 */
+    --on-primary-rgb: 54, 75, 168;
+  }
+
+  /* 深色主题：深变体对比度不足，前景用白 */
+  html.dark {
+    --on-primary-rgb: 255, 255, 255;
+  }
+
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+    accent-color: rgb(var(--primary-rgb));
   }
 
   body {
@@ -27,12 +44,12 @@
 
   /* 选中文本 */
   ::selection {
-    background: rgba(79, 110, 247, 0.22);
+    background: rgb(var(--primary-rgb) / 0.22);
     color: inherit;
   }
 
   :focus-visible {
-    outline: 2px solid rgba(79, 110, 247, 0.72);
+    outline: 2px solid rgb(var(--primary-rgb) / 0.72);
     outline-offset: 2px;
   }
 }
@@ -90,7 +107,7 @@
   position: absolute;
   inset: 0;
   border-radius: 0.5rem;
-  box-shadow: 0 0 0 1px rgba(79, 110, 247, 0.2), 0 0 20px rgba(79, 110, 247, 0.18);
+  box-shadow: 0 0 0 1px rgb(var(--primary-rgb) / 0.2), 0 0 20px rgb(var(--primary-rgb) / 0.18);
   pointer-events: none;
   animation: sentenceGlow 2.8s ease-in-out infinite;
 }
@@ -191,20 +208,34 @@ input[type='range']::-webkit-slider-thumb:hover {
     @apply border-gray-100/90 dark:border-dark-border;
   }
 
+  /*
+   * 主题色 = 点缀：默认中性灰，悬停/选中/播放中才亮主题色
+   * 不要整栏刷成 primary
+   */
+  /* 透明度只用 Tailwind 默认档：5/10/20/25… @apply 不认 /8 /12 /15 /18 */
   .icon-btn {
     @apply w-8 h-8 rounded-xl flex items-center justify-center
       text-gray-500 dark:text-gray-400
-      hover:text-gray-800 dark:hover:text-gray-100
-      hover:bg-gray-100/90 dark:hover:bg-white/5
+      hover:text-primary dark:hover:text-primary-300
+      hover:bg-primary/10 dark:hover:bg-primary/20
       transition-all duration-150;
   }
 
   .icon-btn-sm {
     @apply w-7 h-7 rounded-lg flex items-center justify-center
       text-gray-500 dark:text-gray-400
-      hover:text-gray-800 dark:hover:text-gray-100
-      hover:bg-gray-100/90 dark:hover:bg-white/5
+      hover:text-primary dark:hover:text-primary-300
+      hover:bg-primary/10 dark:hover:bg-primary/20
       transition-all duration-150;
+  }
+
+  /** 任意工具图标：默认中性，hover 主题色 */
+  .app-icon {
+    @apply text-gray-500 dark:text-gray-400
+      transition-colors duration-150;
+  }
+  .app-icon:hover {
+    @apply text-primary;
   }
 
   .nav-item {
@@ -213,13 +244,13 @@ input[type='range']::-webkit-slider-thumb:hover {
   }
 
   .nav-item-active {
-    @apply bg-primary/10 text-primary dark:bg-primary/15 dark:text-primary-300 shadow-none;
+    @apply bg-primary/10 text-primary dark:bg-primary/20 dark:text-primary-300 shadow-none;
   }
 
   .nav-item-idle {
     @apply text-gray-600 dark:text-gray-400
-      hover:bg-gray-100/80 dark:hover:bg-white/[0.04]
-      hover:text-gray-900 dark:hover:text-gray-100;
+      hover:bg-primary/10 dark:hover:bg-primary/20
+      hover:text-primary dark:hover:text-primary-300;
   }
 
   .chip {
@@ -232,8 +263,23 @@ input[type='range']::-webkit-slider-thumb:hover {
   }
 
   .chip-idle {
-    @apply text-gray-600 dark:text-gray-300 bg-gray-100/70 dark:bg-white/[0.04]
-      hover:bg-gray-200/80 dark:hover:bg-white/[0.07];
+    @apply text-gray-600 dark:text-gray-300 bg-black/5 dark:bg-white/5
+      hover:bg-primary/10 hover:text-primary dark:hover:bg-primary/20;
+  }
+
+  /** 底栏调节组：半透明中性底，hover 才亮主题色 */
+  .ctrl-group {
+    @apply flex items-center gap-0.5 rounded-md sm:rounded-lg
+      bg-black/5 dark:bg-white/5
+      border border-black/5 dark:border-white/10
+      px-0.5 sm:px-1 py-0.5;
+  }
+  .ctrl-btn {
+    @apply w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 rounded
+      flex items-center justify-center
+      text-gray-500 dark:text-gray-400
+      hover:bg-primary/10 hover:text-primary
+      transition-colors;
   }
 
   .field-input {
@@ -242,7 +288,7 @@ input[type='range']::-webkit-slider-thumb:hover {
       px-3 py-2 text-sm text-gray-800 dark:text-gray-100
       placeholder:text-gray-400 dark:placeholder:text-gray-500
       outline-none
-      focus:border-primary/40 focus:ring-2 focus:ring-primary/15
+      focus:border-primary/40 focus:ring-2 focus:ring-primary/20
       transition-all duration-150;
   }
 
@@ -270,7 +316,7 @@ input[type='range']::-webkit-slider-thumb:hover {
     @apply rounded-2xl bg-white dark:bg-dark-raised
       border border-gray-100/80 dark:border-dark-border
       shadow-soft
-      hover:shadow-card hover:border-primary/15 dark:hover:border-primary/25
+      hover:shadow-card hover:border-primary/20 dark:hover:border-primary/25
       hover:-translate-y-0.5
       transition-all duration-200 ease-out;
   }
@@ -347,4 +393,107 @@ input[type='range']::-webkit-slider-thumb:hover {
 .reader-block-virtual {
   content-visibility: auto;
   contain-intrinsic-size: auto 120px;
+}
+
+/*
+ * 真背景模式（背景图开启时）
+ * App.tsx 写入：
+ *   data-panel-on + --panel-rgb / --panel-a / --panel-blur  （颜色+不透明度）
+ *   data-panel-fx="plain|frost"     （可选风格，叠加上去）
+ */
+html[data-panel-on] {
+  --panel-rgb: 255, 255, 255;
+  --panel-a: 0.72;
+  --panel-blur: 12px;
+  /* 风格叠色默认透明（plain 不改色） */
+  --panel-fx-tint: 255, 255, 255;
+  --panel-fx-mix: 0;
+  --panel-fx-saturate: 1;
+  --panel-fx-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 6px 18px rgba(15, 23, 42, 0.06);
+  --panel-fx-border: rgba(var(--panel-rgb), 0.35);
+}
+
+/* ── 毛玻璃（更强的滤镜叠色，不改用户选的颜色与不透明度） ── */
+html[data-panel-on][data-panel-fx='frost'] {
+  --panel-fx-saturate: 1.25;
+  --panel-fx-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 8px 28px rgba(15, 23, 42, 0.1);
+}
+
+/* 侧栏 / 工具条 / 卡片 / 空状态 / 列表块：底色 + 可选风格叠色 */
+html[data-panel-on] .panel-nav,
+html[data-panel-on] .panel-chrome,
+html[data-panel-on] .panel-surface,
+html[data-panel-on] .panel-empty,
+html[data-panel-on] .panel-resume,
+html[data-panel-on] .book-card {
+  background-image: linear-gradient(
+    rgba(var(--panel-fx-tint), var(--panel-fx-mix)),
+    rgba(var(--panel-fx-tint), var(--panel-fx-mix))
+  ) !important;
+  background-color: rgba(var(--panel-rgb), var(--panel-a)) !important;
+  border-color: var(--panel-fx-border) !important;
+  backdrop-filter: blur(var(--panel-blur)) saturate(var(--panel-fx-saturate));
+  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(var(--panel-fx-saturate));
+  box-shadow: var(--panel-fx-shadow);
+}
+
+/* 空状态略更透，露出更多背景 */
+html[data-panel-on] .panel-empty {
+  background-color: rgba(var(--panel-rgb), calc(var(--panel-a) * 0.55)) !important;
+}
+
+/* 专辑 chip 空闲态 */
+html[data-panel-on] .chip-idle {
+  background-image: linear-gradient(
+    rgba(var(--panel-fx-tint), calc(var(--panel-fx-mix) * 0.8)),
+    rgba(var(--panel-fx-tint), calc(var(--panel-fx-mix) * 0.8))
+  );
+  background-color: rgba(var(--panel-rgb), calc(var(--panel-a) * 0.85)) !important;
+  border: 1px solid var(--panel-fx-border);
+}
+
+/* 正文区：轻阴影防花背景吃字 */
+html[data-panel-on] .panel-readable {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.45);
+}
+html.dark[data-panel-on] .panel-readable {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+/*
+ * 阅读正文舞台（AI 阅读 + 听书共用 .reader-stage）
+ * --reader-a：设置 → 背景 → 阅读正文浓度（默认 0.9）
+ */
+.reader-stage {
+  --reader-a: 0.9;
+  background-color: rgba(255, 255, 255, var(--reader-a));
+  backdrop-filter: blur(22px) saturate(1.15);
+  -webkit-backdrop-filter: blur(22px) saturate(1.15);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 12px 32px rgba(15, 23, 42, 0.08);
+}
+html.dark .reader-stage {
+  background-color: rgba(38, 42, 53, var(--reader-a));
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.25),
+    0 12px 32px rgba(0, 0, 0, 0.28);
+}
+/* 有背景叠层时跟 panel 色，浓度用 --reader-a */
+html[data-panel-on] .reader-stage {
+  background-image: linear-gradient(
+    rgba(var(--panel-fx-tint), calc(var(--panel-fx-mix) * 0.45)),
+    rgba(var(--panel-fx-tint), calc(var(--panel-fx-mix) * 0.45))
+  );
+  background-color: rgba(var(--panel-rgb), var(--reader-a)) !important;
+  border-color: var(--panel-fx-border);
+  backdrop-filter: blur(max(18px, var(--panel-blur))) saturate(var(--panel-fx-saturate, 1.15));
+  -webkit-backdrop-filter: blur(max(18px, var(--panel-blur))) saturate(var(--panel-fx-saturate, 1.15));
+  box-shadow: var(--panel-fx-shadow);
+}
+html[data-panel-on][data-panel-fx='frost'] .reader-stage {
+  backdrop-filter: blur(28px) saturate(1.25);
+  -webkit-backdrop-filter: blur(28px) saturate(1.25);
 }

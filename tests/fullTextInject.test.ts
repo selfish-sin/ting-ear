@@ -45,10 +45,10 @@ const merged = mergeAiSettings({
 })
 assert.equal(merged.webSearch.enabled, true)
 assert.ok(merged.webSearch.prompt.includes('联网'))
-assert.equal(merged.chat.fullTextMaxChars, 50000)
+assert.equal(merged.chat.fullTextMaxChars, 15000)
 assert.ok(merged.chat.outlineSystemPrompt.includes('简体中文'))
 assert.ok(merged.chat.fullTextInjectPrompt.includes('当前章节') || merged.chat.fullTextInjectPrompt.includes('本章'))
-assert.equal(AI_DEFAULTS.chat.fullTextMaxChars, 50000)
+assert.equal(AI_DEFAULTS.chat.fullTextMaxChars, 15000)
 console.log('  ok merges defaults for chapter inject prompts')
 
 console.log('Full-text inject result: 4 passed')

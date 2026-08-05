@@ -119,7 +119,7 @@ export default function EditHistoryDialog({
           </button>
           <button
             onClick={() => { onSelect(record); onClose() }}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-white rounded-lg hover:bg-primary/90"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-[rgb(var(--on-primary-rgb))] rounded-lg hover:bg-primary/90"
           >
             <BookOpen className="w-3.5 h-3.5" />
             使用此版本

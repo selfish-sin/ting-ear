@@ -292,7 +292,7 @@ export default function CleanRulesSettings({ showToast }: Props) {
           </button>
           <button
             onClick={handleAdd}
-            className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-primary text-white rounded-lg hover:bg-primary/90"
+            className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-primary text-[rgb(var(--on-primary-rgb))] rounded-lg hover:bg-primary/90"
           >
             <Plus className="w-3.5 h-3.5" />
             添加规则
@@ -330,7 +330,7 @@ export default function CleanRulesSettings({ showToast }: Props) {
           <div className="flex justify-end">
             <button
               onClick={handleImport}
-              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-primary text-white rounded-lg hover:bg-primary/90"
+              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-primary text-[rgb(var(--on-primary-rgb))] rounded-lg hover:bg-primary/90"
             >
               <ClipboardPaste className="w-3.5 h-3.5" />
               导入规则
@@ -594,7 +594,7 @@ export default function CleanRulesSettings({ showToast }: Props) {
           <button
             onClick={handleSave}
             disabled={hasError}
-            className="px-4 py-1.5 text-sm bg-primary text-white rounded-lg hover:bg-primary/90 disabled:opacity-50"
+            className="px-4 py-1.5 text-sm bg-primary text-[rgb(var(--on-primary-rgb))] rounded-lg hover:bg-primary/90 disabled:opacity-50"
           >
             保存
           </button>

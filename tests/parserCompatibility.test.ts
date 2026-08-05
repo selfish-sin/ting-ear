@@ -74,7 +74,8 @@ async function main(): Promise<void> {
       writeFileSync(mdPath, '# 中文标题\n\x82；\n第一句。第二句！', 'utf8')
       assert.ok(parseTxt(txtPath).sentences.some((sentence) => sentence.includes('第一句')))
       const markdown = parseMarkdown(mdPath)
-      assert.equal(markdown.title, '中文标题')
+      // MD 无内嵌元数据，书名直接用文件名（不含扩展名）
+      assert.equal(markdown.title, 'utf8')
       assert.ok(markdown.sentences.every((sentence) => !sentence.includes('涓')))
       assert.ok(markdown.sentences.every((sentence) => !sentence.includes('\x82')))
     })

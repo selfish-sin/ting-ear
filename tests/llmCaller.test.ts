@@ -4,7 +4,8 @@ import {
   listModels,
   resolveAxiosProxyConfig,
   sanitizeProxyUrl,
-  streamChat
+  streamChat,
+  streamPartFromData
 } from '../electron/services/ai/llm-caller'
 import type { AiLlmSettings, AiPromptMessage } from '../src/global'
 
@@ -39,8 +40,19 @@ async function collect(
   settings: AiLlmSettings = config
 ): Promise<string[]> {
   const chunks: string[] = []
-  for await (const chunk of streamChat(settings, messages, signal)) chunks.push(chunk)
+  for await (const chunk of streamChat(settings, messages, signal)) {
+    if (chunk.text) chunks.push(chunk.text)
+  }
   return chunks
+}
+
+async function collectParts(
+  signal = new AbortController().signal,
+  settings: AiLlmSettings = config
+) {
+  const parts: Array<{ text?: string; reasoning?: string }> = []
+  for await (const chunk of streamChat(settings, messages, signal)) parts.push(chunk)
+  return parts
 }
 
 async function run(): Promise<void> {
@@ -73,6 +85,26 @@ async function run(): Promise<void> {
     assert.deepEqual(await collect(), ['你', '好'])
     assert.equal(requestBodies[0].model, 'primary-model')
     console.log('  ok parses split SSE chunks')
+
+    // DeepSeek-R1 风格 reasoning_content
+    assert.deepEqual(
+      streamPartFromData(
+        JSON.stringify({ choices: [{ delta: { reasoning_content: '先想一步' } }] })
+      ),
+      { reasoning: '先想一步' }
+    )
+    assert.deepEqual(
+      streamPartFromData(JSON.stringify({ choices: [{ delta: { content: '答案' } }] })),
+      { text: '答案' }
+    )
+    globalThis.fetch = async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"reasoning_content":"思考"}}]}\n',
+        'data: {"choices":[{"delta":{"content":"结论"}}]}\n',
+        'data: [DONE]\n\n'
+      ])
+    assert.deepEqual(await collectParts(), [{ reasoning: '思考' }, { text: '结论' }])
+    console.log('  ok parses reasoning_content + content stream')
 
     let attempt = 0
     globalThis.fetch = async (_input, init) => {

@@ -112,9 +112,9 @@ export default function HistoryView({ showToast, onContinueReading }: HistoryVie
   }
 
   return (
-    <div className="flex-1 flex flex-col bg-white dark:bg-dark-bg overflow-hidden">
+    <div className="flex-1 flex flex-col bg-transparent overflow-hidden">
       {/* Stats bar */}
-      <div className="flex items-center gap-6 px-4 py-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 flex-shrink-0">
+      <div className="panel-chrome flex items-center gap-6 px-4 py-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 flex-shrink-0">
         <div>
           <p className="text-xs text-gray-500 dark:text-gray-400">累计收听</p>
           <p className="text-lg font-bold text-primary">{fmtDuration(totalSec)}</p>
@@ -137,7 +137,7 @@ export default function HistoryView({ showToast, onContinueReading }: HistoryVie
 
       {/* Filter bar — hidden when no data */}
       {hasData && (
-        <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+        <div className="panel-chrome flex items-center gap-3 px-4 py-2 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
           <div className="flex bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5">
             {(['all', 'today', '7days', '30days'] as TimeRange[]).map((k) => (
               <button
@@ -180,7 +180,7 @@ export default function HistoryView({ showToast, onContinueReading }: HistoryVie
             <div className="flex gap-3 mt-2">
               <button
                 onClick={() => setCurrentView('shelf')}
-                className="flex items-center gap-1.5 px-4 py-2 text-sm bg-primary text-white rounded-lg hover:bg-primary/90"
+                className="flex items-center gap-1.5 px-4 py-2 text-sm bg-primary text-[rgb(var(--on-primary-rgb))] rounded-lg hover:bg-primary/90"
               >
                 <BookOpen className="w-4 h-4" /> 去书架
               </button>
@@ -205,7 +205,7 @@ export default function HistoryView({ showToast, onContinueReading }: HistoryVie
                   {entries.map((e) => (
                     <div
                       key={e.id}
-                      className="flex items-start gap-3 px-4 py-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:shadow-sm transition-shadow"
+                      className="panel-surface flex items-start gap-3 px-4 py-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:shadow-sm transition-shadow bg-white/80 dark:bg-dark-surface/80"
                     >
                       <div className="flex-shrink-0 text-xs text-gray-400 w-16">
                         {fmtTime(e.startTime)}

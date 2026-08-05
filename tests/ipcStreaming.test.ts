@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import { AiService, buildPromptMessages } from '../electron/services/ai/ai-service'
 import { AI_DEFAULTS } from '../electron/services/ai/ai-config'
-import type { AiChatPayload, AiHistoryRepository, AiPromptMessage } from '../src/global'
+import type { AiChatPayload, AiHistoryRepository, AiPromptMessage, AiSettings } from '../src/global'
+
+const PREFETCH_DEFAULTS: AiSettings = {
+  ...AI_DEFAULTS,
+  agent: { mode: 'prefetch', maxToolRounds: 4 }
+}
 
 interface SentEvent {
   channel: string
@@ -39,7 +44,7 @@ async function run(): Promise<void> {
     clear: () => undefined
   }
   const service = new AiService({
-    getSettings: () => AI_DEFAULTS,
+    getSettings: () => PREFETCH_DEFAULTS,
     history,
     stream: async function* () {
       yield '第'
@@ -62,7 +67,7 @@ async function run(): Promise<void> {
 
   const cancellationEvents: SentEvent[] = []
   const waitingService = new AiService({
-    getSettings: () => AI_DEFAULTS,
+    getSettings: () => PREFETCH_DEFAULTS,
     history,
     stream: async function* (_config, requestMessages, signal) {
       const question = requestMessages.at(-1)?.content

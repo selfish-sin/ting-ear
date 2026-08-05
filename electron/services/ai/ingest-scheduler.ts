@@ -71,6 +71,40 @@ function normalizeBookState(raw: unknown): BookSyncState | undefined {
  * - 手动「立即同步」只同步需要更新的书；force 才强制重传
  * - 手动「去重知识库」清理历史重复源（纯手动，不改本地状态，不会触发重传）
  */
+/** 从 source 显示名解析听伴 bookId（`… [bookId=uuid]`） */
+export function parseBookIdFromSourceName(name: string): string | null {
+  if (!name) return null
+  const m = name.match(/\[bookId=([^\]]+)\]/)
+  return m ? m[1] : null
+}
+
+/**
+ * 同 bookId 多源时选保留哪一个：
+ * 1) status=ready 优先
+ * 2) version 更高优先（nmem v2/v3）
+ * 3) 与 preferSourceId 一致的优先（本地状态记录的那条）
+ * 4) id 字典序兜底（稳定）
+ */
+export function pickPreferredSource(
+  list: NmemSourceInfo[],
+  preferSourceId?: string
+): NmemSourceInfo {
+  const ranked = [...list].sort((a, b) => {
+    const readyA = a.status === 'ready' ? 0 : 1
+    const readyB = b.status === 'ready' ? 0 : 1
+    if (readyA !== readyB) return readyA - readyB
+    const verA = typeof a.version === 'number' ? a.version : 0
+    const verB = typeof b.version === 'number' ? b.version : 0
+    if (verA !== verB) return verB - verA
+    if (preferSourceId) {
+      if (a.id === preferSourceId && b.id !== preferSourceId) return -1
+      if (b.id === preferSourceId && a.id !== preferSourceId) return 1
+    }
+    return a.id.localeCompare(b.id)
+  })
+  return ranked[0]
+}
+
 export class IngestScheduler {
   private timer: ReturnType<typeof setInterval> | null = null
   private probing = false
@@ -80,6 +114,11 @@ export class IngestScheduler {
    * 解决「导入即时线 tryIngest」与「探针定时线 catchUp」双线并发导致的重复源。
    */
   private inflight = new Map<string, Promise<BookSyncState>>()
+  /**
+   * ingest-status.json 串行写队列：批量并行 tryIngest 时若各自 load→改→save，
+   * 后写会覆盖先写，导致「状态丢了 → 探针再传一遍 → nmem 升 v2」。
+   */
+  private statusWriteChain: Promise<void> = Promise.resolve()
   /**
    * 书架指纹缓存（bookId → 上次见到的轻量指纹）。
    * 探针先用轻量索引比对指纹：只有指纹变了 / 状态缺失 / 上次失败的书，
@@ -139,6 +178,66 @@ export class IngestScheduler {
       }
     }
     await writeFile(this.statusPath(), JSON.stringify(clean, null, 2), 'utf-8')
+  }
+
+  /**
+   * 串行合并写入单本书状态，避免多书并行 tryIngest 时互相覆盖。
+   * 队列内：重新 load → 写入 bookId → save，保证其它书的状态不会丢。
+   */
+  private async updateBookStatus(bookId: string, state: BookSyncState): Promise<void> {
+    const run = this.statusWriteChain.then(async () => {
+      const current = await this.loadStatus()
+      current[bookId] = state
+      await this.saveStatus(current)
+    })
+    // 后续任务继续排队；当前失败不阻断队列
+    this.statusWriteChain = run.then(
+      () => undefined,
+      () => undefined
+    )
+    await run
+  }
+
+  /**
+   * 删除同一 bookId 下除 keepSourceId 以外的所有 nmem 源（含历史 v1 孤儿）。
+   * listSources 失败时退回只删 knownOldSourceId。
+   */
+  private async deleteSiblingSources(
+    bookId: string,
+    keepSourceId: string,
+    knownOldSourceId?: string
+  ): Promise<number> {
+    if (!bookId || !keepSourceId) return 0
+    let removed = 0
+    let sources: NmemSourceInfo[] | null = null
+    try {
+      sources = await this.nmem.listSources()
+    } catch {
+      sources = null
+    }
+
+    if (sources) {
+      for (const s of sources) {
+        if (s.id === keepSourceId) continue
+        if (parseBookIdFromSourceName(s.name) !== bookId) continue
+        const ok = await this.nmem.deleteSource(s.id)
+        if (ok) {
+          removed++
+          this.log('info', `已清理重复知识库源 ${s.id}（bookId=${bookId}）`)
+        }
+      }
+      return removed
+    }
+
+    // list 失败：至少尝试删本地记得的旧 sourceId
+    if (knownOldSourceId && knownOldSourceId !== keepSourceId) {
+      const ok = await this.nmem.deleteSource(knownOldSourceId)
+      if (ok) {
+        removed++
+        this.log('info', `已清理旧知识库源 ${knownOldSourceId}`)
+      }
+    }
+    return removed
   }
 
   private getBookState(status: SyncStatusV2, bookId: string): BookSyncState | undefined {
@@ -278,14 +377,14 @@ export class IngestScheduler {
       }
     }
 
-    // 上传新内容；成功且新 sourceId 不同于旧值时，再删旧 source（保证知识库只有一份）。
+    // 上传新内容；成功后按 bookId 清理所有兄弟源（不只删本地记得的 oldSourceId）。
     // 先传后删：上传失败时旧源仍在，避免知识库缓存丢失。
+    // 状态写丢时 oldSourceId 为空，仍会靠 listSources 扫到同 bookId 的 v1 孤儿并删掉。
     const oldSourceId = existing?.sourceId
     const state = await this.ingest.ingestWholeBook(book)
 
-    if (oldSourceId && state.sourceId && state.sourceId !== oldSourceId && state.status !== 'failed') {
-      const deleted = await this.nmem.deleteSource(oldSourceId)
-      if (deleted) this.log('info', `已清理旧知识库源 ${oldSourceId}: ${book.title}`)
+    if (state.sourceId && state.status !== 'failed') {
+      await this.deleteSiblingSources(book.id, state.sourceId, oldSourceId || undefined)
     }
 
     if (state.status === 'failed') {
@@ -310,9 +409,8 @@ export class IngestScheduler {
       }
 
       const state = await this.syncBook(book)
-      const current = await this.loadStatus()
-      current[book.id] = state
-      await this.saveStatus(current)
+      // 串行写状态：批量并行导书时不会互相覆盖
+      await this.updateBookStatus(book.id, state)
       return state.status !== 'failed'
     } catch {
       return false
@@ -335,9 +433,7 @@ export class IngestScheduler {
       for (const book of pending) {
         try {
           const bookState = await this.syncBook(book)
-          const current = await this.loadStatus()
-          current[book.id] = bookState
-          await this.saveStatus(current)
+          await this.updateBookStatus(book.id, bookState)
           if (bookState.status !== 'failed') success++
         } catch {
           break
@@ -373,9 +469,9 @@ export class IngestScheduler {
           continue
         }
         const bookState = await this.syncBook(book, { force: options.force })
-        const current = await this.loadStatus()
-        current[book.id] = bookState
-        await this.saveStatus(current)
+        await this.updateBookStatus(book.id, bookState)
+        // 本地快照也更新，避免同一次 syncAll 内后续判断用旧状态
+        status[book.id] = bookState
         if (bookState.status === 'failed') failed++
         else synced++
       } catch {
@@ -387,40 +483,58 @@ export class IngestScheduler {
   }
 
   /**
-   * 去重：按 bookId（source name 中的 [bookId=xxx]）分组，每组只保留 1 个 source，删除多余副本。
-   * 只处理 ting-ear 创建的源，不动其它。纯手动触发（设置页按钮），不改本地 ingest-status.json，
-   * 因此不会触发重传。用于一次性清理历史遗留的重复导入。
+   * 去重：按 bookId（source name / original_name 中的 [bookId=xxx]）分组，
+   * 每组只保留 1 个 source（优先 ready → 高 version → 本地记录的 sourceId），删除多余副本。
+   * 只处理 ting-ear 创建的源，不动其它。纯手动触发（设置页按钮）。
+   * 会同步把本地 ingest-status 的 sourceId 改成保留的那条（不改 contentHash，不触发重传）。
    */
-  async dedupeSources(): Promise<{ removed: number; kept: number; groups: number }> {
-    let sources: NmemSourceInfo[]
-    try {
-      sources = await this.nmem.listSources()
-    } catch {
-      return { removed: 0, kept: 0, groups: 0 }
-    }
+  async dedupeSources(): Promise<{ removed: number; kept: number; groups: number; scanned: number }> {
+    const sources = await this.nmem.listSources()
+    const localStatus = await this.loadStatus()
     const groups = new Map<string, NmemSourceInfo[]>()
     for (const s of sources) {
-      const m = s.name.match(/\[bookId=([^\]]+)\]/)
-      if (!m) continue
-      const key = m[1]
+      const key = parseBookIdFromSourceName(s.name)
+      if (!key) continue
       if (!groups.has(key)) groups.set(key, [])
       groups.get(key)!.push(s)
     }
     let removed = 0
     let kept = 0
-    for (const list of groups.values()) {
-      // 每组保留 1 个（优先 ready），删其余多余副本
-      list.sort((a, b) => (a.status === 'ready' ? 0 : 1) - (b.status === 'ready' ? 0 : 1))
+    let statusDirty = false
+    for (const [bookId, list] of groups) {
+      const preferId = localStatus[bookId]?.sourceId
+      const winner = pickPreferredSource(list, preferId)
       kept++
-      for (let i = 1; i < list.length; i++) {
-        const ok = await this.nmem.deleteSource(list[i].id)
+      for (const s of list) {
+        if (s.id === winner.id) continue
+        const ok = await this.nmem.deleteSource(s.id)
         if (ok) removed++
       }
+      // 本地 sourceId 指向已删副本时，改到保留的那条，避免后续误删唯一源
+      const local = localStatus[bookId]
+      if (local && local.sourceId && local.sourceId !== winner.id) {
+        localStatus[bookId] = { ...local, sourceId: winner.id, updatedAt: new Date().toISOString() }
+        statusDirty = true
+      } else if (local && !local.sourceId && winner.id) {
+        localStatus[bookId] = { ...local, sourceId: winner.id, updatedAt: new Date().toISOString() }
+        statusDirty = true
+      }
+    }
+    if (statusDirty) {
+      await this.saveStatus(localStatus)
     }
     if (removed > 0) {
-      this.log('info', `知识库去重完成: 删除 ${removed} 个重复源，保留 ${kept} 本`)
+      this.log(
+        'info',
+        `知识库去重完成: 扫描 ${sources.length} 个源，${groups.size} 本听伴书，删除 ${removed} 个重复源，保留 ${kept} 本`
+      )
+    } else {
+      this.log(
+        'info',
+        `知识库去重: 扫描 ${sources.length} 个源，${groups.size} 本听伴书，无重复源`
+      )
     }
-    return { removed, kept, groups: groups.size }
+    return { removed, kept, groups: groups.size, scanned: sources.length }
   }
 
   /** 启动定时探针（30s 间隔） */

@@ -14,7 +14,7 @@ export default function ContinueReadingCard({ book, coverUrl, onOpen, onCoverErr
 
   return (
     <div
-      className="mb-5 flex items-center gap-3.5 p-3.5 rounded-2xl border border-primary/20 bg-primary/[0.04] dark:bg-primary/[0.08] cursor-pointer hover:border-primary/40 hover:bg-primary/[0.07] dark:hover:bg-primary/[0.12] transition-all group/resume"
+      className="panel-resume mb-5 flex items-center gap-3.5 p-3.5 rounded-2xl border border-primary/20 bg-primary/[0.04] dark:bg-primary/[0.08] cursor-pointer hover:border-primary/40 hover:bg-primary/[0.07] dark:hover:bg-primary/[0.12] transition-all group/resume"
       onClick={() => onOpen(book)}
     >
       <div className="w-11 h-14 rounded-lg overflow-hidden flex-shrink-0 bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 shadow-sm ring-1 ring-black/[0.06] dark:ring-white/[0.08]">

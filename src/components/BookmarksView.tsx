@@ -128,9 +128,9 @@ export default function BookmarksView({ showToast, onOpenBookAt }: BookmarksView
   }
 
   return (
-    <div className="flex-1 flex flex-col bg-white dark:bg-dark-bg overflow-hidden">
+    <div className="flex-1 flex flex-col bg-transparent overflow-hidden">
       {/* Top toolbar */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+      <div className="panel-chrome flex items-center gap-3 px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
         {/* Book filter */}
         <select
           value={filterBookId}
@@ -183,7 +183,7 @@ export default function BookmarksView({ showToast, onOpenBookAt }: BookmarksView
               return (
                 <div
                   key={bookId}
-                  className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden"
+                  className="panel-surface border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white/80 dark:bg-dark-surface/80"
                 >
                   {/* Book header */}
                   <button

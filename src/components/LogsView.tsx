@@ -95,9 +95,9 @@ export default function LogsView({ showToast }: LogsViewProps) {
   ]
 
   return (
-    <div className="flex-1 flex flex-col bg-white dark:bg-dark-bg overflow-hidden">
+    <div className="flex-1 flex flex-col bg-transparent overflow-hidden">
       {/* Top toolbar */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
+      <div className="panel-chrome flex items-center gap-2 px-4 py-2 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
         <div className="flex bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5">
           {levels.map((lvl) => (
             <button
@@ -141,7 +141,7 @@ export default function LogsView({ showToast }: LogsViewProps) {
         ref={scrollRef}
         onScroll={handleScroll}
         data-raw-log-stream="true"
-        className="flex-1 overflow-y-auto font-mono text-[11px] leading-relaxed px-3 py-2 select-text bg-gray-50/50 dark:bg-black/20"
+        className="panel-surface flex-1 overflow-y-auto font-mono text-[11px] leading-relaxed px-3 py-2 select-text bg-gray-50/50 dark:bg-black/20"
         style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
       >
         {displayLogs.length === 0 ? (
@@ -160,7 +160,7 @@ export default function LogsView({ showToast }: LogsViewProps) {
       </div>
 
       {/* Bottom stats bar */}
-      <div className="flex items-center gap-4 px-4 py-2 border-t border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 text-[11px] flex-shrink-0">
+      <div className="panel-chrome flex items-center gap-4 px-4 py-2 border-t border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 text-[11px] flex-shrink-0">
         <span className="text-gray-400">
           共 <b className="text-gray-600 dark:text-gray-300">{stats.total}</b> 条
         </span>

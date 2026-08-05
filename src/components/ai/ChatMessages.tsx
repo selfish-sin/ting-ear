@@ -15,7 +15,8 @@ import remarkGfm from 'remark-gfm'
 import type { AiChatMessage, AiSourceRef } from '../../global'
 import { cn } from '../../utils/cn'
 import CitationPopover from './CitationPopover'
-import RetrievalCard from './RetrievalCard'
+import ReasoningBlock from './ReasoningBlock'
+import EvidencePanel from './EvidencePanel'
 
 interface ChatMessagesProps {
   messages: AiChatMessage[]
@@ -163,7 +164,11 @@ export default function ChatMessages({
             (message.status === 'complete' || message.status === 'error')
 
           return (
-            <div key={message.id} className={cn('flex gap-2.5', isUser && 'flex-row-reverse')}>
+            <div
+              key={message.id}
+              id={`ai-msg-${message.id}`}
+              className={cn('flex scroll-mt-3 gap-2.5', isUser && 'flex-row-reverse')}
+            >
               <div
                 className={cn(
                   'flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full',
@@ -217,11 +222,19 @@ export default function ChatMessages({
                   )
                 ) : (
                   <div className="ai-markdown break-words">
-                    {message.retrievalStatus && (
-                      <RetrievalCard
-                        status={message.retrievalStatus}
-                        sources={message.sources || []}
-                        error={message.retrievalError}
+                    <EvidencePanel
+                      status={message.retrievalStatus}
+                      sources={message.sources}
+                      webSources={message.webSources}
+                      webSearchUsed={message.webSearchUsed}
+                      toolTraces={message.toolTraces}
+                      error={message.retrievalError}
+                      onNavigateSource={onNavigateSource}
+                    />
+                    {message.reasoning && (
+                      <ReasoningBlock
+                        reasoning={message.reasoning}
+                        defaultOpen={message.status === 'streaming'}
                       />
                     )}
                     <ReactMarkdown

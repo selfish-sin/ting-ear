@@ -325,7 +325,39 @@ export async function listModels(config: AiLlmSettings): Promise<string[]> {
   }
 }
 
-function contentFromData(data: string): string | null {
+/** OpenAI 兼容 function tool call（完整聚合后） */
+export interface StreamToolCall {
+  id: string
+  name: string
+  arguments: string
+}
+
+/** 流式片段：正文 / 思考链 / 工具调用 */
+export interface StreamPart {
+  /** 最终回答增量 */
+  text?: string
+  /** 模型原生 reasoning / thinking 增量 */
+  reasoning?: string
+  /** 流结束时若模型请求工具，一次吐出完整 tool_calls */
+  toolCalls?: StreamToolCall[]
+  finishReason?: string
+}
+
+function pickString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return undefined
+}
+
+/**
+ * 解析 SSE data 行。
+ * 兼容：
+ * - OpenAI content
+ * - DeepSeek R1 / reasoner：delta.reasoning_content
+ * - 部分兼容服务：delta.reasoning / delta.thinking
+ */
+export function streamPartFromData(data: string): StreamPart | null {
   if (!data || data === '[DONE]') return null
   // SSE 注释行 / keep-alive，忽略
   if (data.startsWith(':')) return null
@@ -348,23 +380,164 @@ function contentFromData(data: string): string | null {
 
   const choice = (parsed as {
     choices?: Array<{
-      delta?: { content?: unknown }
-      message?: { content?: unknown }
+      delta?: {
+        content?: unknown
+        reasoning_content?: unknown
+        reasoning?: unknown
+        thinking?: unknown
+      }
+      message?: {
+        content?: unknown
+        reasoning_content?: unknown
+        reasoning?: unknown
+      }
       text?: unknown
     }>
   }).choices?.[0]
-  const fromDelta = choice?.delta?.content
-  if (typeof fromDelta === 'string') return fromDelta
-  const fromMessage = choice?.message?.content
-  if (typeof fromMessage === 'string') return fromMessage
-  if (typeof choice?.text === 'string') return choice.text
-  return null
+
+  const delta = choice?.delta
+  const message = choice?.message
+
+  const text =
+    pickString(delta?.content, message?.content) ??
+    (typeof choice?.text === 'string' && choice.text.length > 0 ? choice.text : undefined)
+
+  const reasoning = pickString(
+    delta?.reasoning_content,
+    delta?.reasoning,
+    delta?.thinking,
+    message?.reasoning_content,
+    message?.reasoning
+  )
+
+  if (!text && !reasoning) return null
+  return {
+    ...(text ? { text } : {}),
+    ...(reasoning ? { reasoning } : {})
+  }
+}
+
+/** @deprecated 兼容旧测试/调用，仅取 content 正文 */
+function contentFromData(data: string): string | null {
+  const part = streamPartFromData(data)
+  return part?.text ?? null
 }
 
 export interface StreamChatOptions {
   tools?: unknown[]
   /** 限制输出长度；大纲等结构化任务建议显式设置，避免默认过短被截断 */
   maxTokens?: number
+  /** tool_choice：auto | none | required | 指定函数 */
+  toolChoice?: 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } }
+}
+
+interface AccumToolCall {
+  id: string
+  name: string
+  arguments: string
+}
+
+/** 从 SSE JSON 片段提取 finish_reason 与 tool_calls delta */
+export function extractStreamMeta(data: string): {
+  finishReason?: string
+  toolCallDeltas?: Array<{
+    index: number
+    id?: string
+    name?: string
+    arguments?: string
+  }>
+} {
+  if (!data || data === '[DONE]' || data.startsWith(':')) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(data)
+  } catch {
+    return {}
+  }
+  const choice = (parsed as {
+    choices?: Array<{
+      finish_reason?: unknown
+      delta?: {
+        tool_calls?: Array<{
+          index?: number
+          id?: string
+          type?: string
+          function?: { name?: string; arguments?: string }
+        }>
+      }
+      message?: {
+        tool_calls?: Array<{
+          id?: string
+          function?: { name?: string; arguments?: string }
+        }>
+      }
+    }>
+  }).choices?.[0]
+  if (!choice) return {}
+
+  const finishReason =
+    typeof choice.finish_reason === 'string' && choice.finish_reason
+      ? choice.finish_reason
+      : undefined
+
+  const toolCallDeltas: Array<{
+    index: number
+    id?: string
+    name?: string
+    arguments?: string
+  }> = []
+
+  const deltas = choice.delta?.tool_calls
+  if (Array.isArray(deltas)) {
+    for (const tc of deltas) {
+      toolCallDeltas.push({
+        index: typeof tc.index === 'number' ? tc.index : toolCallDeltas.length,
+        id: typeof tc.id === 'string' ? tc.id : undefined,
+        name: typeof tc.function?.name === 'string' ? tc.function.name : undefined,
+        arguments:
+          typeof tc.function?.arguments === 'string' ? tc.function.arguments : undefined
+      })
+    }
+  } else if (Array.isArray(choice.message?.tool_calls)) {
+    choice.message.tool_calls.forEach((tc, index) => {
+      toolCallDeltas.push({
+        index,
+        id: typeof tc.id === 'string' ? tc.id : `call_${index}`,
+        name: typeof tc.function?.name === 'string' ? tc.function.name : undefined,
+        arguments:
+          typeof tc.function?.arguments === 'string' ? tc.function.arguments : undefined
+      })
+    })
+  }
+
+  return {
+    finishReason,
+    toolCallDeltas: toolCallDeltas.length ? toolCallDeltas : undefined
+  }
+}
+
+function mergeToolCallDelta(
+  acc: Map<number, AccumToolCall>,
+  deltas: Array<{ index: number; id?: string; name?: string; arguments?: string }>
+): void {
+  for (const d of deltas) {
+    const prev = acc.get(d.index) || { id: '', name: '', arguments: '' }
+    if (d.id) prev.id = d.id
+    if (d.name) prev.name += d.name
+    if (d.arguments) prev.arguments += d.arguments
+    acc.set(d.index, prev)
+  }
+}
+
+function finalizeToolCalls(acc: Map<number, AccumToolCall>): StreamToolCall[] {
+  return [...acc.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, v], i) => ({
+      id: v.id || `call_${i}`,
+      name: v.name,
+      arguments: v.arguments || '{}'
+    }))
+    .filter((t) => t.name)
 }
 
 async function* requestModel(
@@ -373,13 +546,14 @@ async function* requestModel(
   signal: AbortSignal,
   model: string,
   options?: StreamChatOptions
-): AsyncGenerator<string> {
+): AsyncGenerator<StreamPart> {
   if (useElectronProxyTransport()) {
     yield* requestModelViaAxios(config, messages, signal, model, options)
     return
   }
   const tools = options?.tools
   const maxTokens = options?.maxTokens
+  const toolChoice = options?.toolChoice
 
   const controller = new AbortController()
   const onAbort = () => controller.abort()
@@ -395,6 +569,8 @@ async function* requestModel(
   }
 
   const requestUrl = endpoint(config.baseUrl)
+  const toolAcc = new Map<number, AccumToolCall>()
+  let finishReason: string | undefined
   try {
     let response: Response
     try {
@@ -406,11 +582,12 @@ async function* requestModel(
         },
         body: JSON.stringify({
           model,
-          messages,
+          messages: serializeMessages(messages),
           temperature: config.temperature,
           stream: true,
           ...(typeof maxTokens === 'number' && maxTokens > 0 ? { max_tokens: maxTokens } : {}),
-          ...(tools && tools.length > 0 ? { tools } : {})
+          ...(tools && tools.length > 0 ? { tools } : {}),
+          ...(tools && tools.length > 0 && toolChoice ? { tool_choice: toolChoice } : {})
         }),
         signal: controller.signal
       })
@@ -436,6 +613,23 @@ async function* requestModel(
     let done = false
     let streamEnded = false
     let receivedContent = false
+    let receivedReasoning = false
+
+    const handleDataLine = function* (data: string): Generator<StreamPart> {
+      const meta = extractStreamMeta(data)
+      if (meta.finishReason) finishReason = meta.finishReason
+      if (meta.toolCallDeltas) {
+        mergeToolCallDelta(toolAcc, meta.toolCallDeltas)
+        resetIdle()
+      }
+      const part = streamPartFromData(data)
+      if (part) {
+        resetIdle()
+        if (part.text?.trim()) receivedContent = true
+        if (part.reasoning?.trim()) receivedReasoning = true
+        yield part
+      }
+    }
 
     while (!done && !streamEnded) {
       const result = await reader.read()
@@ -450,24 +644,27 @@ async function* requestModel(
           streamEnded = true
           break
         }
-        const content = contentFromData(data)
-        if (content) {
-          resetIdle()
-          if (content.trim()) receivedContent = true
-          yield content
-        }
+        yield* handleDataLine(data)
       }
     }
 
     if (!streamEnded && buffer.startsWith('data:')) {
-      const content = contentFromData(buffer.slice(5).trim())
-      if (content) {
-        if (content.trim()) receivedContent = true
-        yield content
-      }
+      yield* handleDataLine(buffer.slice(5).trim())
     }
 
-    if (!receivedContent) throw new AiServiceError('invalid_response', '模型响应未包含有效正文')
+    const toolCalls = finalizeToolCalls(toolAcc)
+    if (toolCalls.length > 0) {
+      yield {
+        toolCalls,
+        finishReason: finishReason || 'tool_calls'
+      }
+      return
+    }
+
+    // 纯思考模型若只有 reasoning 无 content，也算有效；有 tool_calls 已在上面返回
+    if (!receivedContent && !receivedReasoning) {
+      throw new AiServiceError('invalid_response', '模型响应未包含有效正文')
+    }
   } catch (error) {
     if (error instanceof AiServiceError) throw error
     if (signal.aborted) throw new AiServiceError('cancelled', '请求已取消')
@@ -482,15 +679,34 @@ async function* requestModel(
   }
 }
 
+/** 序列化消息：支持 tool / tool_calls 字段 */
+function serializeMessages(messages: AiPromptMessage[]): unknown[] {
+  return messages.map((m) => {
+    const base: Record<string, unknown> = {
+      role: m.role,
+      content: m.content ?? ''
+    }
+    if (m.tool_call_id) base.tool_call_id = m.tool_call_id
+    if (m.name) base.name = m.name
+    if (m.tool_calls && m.tool_calls.length > 0) {
+      base.tool_calls = m.tool_calls
+      // 部分供应商要求 content 为 null 当存在 tool_calls
+      if (!m.content) base.content = null
+    }
+    return base
+  })
+}
+
 async function* requestModelViaAxios(
   config: AiLlmSettings,
   messages: AiPromptMessage[],
   signal: AbortSignal,
   model: string,
   options?: StreamChatOptions
-): AsyncGenerator<string> {
+): AsyncGenerator<StreamPart> {
   const tools = options?.tools
   const maxTokens = options?.maxTokens
+  const toolChoice = options?.toolChoice
   const controller = new AbortController()
   const onAbort = () => controller.abort()
   if (signal.aborted) controller.abort()
@@ -511,26 +727,33 @@ async function* requestModelViaAxios(
   }
 
   const requestUrl = endpoint(config.baseUrl)
+  const toolAcc = new Map<number, AccumToolCall>()
+  let finishReason: string | undefined
   try {
-    const response = await axios.post(requestUrl, {
-      model,
-      messages,
-      temperature: config.temperature,
-      stream: true,
-      ...(typeof maxTokens === 'number' && maxTokens > 0 ? { max_tokens: maxTokens } : {}),
-      ...(tools && tools.length > 0 ? { tools } : {})
-    }, {
-      headers: {
-        'content-type': 'application/json',
-        ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {})
+    const response = await axios.post(
+      requestUrl,
+      {
+        model,
+        messages: serializeMessages(messages),
+        temperature: config.temperature,
+        stream: true,
+        ...(typeof maxTokens === 'number' && maxTokens > 0 ? { max_tokens: maxTokens } : {}),
+        ...(tools && tools.length > 0 ? { tools } : {}),
+        ...(tools && tools.length > 0 && toolChoice ? { tool_choice: toolChoice } : {})
       },
-      responseType: 'stream',
-      // 流式总时长由空闲定时器控制，避免 axios 总超时在慢速持续输出时误杀
-      timeout: 0,
-      signal: controller.signal,
-      // 显式清洗后的代理，避免 env 里带引号导致 Invalid URL
-      ...axiosProxyOption()
-    })
+      {
+        headers: {
+          'content-type': 'application/json',
+          ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {})
+        },
+        responseType: 'stream',
+        // 流式总时长由空闲定时器控制，避免 axios 总超时在慢速持续输出时误杀
+        timeout: 0,
+        signal: controller.signal,
+        // 显式清洗后的代理，避免 env 里带引号导致 Invalid URL
+        ...axiosProxyOption()
+      }
+    )
 
     if (response.status < 200 || response.status >= 300) {
       const details = await readAxiosBody(response.data)
@@ -540,6 +763,7 @@ async function* requestModelViaAxios(
     let buffer = ''
     let streamEnded = false
     let receivedContent = false
+    let receivedReasoning = false
     for await (const chunk of response.data as AsyncIterable<Buffer | string>) {
       buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
       const lines = buffer.split(/\r?\n/)
@@ -551,25 +775,49 @@ async function* requestModelViaAxios(
           streamEnded = true
           break
         }
-        const content = contentFromData(data)
-        if (content) {
-          // 仅在真正收到正文时重置空闲超时（首 token 前仍用 firstTokenMs）
+        const meta = extractStreamMeta(data)
+        if (meta.finishReason) finishReason = meta.finishReason
+        if (meta.toolCallDeltas) {
+          mergeToolCallDelta(toolAcc, meta.toolCallDeltas)
           resetTimeout()
-          if (content.trim()) receivedContent = true
-          yield content
+        }
+        const part = streamPartFromData(data)
+        if (part) {
+          // 仅在真正收到正文/思考时重置空闲超时（首 token 前仍用 firstTokenMs）
+          resetTimeout()
+          if (part.text?.trim()) receivedContent = true
+          if (part.reasoning?.trim()) receivedReasoning = true
+          yield part
         }
       }
       if (streamEnded) break
     }
 
     if (!streamEnded && buffer.startsWith('data:')) {
-      const content = contentFromData(buffer.slice(5).trim())
-      if (content) {
-        if (content.trim()) receivedContent = true
-        yield content
+      const data = buffer.slice(5).trim()
+      const meta = extractStreamMeta(data)
+      if (meta.finishReason) finishReason = meta.finishReason
+      if (meta.toolCallDeltas) mergeToolCallDelta(toolAcc, meta.toolCallDeltas)
+      const part = streamPartFromData(data)
+      if (part) {
+        if (part.text?.trim()) receivedContent = true
+        if (part.reasoning?.trim()) receivedReasoning = true
+        yield part
       }
     }
-    if (!receivedContent) throw new AiServiceError('invalid_response', '模型响应未包含有效正文')
+
+    const toolCalls = finalizeToolCalls(toolAcc)
+    if (toolCalls.length > 0) {
+      yield {
+        toolCalls,
+        finishReason: finishReason || 'tool_calls'
+      }
+      return
+    }
+
+    if (!receivedContent && !receivedReasoning) {
+      throw new AiServiceError('invalid_response', '模型响应未包含有效正文')
+    }
   } catch (error) {
     if (error instanceof AiServiceError) throw error
     throw axiosError(error, signal, timedOut, requestUrl)
@@ -584,7 +832,7 @@ export async function* streamChat(
   messages: AiPromptMessage[],
   signal: AbortSignal,
   toolsOrOptions?: unknown[] | StreamChatOptions
-): AsyncGenerator<string> {
+): AsyncGenerator<StreamPart> {
   // 兼容旧调用：第 4 参可以是 tools 数组，也可以是 options
   const options: StreamChatOptions | undefined = Array.isArray(toolsOrOptions)
     ? { tools: toolsOrOptions }
@@ -604,4 +852,18 @@ export async function* streamChat(
     }
     throw error
   }
+}
+
+/** 仅拼接正文（大纲等不需要思考链） */
+export async function collectStreamText(
+  config: AiLlmSettings,
+  messages: AiPromptMessage[],
+  signal: AbortSignal,
+  toolsOrOptions?: unknown[] | StreamChatOptions
+): Promise<string> {
+  let result = ''
+  for await (const part of streamChat(config, messages, signal, toolsOrOptions)) {
+    if (part.text) result += part.text
+  }
+  return result
 }

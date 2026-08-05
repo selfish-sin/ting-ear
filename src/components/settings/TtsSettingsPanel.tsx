@@ -264,7 +264,7 @@ export default function TtsSettingsPanel({ showToast }: Props) {
                           showToast('success', '引擎已添加')
                           loadEngines()
                         }}
-                        className="px-3 py-1 text-xs bg-primary text-white rounded hover:bg-primary/90"
+                        className="px-3 py-1 text-xs bg-primary text-[rgb(var(--on-primary-rgb))] rounded hover:bg-primary/90"
                       >
                         保存
                       </button>
@@ -364,7 +364,7 @@ requests.post("https://api.openai.com/v1/audio/speech",
                           }
                         }}
                         disabled={deployImporting}
-                        className="px-3 py-1.5 text-xs bg-primary text-white rounded hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1"
+                        className="px-3 py-1.5 text-xs bg-primary text-[rgb(var(--on-primary-rgb))] rounded hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1"
                       >
                         <Download className="w-3 h-3" />
                         {deployImporting ? '部署中...' : '导入部署'}

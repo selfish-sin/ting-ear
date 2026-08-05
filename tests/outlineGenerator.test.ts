@@ -7,6 +7,7 @@ import {
   OutlineGenerator,
   isShortChapter,
   parseOutlineSections,
+  parseOutlineBrief,
   validateOutlineSections
 } from '../electron/services/ai/outline-generator'
 
@@ -79,6 +80,47 @@ const realTruncated = `[
 const salvaged3 = parseOutlineSections(realTruncated)
 assert.equal(salvaged3.length, 3)
 assert.equal(salvaged3[2].title, '胡佛政府的应对与民众反抗')
+
+// === parseOutlineBrief：ChapterBrief 单 JSON 对象解析 ===
+
+// 完整对象：thesis/whyItMatters/hinges/sections 全解析
+const fullBrief = parseOutlineBrief(`{"thesis":"本章主张","whyItMatters":"为何重要","hinges":[{"at":0,"insight":"起点支点"},{"at":26,"insight":"转折支点"}],"sections":[{"title":"总论","startOffset":0,"point":"核心","summary":"铺垫"},{"title":"展开","startOffset":13,"point":"论证","summary":"推进"}]}`)
+assert.equal(fullBrief.thesis, '本章主张')
+assert.equal(fullBrief.whyItMatters, '为何重要')
+assert.ok(fullBrief.hinges && fullBrief.hinges.length === 2)
+assert.equal(fullBrief.hinges![0].at, 0)
+assert.equal(fullBrief.hinges![1].insight, '转折支点')
+assert.equal(fullBrief.sections.length, 2)
+assert.equal(fullBrief.sections[0].title, '总论')
+assert.equal(fullBrief.sections[1].startOffset, 13)
+
+// 带 markdown 代码块包裹
+const wrappedBrief = parseOutlineBrief('```json\n{"thesis":"主张","sections":[{"title":"一","startOffset":0}]}\n```')
+assert.equal(wrappedBrief.thesis, '主张')
+assert.equal(wrappedBrief.sections.length, 1)
+
+// 缺 thesis 仍出 sections（不阻塞）
+const sectionsOnly = parseOutlineBrief(`{"sections":[{"title":"一","startOffset":0},{"title":"二","startOffset":5}]}`)
+assert.equal(sectionsOnly.thesis, undefined)
+assert.equal(sectionsOnly.sections.length, 2)
+
+// 截断对象：thesis 字符串闭合但 sections 数组写到一半 → 抢救 thesis + 已完整 sections
+const truncatedBrief = `{"thesis":"已闭合的主张","whyItMatters":"已闭合","hinges":[],"sections":[{"title":"完整","startOffset":0,"summary":"ok"},{"title":"截断","startOffset":10,"summ`
+const salvagedBrief = parseOutlineBrief(truncatedBrief)
+assert.equal(salvagedBrief.thesis, '已闭合的主张')
+assert.equal(salvagedBrief.whyItMatters, '已闭合')
+assert.ok(salvagedBrief.sections.length >= 1, `应至少抢救 1 节，实际 ${salvagedBrief.sections.length}`)
+assert.equal(salvagedBrief.sections[0].title, '完整')
+
+// 退化成数组格式（旧模型）：兜底走 parseOutlineSections
+const arrayFallback = parseOutlineBrief(`[{"title":"旧格式","startOffset":0,"point":"点"}]`)
+assert.equal(arrayFallback.sections.length, 1)
+assert.equal(arrayFallback.sections[0].title, '旧格式')
+assert.equal(arrayFallback.thesis, undefined)
+
+// 空响应
+assert.equal(parseOutlineBrief('').sections.length, 0)
+assert.equal(parseOutlineBrief('not json at all').sections.length, 0)
 
 assert.equal(validateOutlineSections([{ title: '总论', startOffset: 0 }], 20).valid, true)
 assert.equal(validateOutlineSections([

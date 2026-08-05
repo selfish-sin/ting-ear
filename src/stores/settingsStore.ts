@@ -27,10 +27,45 @@ const defaultBackground: BackgroundSettings = {
   source: 'preset',
   presetId: null,
   customPath: null,
-  fit: 'cover',
   blur: 0,
-  overlayColor: 'auto',
-  overlayOpacity: 0.7
+  /** 底图压暗 */
+  overlayOpacity: 0.55,
+  /** 底层纯色：跟日夜 */
+  baseColor: 'auto',
+  baseColorCached: null,
+  /** 组件不透明度 */
+  panelOpacity: 0.72,
+  /** 阅读正文遮罩（AI+听书共用） */
+  contentOpacity: 0.9,
+  /** 毛玻璃关 */
+  glass: false
+}
+
+function clamp01(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n))
+}
+
+/** 合并旧配置：frost → glass；补默认字段 */
+function normalizeBackground(raw: BackgroundSettings | undefined): BackgroundSettings {
+  const merged = { ...defaultBackground, ...(raw || {}) }
+  const glass = merged.glass === true || merged.panelEffect === 'frost'
+  return {
+    ...merged,
+    glass,
+    overlayOpacity:
+      typeof merged.overlayOpacity === 'number'
+        ? clamp01(merged.overlayOpacity, 0, 1)
+        : defaultBackground.overlayOpacity,
+    panelOpacity:
+      typeof merged.panelOpacity === 'number'
+        ? clamp01(merged.panelOpacity, 0.15, 1)
+        : defaultBackground.panelOpacity,
+    contentOpacity:
+      typeof merged.contentOpacity === 'number'
+        ? clamp01(merged.contentOpacity, 0.5, 1)
+        : defaultBackground.contentOpacity,
+    baseColor: merged.baseColor ?? 'auto'
+  }
 }
 
 interface SettingsState {
@@ -172,6 +207,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           }
         }
         const loadedSettings = loaded as AppSettings
+        // 主题色设置已移除：丢弃旧字段，避免合并后回写 settings.json
+        delete (loadedSettings as unknown as Record<string, unknown>).themeColor
         set({
           settings: {
             ...defaultSettings,
@@ -183,7 +220,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                 ? loadedSettings.cleanRules
                 : DEFAULT_CLEAN_RULES,
             ai: mergeAiSettings(loadedSettings.ai),
-            background: { ...defaultBackground, ...(loadedSettings.background || {}) }
+            background: normalizeBackground(loadedSettings.background)
           }
         })
         // Apply window settings

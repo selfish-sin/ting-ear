@@ -86,7 +86,7 @@ function ContentCard({
               onSeekToSentence && 'cursor-pointer hover:bg-primary/10',
               (sentenceIndex === currentSentenceIndex ||
                 (isRawSpeaking && offset === rawSentenceIndex)) &&
-                'bg-highlight text-gray-950 dark:bg-primary/25 dark:text-white'
+                'bg-primary/15 font-semibold text-primary dark:bg-primary/25 dark:text-primary-300'
             )}
             title={onSeekToSentence ? '点击设定播放起点' : undefined}
           >
@@ -133,7 +133,8 @@ function ContentCard({
         {rawSpeechButton}
         <h2
           className={cn(
-            'font-semibold leading-relaxed text-gray-950 dark:text-gray-50',
+            'font-semibold leading-relaxed',
+            isActive ? 'text-primary' : 'text-gray-950 dark:text-gray-50',
             rawSpeechButton && 'pr-8',
             headingSizes[Math.min(6, Math.max(1, block.level || 2))]
           )}
@@ -160,7 +161,7 @@ function ContentCard({
             : 'border-l-transparent'
           : isActive
             ? 'border-primary bg-primary/5 shadow-soft'
-            : 'border-gray-200 bg-white dark:border-dark-border dark:bg-dark-surface',
+            : 'panel-surface border-gray-200 bg-white/85 dark:border-dark-border dark:bg-dark-surface/85',
         block.type === 'quote' && 'border-l-4 border-l-emerald-500 bg-emerald-50/40 dark:bg-emerald-950/10',
         block.type === 'code' && 'border-gray-800 bg-gray-950 text-gray-100 dark:bg-black',
         isNote && 'bg-gray-50 text-gray-500 dark:bg-dark-muted dark:text-gray-400'

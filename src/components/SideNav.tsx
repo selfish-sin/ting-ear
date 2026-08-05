@@ -48,7 +48,7 @@ export default function SideNav({ currentView, onViewChange, onOpenSettings }: S
 
   return (
     <aside
-      className={`h-full flex flex-col select-none bg-surface/80 dark:bg-dark-surface/80 border-r border-gray-200 dark:border-dark-border shrink-0 transition-[width] duration-200 ease-in-out ${expanded ? 'w-40' : 'w-12'}`}
+      className={`panel-nav h-full flex flex-col select-none bg-surface/80 dark:bg-dark-surface/80 border-r border-gray-200 dark:border-dark-border shrink-0 transition-[width] duration-200 ease-in-out ${expanded ? 'w-40' : 'w-12'}`}
     >
       {/* Logo */}
       <div className="px-2 pt-3 pb-2 flex items-center gap-2 justify-center" style={expanded ? { justifyContent: 'flex-start', paddingLeft: '0.625rem' } : undefined}>
@@ -78,7 +78,11 @@ export default function SideNav({ currentView, onViewChange, onOpenSettings }: S
                     : 'nav-item-idle'
               }`}
             >
-              <Icon className="w-[18px] h-[18px] shrink-0" strokeWidth={isActive ? 2.25 : 1.85} />
+              <Icon
+                className="w-[18px] h-[18px] shrink-0"
+                strokeWidth={isActive ? 2.35 : 1.9}
+                absoluteStrokeWidth={false}
+              />
               {expanded && <span className="truncate">{item.label}</span>}
             </button>
           )
@@ -86,21 +90,27 @@ export default function SideNav({ currentView, onViewChange, onOpenSettings }: S
       </nav>
 
       {/* Settings + expand toggle */}
-      <div className="p-1.5 border-t border-gray-200 dark:border-dark-border flex flex-col gap-0.5">
+      <div className="p-1.5 border-t border-primary/10 dark:border-primary/15 flex flex-col gap-0.5">
         <button
+          type="button"
           onClick={onOpenSettings}
           title="设置"
           className={`nav-item w-full ${expanded ? 'justify-start' : 'justify-center'} nav-item-idle`}
         >
-          <Settings className="w-[18px] h-[18px] shrink-0" strokeWidth={1.85} />
+          <Settings className="w-[18px] h-[18px] shrink-0" strokeWidth={1.9} />
           {expanded && <span>设置</span>}
         </button>
         <button
+          type="button"
           onClick={() => setExpanded((v) => !v)}
           title={expanded ? '收起' : '展开'}
           className={`nav-item w-full ${expanded ? 'justify-start' : 'justify-center'} nav-item-idle`}
         >
-          {expanded ? <ChevronsLeft className="w-[18px] h-[18px] shrink-0" strokeWidth={1.85} /> : <ChevronsRight className="w-[18px] h-[18px] shrink-0" strokeWidth={1.85} />}
+          {expanded ? (
+            <ChevronsLeft className="w-[18px] h-[18px] shrink-0" strokeWidth={1.9} />
+          ) : (
+            <ChevronsRight className="w-[18px] h-[18px] shrink-0" strokeWidth={1.9} />
+          )}
           {expanded && <span>收起</span>}
         </button>
       </div>

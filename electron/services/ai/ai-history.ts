@@ -36,8 +36,24 @@ function isSourceRef(value: unknown): value is AiSourceRef {
     Number.isFinite(source.score) &&
     typeof source.bookId === 'string' &&
     Number.isInteger(source.chapterIndex) &&
-    (source.chapterIndex as number) >= 0 &&
+    // -1 = 全书源；>=0 = 具体章节
+    (source.chapterIndex as number) >= -1 &&
     typeof source.chapterTitle === 'string'
+  )
+}
+
+function isWebSourceRef(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const source = value as Record<string, unknown>
+  return (
+    Number.isInteger(source.index) &&
+    (source.index as number) >= 1 &&
+    typeof source.title === 'string' &&
+    typeof source.url === 'string' &&
+    typeof source.snippet === 'string' &&
+    typeof source.provider === 'string' &&
+    typeof source.sourceType === 'string' &&
+    typeof source.fetchedAt === 'string'
   )
 }
 
@@ -50,6 +66,20 @@ function isHistoryMessage(value: unknown): value is AiHistoryMessage {
     (candidate.id === undefined || typeof candidate.id === 'string') &&
     (candidate.sources === undefined ||
       (Array.isArray(candidate.sources) && candidate.sources.every(isSourceRef))) &&
+    (candidate.webSources === undefined ||
+      (Array.isArray(candidate.webSources) && candidate.webSources.every(isWebSourceRef))) &&
+    (candidate.webSearchUsed === undefined || typeof candidate.webSearchUsed === 'boolean') &&
+    (candidate.toolTraces === undefined ||
+      (Array.isArray(candidate.toolTraces) &&
+        candidate.toolTraces.every(
+          (t) =>
+            t &&
+            typeof t === 'object' &&
+            typeof (t as { name?: unknown }).name === 'string' &&
+            typeof (t as { ok?: unknown }).ok === 'boolean'
+        ))) &&
+    (candidate.thinkingMode === undefined || typeof candidate.thinkingMode === 'boolean') &&
+    (candidate.reasoning === undefined || typeof candidate.reasoning === 'string') &&
     (candidate.retrievalStatus === undefined ||
       HISTORY_RETRIEVAL_STATUSES.has(candidate.retrievalStatus)) &&
     (candidate.retrievalError === undefined || typeof candidate.retrievalError === 'string')
@@ -306,7 +336,17 @@ export class JsonAiHistoryRepository implements AiHistoryRepository {
     activeId: string | null
     conversations: Array<{ id: string; title: string; createdAt: string; messageCount: number }>
   } {
-    const book = this.getBook(this.readAll(), bookId)
+    const history = this.readAll()
+    const book = this.getBook(history, bookId)
+    const pruned = pruneEmptyNewConversations(book.conversations)
+    if (pruned.length !== book.conversations.length) {
+      book.conversations = pruned
+      if (book.activeId && !pruned.some((c) => c.id === book.activeId)) {
+        book.activeId = pruned[0]?.id ?? null
+      }
+      history[bookId] = book
+      this.writeAll(history)
+    }
     const activeId = this.resolveTargetId(book)
     return {
       activeId,
@@ -328,6 +368,8 @@ export class JsonAiHistoryRepository implements AiHistoryRepository {
   createConversation(bookId: string, title?: string): AiConversation {
     const history = this.readAll()
     const book = this.getBook(history, bookId)
+    // 新建时丢掉其它空「新对话」，只保留有内容的会话 + 这一条新会话
+    book.conversations = book.conversations.filter((c) => !isEmptyNewConversation(c))
     const now = new Date().toISOString()
     const conv: AiConversation = {
       id: `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -387,15 +429,57 @@ export class JsonAiHistoryRepository implements AiHistoryRepository {
     return true
   }
 
-  /** 确保该书至少有一个活跃会话；没有则创建 */
+  /**
+   * 确保该书至少有一个活跃会话。
+   * - 有历史：返回 active（或最近一条），绝不重复创建空会话
+   * - 无会话：创建一条
+   * - 顺带清理多个空「新对话」残留
+   */
   ensureActiveConversation(bookId: string): AiConversation {
     const history = this.readAll()
     const book = this.getBook(history, bookId)
+    const before = book.conversations.length
+    book.conversations = pruneEmptyNewConversations(book.conversations)
+
     const activeId = this.resolveTargetId(book)
     if (activeId) {
       const existing = book.conversations.find((c) => c.id === activeId)
-      if (existing) return existing
+      if (existing) {
+        book.activeId = existing.id
+        if (book.conversations.length !== before || history[bookId]?.activeId !== existing.id) {
+          history[bookId] = book
+          this.writeAll(history)
+        }
+        return existing
+      }
+    }
+    if (book.conversations[0]) {
+      book.activeId = book.conversations[0].id
+      history[bookId] = book
+      this.writeAll(history)
+      return book.conversations[0]
     }
     return this.createConversation(bookId)
   }
+}
+
+function isEmptyNewConversation(conv: AiConversation): boolean {
+  return (
+    !conv.messages?.length &&
+    (!conv.title || conv.title === '新对话' || conv.title.trim() === '新对话')
+  )
+}
+
+/** 多个空「新对话」只留最新一条，有消息的会话全部保留 */
+function pruneEmptyNewConversations(conversations: AiConversation[]): AiConversation[] {
+  let keptEmpty = false
+  const result: AiConversation[] = []
+  for (const conv of conversations) {
+    if (isEmptyNewConversation(conv)) {
+      if (keptEmpty) continue
+      keptEmpty = true
+    }
+    result.push(conv)
+  }
+  return result
 }

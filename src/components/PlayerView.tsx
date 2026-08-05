@@ -23,6 +23,7 @@ import { useBookmarkStore } from '../stores/bookmarkStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { clampSentenceIndex, findChapterIndex } from '../utils/bookData'
 import { isSentenceTtsSkipped } from '../utils/ttsSkip'
+import { useSafeTimeout } from '../hooks/useSafeTimeout'
 import type { BookData, Chapter } from '../global'
 import SelectionPopup from './ai/SelectionPopup'
 import ReaderHeader from './reader/ReaderHeader'
@@ -32,6 +33,7 @@ export const SentenceRow = memo(function SentenceRow({
   sentence,
   index,
   isActive,
+  isPast,
   isPlaying,
   isTtsSkipped,
   bookmarked,
@@ -50,6 +52,8 @@ export const SentenceRow = memo(function SentenceRow({
   sentence: string
   index: number
   isActive: boolean
+  /** 已走过的句子（当前句之前），用主题色标出 */
+  isPast: boolean
   isPlaying: boolean
   isTtsSkipped: boolean
   bookmarked: boolean
@@ -69,30 +73,39 @@ export const SentenceRow = memo(function SentenceRow({
     <div
       ref={isActive ? activeRowRef : undefined}
       data-active={isActive || undefined}
+      data-past={isPast || undefined}
       data-tts-skip={isTtsSkipped || undefined}
       data-sentence-idx={index}
       className={`group flex items-start gap-3 px-3.5 py-2.5 rounded-xl cursor-pointer transition-all duration-200 ${isTtsSkipped ? 'opacity-50' : ''} ${
         isActive
           ? `bg-primary/10 dark:bg-primary/15 border-l-[3px] border-primary shadow-soft ${isPlaying ? 'sentence-active' : ''}`
-          : 'border-l-[3px] border-transparent hover:bg-gray-50/90 dark:hover:bg-white/[0.04]'
+          : isPast
+            ? 'border-l-[3px] border-primary/25 hover:bg-primary/[0.06]'
+            : 'border-l-[3px] border-transparent hover:bg-gray-50/90 dark:hover:bg-white/[0.04]'
       }`}
       onClick={() => onSentenceClick(index)}
       style={{ fontSize: `${fontSize}px`, lineHeight: 1.8 }}
     >
       <span
         className={`flex-shrink-0 w-8 text-right text-[11px] mt-1 select-none tabular-nums ${
-          isActive ? 'text-primary font-bold' : 'text-gray-300 dark:text-gray-600'
+          isActive
+            ? 'text-primary font-bold'
+            : isPast
+              ? 'text-primary/70 font-medium'
+              : 'text-gray-300 dark:text-gray-600'
         }`}
       >
         {index + 1}
       </span>
       <span
         className={`flex-1 select-text ${
-              isActive
-                ? 'text-gray-900 dark:text-gray-50 font-medium'
-                : isTtsSkipped
-                  ? 'text-gray-400 dark:text-gray-500'
-                  : 'text-gray-700 dark:text-gray-300'
+          isActive
+            ? 'text-primary font-semibold'
+            : isTtsSkipped
+              ? 'text-gray-400 dark:text-gray-500'
+              : isPast
+                ? 'text-primary/80'
+                : 'text-gray-700 dark:text-gray-300'
         }`}
       >
         {sentence}
@@ -195,6 +208,8 @@ export default function PlayerView({
   const containerRef = useRef<HTMLDivElement>(null)
   // active 句子行的 DOM 引用（由 SentenceRow ref 回调设置），替代 querySelector
   const activeRowRef = useRef<HTMLDivElement | null>(null)
+  // 卸载安全的 setTimeout：组件卸载后跳过回调，避免对已卸载组件 setState
+  const safeTimeout = useSafeTimeout()
   const [chapterDropdownOpen, setChapterDropdownOpen] = useState(false)
   const [versionDropdownOpen, setVersionDropdownOpen] = useState(false)
   const [bookmarkAdding, setBookmarkAdding] = useState<number | null>(null)
@@ -272,12 +287,12 @@ export default function PlayerView({
         e.preventDefault()
         searchOriginRef.current = usePlayerStore.getState().currentSentenceIndex
         setSearchOpen(true)
-        setTimeout(() => searchInputRef.current?.focus(), 50)
+        safeTimeout(() => searchInputRef.current?.focus(), 50)
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [])
+  }, [safeTimeout])
 
   // === 搜索：输入防抖（250ms 内连续敲字不触发扫描） ===
   useEffect(() => {
@@ -316,12 +331,12 @@ export default function PlayerView({
         setCurrentChapterIndex(chIdx)
       }
       // 滚动到目标句子
-      setTimeout(() => {
+      safeTimeout(() => {
         const el = containerRef.current?.querySelector(`[data-sentence-idx="${sentenceIdx}"]`)
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
       }, 80)
     },
-    [searchMatches, hasChapters, pageSize, currentBook, setPageIndex, setCurrentChapterIndex]
+    [searchMatches, hasChapters, pageSize, currentBook, setPageIndex, setCurrentChapterIndex, safeTimeout]
   )
 
   // === 搜索：返回搜索前位置 ===
@@ -334,14 +349,14 @@ export default function PlayerView({
       const chIdx = findChapterIndex(currentBook.chapters, origin)
       setCurrentChapterIndex(chIdx)
     }
-    setTimeout(() => {
+    safeTimeout(() => {
       const el = containerRef.current?.querySelector(`[data-sentence-idx="${origin}"]`)
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }, 80)
     setSearchOpen(false)
     setSearchQuery('')
     searchOriginRef.current = null
-  }, [hasChapters, pageSize, currentBook, setPageIndex, setCurrentChapterIndex])
+  }, [hasChapters, pageSize, currentBook, setPageIndex, setCurrentChapterIndex, safeTimeout])
 
   // 刷新当前书籍（预处理后文本更新时使用）
   const handleRefresh = useCallback(async () => {
@@ -455,9 +470,9 @@ export default function PlayerView({
       if (onSeekToChapter) {
         onSeekToChapter(index)
       }
-      setTimeout(() => setIsLoading(false), 500)
+      safeTimeout(() => setIsLoading(false), 500)
     },
-    [onSeekToChapter]
+    [onSeekToChapter, safeTimeout]
   )
 
   // 复制单句
@@ -610,10 +625,10 @@ export default function PlayerView({
 
   if (!currentBook || sentences.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-gray-400 bg-gray-100 dark:bg-gray-800 dark:text-gray-500">
-        <BookOpen className="w-16 h-16 mb-4 opacity-40" />
-        <p className="text-lg">请从书架选择一本书开始阅读</p>
-        <p className="text-sm mt-2">或拖拽文件到书架导入</p>
+      <div className="flex flex-1 flex-col items-center justify-center bg-transparent text-gray-400 dark:text-gray-500">
+        <BookOpen className="mb-4 h-16 w-16 text-primary/40" />
+        <p className="text-lg text-gray-600 dark:text-gray-300">请从书架选择一本书开始阅读</p>
+        <p className="mt-2 text-sm">或拖拽文件到书架导入</p>
       </div>
     )
   }
@@ -701,7 +716,7 @@ export default function PlayerView({
               onClick={() => {
                 searchOriginRef.current = currentSentenceIndex
                 setSearchOpen(true)
-                setTimeout(() => searchInputRef.current?.focus(), 50)
+                safeTimeout(() => searchInputRef.current?.focus(), 50)
               }}
               className="icon-btn"
               title="搜索 (Ctrl+F)"
@@ -804,7 +819,7 @@ export default function PlayerView({
 
       {/* 搜索栏 */}
       {searchOpen && !immersive && (
-        <div className="px-3 sm:px-4 py-2 bg-gray-50 dark:bg-dark-muted border-b border-gray-200 dark:border-dark-border flex-shrink-0 flex items-center gap-2 z-30">
+        <div className="panel-chrome px-3 sm:px-4 py-2 bg-gray-50 dark:bg-dark-muted border-b border-gray-200 dark:border-dark-border flex-shrink-0 flex items-center gap-2 z-30">
           <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
           <input
             ref={searchInputRef}
@@ -866,12 +881,13 @@ export default function PlayerView({
         </div>
       )}
 
-      {/* Sentence list: 按窗口 slice 显示，但传给回调的是【全局】索引 */}
+      {/* 听书正文：与 AI 阅读共用 reader-stage 遮罩 */}
+      <div className="flex min-h-0 flex-1 flex-col p-2 sm:p-2.5">
       <div
         ref={containerRef}
         data-reader-ready
         data-sentence-list
-        className="flex-1 overflow-y-auto px-3 sm:px-5 py-2 relative contain-content"
+        className="reader-stage panel-readable relative flex-1 overflow-y-auto px-3 sm:px-5 py-2 contain-content"
       >
         {/* Top page nav — only for non-chaptered books */}
         {!hasChapters && (
@@ -926,6 +942,7 @@ export default function PlayerView({
                 sentence={sentence}
                 index={index}
                 isActive={index === currentSentenceIndex}
+                isPast={index < currentSentenceIndex}
                 isPlaying={playState === 'playing'}
                 isTtsSkipped={isSentenceTtsSkipped(currentBook, index)}
                 bookmarked={bookmarkedSet.has(index)}
@@ -1006,6 +1023,7 @@ export default function PlayerView({
           </div>
         )}
       </div>
+      </div>
 
       {/* 浮动操作区 */}
       <SelectionPopup
@@ -1015,7 +1033,7 @@ export default function PlayerView({
           searchOriginRef.current = usePlayerStore.getState().currentSentenceIndex
           setSearchQuery(text.slice(0, 80))
           setSearchOpen(true)
-          setTimeout(() => searchInputRef.current?.focus(), 50)
+          safeTimeout(() => searchInputRef.current?.focus(), 50)
         }}
         onPlayFromSentence={(index) => {
           onSeekToChapter?.(index)
@@ -1028,7 +1046,7 @@ export default function PlayerView({
           onClick={() => setAutoScroll((v) => !v)}
           className={`absolute bottom-4 right-4 z-20 w-9 h-9 rounded-full flex items-center justify-center shadow-lg border transition-all ${
             autoScroll
-              ? 'bg-primary text-white border-primary hover:opacity-90'
+              ? 'bg-primary text-[rgb(var(--on-primary-rgb))] border-primary hover:opacity-90'
               : 'bg-white dark:bg-gray-800 text-gray-400 dark:text-gray-500 border-gray-200 dark:border-gray-600 hover:text-primary hover:border-primary/50'
           }`}
           title={autoScroll ? '自动滚动：开（点击关闭）' : '自动滚动：关（点击开启）'}

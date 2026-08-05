@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
+import { useShelfMultiSelect } from '../hooks/useShelfMultiSelect'
 import {
   Upload,
   BookOpen,
@@ -34,7 +35,12 @@ import {
   setStoredCoverHash,
   coverProtocolUrl
 } from '../utils/coverGenerator'
-import { ALBUM_TITLE_MAX_LENGTH } from '../utils/albumUtils'
+import {
+  ALBUM_TITLE_MAX_LENGTH,
+  FAVORITES_ALBUM_ID,
+  isFavoritesAlbum,
+  sortAlbumsForDisplay
+} from '../utils/albumUtils'
 import { BOOK_TITLE_MAX_LENGTH, normalizeBookTitle } from '../utils/bookData'
 import type { AlbumItem, BookData, CustomAlbum } from '../global'
 import ContextMenu, { type ContextMenuGroup } from './ui/ContextMenu'
@@ -43,7 +49,11 @@ import ContextMenu, { type ContextMenuGroup } from './ui/ContextMenu'
 const SUPPORTED_EXTENSIONS = new Set(['epub', 'txt', 'pdf', 'docx', 'md', 'html', 'htm', 'mobi', 'azw', 'azw3', 'prc'])
 
 interface BookShelfProps {
-  onImportFile: (filePath: string) => void
+  /** 导入单文件；成功返回书籍，失败返回 null */
+  onImportFile: (
+    filePath: string,
+    options?: { quiet?: boolean; holdLoading?: boolean }
+  ) => Promise<BookData | null>
   onOpenBook: (book: BookData) => void
   /** 直接打开章节选择页（跳过缓存，进入预选页章节页） */
   onSelectChapters?: (book: BookData) => void
@@ -98,7 +108,8 @@ export default function BookShelf({
     deleteAlbum,
     addItem,
     removeItem,
-    moveItem
+    moveItem,
+    toggleFavorite: toggleFavoriteInStore
   } = useAlbumStore()
   const { loadBookmarks } = useBookmarkStore()
   const [isDragOver, setIsDragOver] = useState(false)
@@ -131,23 +142,19 @@ export default function BookShelf({
   const [bookTitleEditor, setBookTitleEditor] = useState<BookData | null>(null)
   const [bookTitleDraft, setBookTitleDraft] = useState('')
 
-  // Multi-select
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [reparseProgress, setReparseProgress] = useState<{ done: number; total: number } | null>(null)
   const [reprocessProgress, setReprocessProgress] = useState<{ done: number; total: number } | null>(null)
-  // Favorites (persisted in localStorage)
-  const [favorites, setFavorites] = useState<Set<string>>(() => {
-    try {
-      const raw = localStorage.getItem('ting-ear-favorites')
-      return raw ? new Set(JSON.parse(raw)) : new Set()
-    } catch {
-      return new Set()
-    }
-  })
 
-  useEffect(() => {
-    localStorage.setItem('ting-ear-favorites', JSON.stringify([...favorites]))
-  }, [favorites])
+  /** 收藏专辑书 id 集合（唯一数据源，替代 localStorage 星标） */
+  const favoriteIds = useMemo(() => {
+    const fav = albums.find((a) => a.id === FAVORITES_ALBUM_ID)
+    if (!fav) return new Set<string>()
+    return new Set(
+      fav.items.filter((i) => i.resourceType === 'book').map((i) => i.resourceId)
+    )
+  }, [albums])
+
+  /** 顶栏展示：收藏固定最前 + 全部专辑扁平（不嵌套） */
+  const shelfAlbums = useMemo(() => sortAlbumsForDisplay(albums), [albums])
 
   /**
    * 封面加载（启动加速）：
@@ -251,19 +258,6 @@ export default function BookShelf({
   }, [loadBookmarks])
 
   const activeAlbum = albums.find((album) => album.id === activeAlbumId) || null
-  const childAlbums = albums.filter((album) => album.parentId === activeAlbumId)
-  const topLevelAlbums = albums.filter((album) => album.parentId === null)
-  const albumPath = useMemo(() => {
-    const path: CustomAlbum[] = []
-    let current = activeAlbum
-    while (current) {
-      path.unshift(current)
-      current = current.parentId
-        ? albums.find((album) => album.id === current?.parentId) || null
-        : null
-    }
-    return path
-  }, [activeAlbum, albums])
 
   const albumBookIds = activeAlbum
     ? new Set(
@@ -310,37 +304,47 @@ export default function BookShelf({
       .sort((a, b) => new Date(b.lastReadAt).getTime() - new Date(a.lastReadAt).getTime())[0] ?? null
   }, [books])
 
-  // ---- Selection helpers ----
-  const selectedCount = selectedIds.size
-  const allSelected = displayBooks.length > 0 && displayBooks.every((b) => selectedIds.has(b.id))
+  // ---- 相册式多选（长按 + 拖动刷选）----
+  const {
+    multiSelectMode,
+    selectedIds,
+    selectedCount,
+    allSelected,
+    toggleSelect,
+    selectAll,
+    clearSelection,
+    exitSelection,
+    handleSelectPointerDown,
+    handleSelectPointerEnter,
+    handleSelectPointerUp,
+    openBookSafe: openBookSafeInner,
+    coverClickSafe
+  } = useShelfMultiSelect(displayBooks)
 
-  const toggleSelect = useCallback((id: string, e?: React.MouseEvent) => {
-    e?.stopPropagation()
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }, [])
+  const openBookSafe = useCallback(
+    (book: BookData) => openBookSafeInner(book, onOpenBook),
+    [openBookSafeInner, onOpenBook]
+  )
 
-  const selectAll = useCallback(() => {
-    setSelectedIds(new Set(displayBooks.map((b) => b.id)))
-  }, [displayBooks])
+  // handleUploadCover 在下方定义；用 ref 避免顺序问题
+  const uploadCoverRef = useRef<(book: BookData) => void | Promise<void>>(() => {})
+  const handleCoverClick = useCallback(
+    (book: BookData) => {
+      coverClickSafe(book, (b) => {
+        void uploadCoverRef.current(b)
+      })
+    },
+    [coverClickSafe]
+  )
 
-  const clearSelection = useCallback(() => {
-    setSelectedIds(new Set())
-  }, [])
-
-  const toggleFavorite = useCallback((id: string, e?: React.MouseEvent) => {
-    e?.stopPropagation()
-    setFavorites((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }, [])
+  const toggleFavorite = useCallback(
+    (id: string, e?: React.MouseEvent) => {
+      e?.stopPropagation()
+      // 走专辑队列，避免与批量加入/移出互相覆盖
+      void toggleFavoriteInStore(id)
+    },
+    [toggleFavoriteInStore]
+  )
 
   // ---- Batch operations ----
   const handleBatchDelete = useCallback(async () => {
@@ -358,9 +362,9 @@ export default function BookShelf({
         // skip failures
       }
     }
-    setSelectedIds(new Set())
+    exitSelection()
     if (deleted > 0) showToast('success', `已删除 ${deleted} 本书`)
-  }, [selectedIds, removeBook, showToast])
+  }, [selectedIds, removeBook, showToast, exitSelection])
 
   const handleBatchReprocess = useCallback(async () => {
     const ids = [...selectedIds]
@@ -378,58 +382,10 @@ export default function BookShelf({
       await new Promise(r => setTimeout(r, 0))
     }
     setReprocessProgress(null)
-    setSelectedIds(new Set())
+    exitSelection()
     await loadBooks()
     showToast('success', `已清理 ${done}/${ids.length} 本书`)
-  }, [selectedIds, loadBooks, showToast])
-
-  /** 批量迁移：选中书按 original 重切（旧书一键升级） */
-  const handleBatchReparse = useCallback(async () => {
-    const ids = [...selectedIds]
-    if (ids.length === 0) return
-    setReparseProgress({ done: 0, total: ids.length })
-    let done = 0
-    let failed = 0
-    for (const id of ids) {
-      try {
-        const result = await window.api?.reparseBook(id, { mode: 'original' })
-        if (result?.success) done++
-        else failed++
-      } catch {
-        failed++
-      }
-      setReparseProgress({ done: done + failed, total: ids.length })
-      await new Promise((r) => setTimeout(r, 0))
-    }
-    setReparseProgress(null)
-    setSelectedIds(new Set())
-    await loadBooks()
-    if (failed > 0) showToast('warning', `已迁移分章 ${done}/${ids.length} 本，${failed} 本失败`)
-    else showToast('success', `已按「原始」规则迁移 ${done} 本书的章节`)
-  }, [selectedIds, loadBooks, showToast])
-
-  /** 一键迁移书架全部旧书 */
-  const handleMigrateAllChapters = useCallback(async () => {
-    try {
-      showToast('info', '正在按新规则迁移全部分章…')
-      setReparseProgress({ done: 0, total: 1 })
-      const result = await window.api?.migrateAllChapters()
-      setReparseProgress(null)
-      await loadBooks()
-      if (result?.success) {
-        showToast(
-          'success',
-          `分章迁移完成：成功 ${result.done ?? 0}/${result.total ?? 0}` +
-            (result.failed ? `，失败 ${result.failed}` : '')
-        )
-      } else {
-        showToast('error', result?.error || '迁移失败')
-      }
-    } catch (error) {
-      setReparseProgress(null)
-      showToast('error', `迁移失败: ${String(error)}`)
-    }
-  }, [loadBooks, showToast])
+  }, [selectedIds, loadBooks, showToast, exitSelection])
 
   const handleBatchExportBookmarks = useCallback(async () => {
     const ids = [...selectedIds]
@@ -443,10 +399,67 @@ export default function BookShelf({
         // skip
       }
     }
-    setSelectedIds(new Set())
+    exitSelection()
     if (done > 0) showToast('success', `已导出 ${done} 本书的书签`)
     else showToast('warning', '所选书籍无书签可导出')
-  }, [selectedIds, showToast])
+  }, [selectedIds, showToast, exitSelection])
+
+  /** 批量加入已有专辑 */
+  const handleBatchAddToAlbum = useCallback(
+    async (albumId: string) => {
+      const ids = [...selectedIds]
+      if (ids.length === 0) return
+      const album = albums.find((a) => a.id === albumId)
+      if (!album) {
+        showToast('error', '专辑不存在')
+        return
+      }
+      let added = 0
+      for (const id of ids) {
+        const ok = await addItem(albumId, { resourceType: 'book', resourceId: id })
+        if (ok) added++
+      }
+      exitSelection()
+      if (added > 0) showToast('success', `已将 ${added} 本加入「${album.title}」`)
+      else showToast('info', '所选书籍已在该专辑中')
+    },
+    [selectedIds, albums, addItem, exitSelection, showToast]
+  )
+
+  /** 新建专辑并把选中书放进去（扁平顶层，不嵌套） */
+  const handleCreateAlbumWithSelected = useCallback(
+    async (title: string) => {
+      const ids = [...selectedIds]
+      if (ids.length === 0) return
+      const album = await createAlbum(title, null)
+      if (!album) {
+        showToast('warning', `创建失败：标题无效或写盘失败`)
+        return
+      }
+      let added = 0
+      for (const id of ids) {
+        const ok = await addItem(album.id, { resourceType: 'book', resourceId: id })
+        if (ok) added++
+      }
+      exitSelection()
+      showToast('success', `已创建「${album.title}」并放入 ${added} 本书`)
+    },
+    [selectedIds, createAlbum, addItem, exitSelection, showToast]
+  )
+
+  /** 批量移出当前专辑 */
+  const handleBatchRemoveFromAlbum = useCallback(async () => {
+    if (!activeAlbum) return
+    const ids = [...selectedIds]
+    if (ids.length === 0) return
+    let removed = 0
+    for (const id of ids) {
+      const ok = await removeItem(activeAlbum.id, { resourceType: 'book', resourceId: id })
+      if (ok) removed++
+    }
+    exitSelection()
+    if (removed > 0) showToast('success', `已从当前专辑移出 ${removed} 本`)
+  }, [activeAlbum, selectedIds, removeItem, exitSelection, showToast])
 
   // ---- Single-book audio export ----
   const handleExportAudio = useCallback(
@@ -516,30 +529,71 @@ export default function BookShelf({
       })
       if (result?.success) done++
     }
-    setSelectedIds(new Set())
+    exitSelection()
     if (done > 0) showToast('success', `已导出 ${done}/${candidates.length} 本书的音频`)
     else showToast('warning', '所有导出均被取消或失败')
-  }, [selectedIds, books, showToast])
+  }, [selectedIds, books, showToast, exitSelection])
 
   // ---- Single-book operations ----
+  /** 串行导入一组文件；在专辑内则自动加入当前专辑 */
+  const importPaths = useCallback(
+    async (filePaths: string[]) => {
+      if (filePaths.length === 0) return
+      const batch = filePaths.length > 1
+      if (batch) showToast('info', `正在导入 ${filePaths.length} 个文件…`)
+
+      let ok = 0
+      for (let i = 0; i < filePaths.length; i++) {
+        if (batch) {
+          useBookStore.getState().setLoading(true, `正在导入 ${i + 1}/${filePaths.length}…`)
+        }
+        const book = await onImportFile(filePaths[i], {
+          quiet: batch,
+          // 批量时中间几本保持遮罩，最后一本再由 handleImportFile 关闭
+          holdLoading: batch && i < filePaths.length - 1
+        })
+        if (book) {
+          ok++
+          if (activeAlbumId) {
+            await addItem(activeAlbumId, { resourceType: 'book', resourceId: book.id })
+          }
+        }
+      }
+
+      if (batch) {
+        showToast(
+          ok === filePaths.length ? 'success' : ok > 0 ? 'warning' : 'error',
+          `批量导入完成：成功 ${ok}/${filePaths.length}` +
+            (activeAlbumId && ok > 0 ? '（已加入当前专辑）' : '')
+        )
+      }
+    },
+    [onImportFile, activeAlbumId, addItem, showToast]
+  )
+
   const handleSelectFile = useCallback(async () => {
     const filePaths = await window.api?.selectFile()
-    if (filePaths && filePaths.length > 0) {
-      for (const fp of filePaths) {
-        onImportFile(fp)
-      }
-    }
-  }, [onImportFile])
+    if (!filePaths || filePaths.length === 0) return
+    await importPaths(filePaths)
+  }, [importPaths])
 
   const handleCreateAlbum = useCallback(() => {
     setAlbumTitleDraft('')
-    setAlbumEditor({ mode: 'create', parentId: activeAlbumId })
-  }, [activeAlbumId])
-
-  const handleRenameAlbum = useCallback((album: CustomAlbum) => {
-    setAlbumTitleDraft(album.title)
-    setAlbumEditor({ mode: 'rename', album })
+    // 扁平：新建始终顶层
+    setAlbumEditor({ mode: 'create', parentId: null })
   }, [])
+
+  const handleRenameAlbum = useCallback(
+    (album: CustomAlbum) => {
+      if (isFavoritesAlbum(album)) {
+        showToast('info', '「收藏」为常驻专辑，不可改名')
+        return
+      }
+      setAlbumTitleDraft(album.title)
+      setAlbumEditor({ mode: 'rename', album })
+    },
+    [showToast]
+  )
 
   const handleSubmitAlbum = useCallback(
     async (event: React.FormEvent) => {
@@ -547,15 +601,20 @@ export default function BookShelf({
       if (!albumEditor) return
 
       if (albumEditor.mode === 'create') {
-        const album = await createAlbum(albumTitleDraft, albumEditor.parentId)
+        const album = await createAlbum(albumTitleDraft, null)
         if (!album) {
-          showToast('warning', `标题不能为空且不能超过 ${ALBUM_TITLE_MAX_LENGTH} 个字符`)
+          showToast('warning', `创建失败：标题无效或写盘失败`)
           return
         }
         showToast('success', `已创建专辑“${album.title}”`)
       } else {
+        if (isFavoritesAlbum(albumEditor.album)) {
+          showToast('info', '「收藏」为常驻专辑，不可改名')
+          setAlbumEditor(null)
+          return
+        }
         if (!(await renameAlbum(albumEditor.album.id, albumTitleDraft))) {
-          showToast('warning', `标题不能为空且不能超过 ${ALBUM_TITLE_MAX_LENGTH} 个字符`)
+          showToast('warning', `改名失败：标题无效或写盘失败`)
           return
         }
         showToast('success', '专辑标题已更新')
@@ -567,10 +626,19 @@ export default function BookShelf({
 
   const handleDeleteAlbum = useCallback(
     async (album: CustomAlbum) => {
-      if (!confirm(`确定删除专辑“${album.title}”吗？其中的子专辑也会被删除，书籍不会受影响。`))
+      if (isFavoritesAlbum(album)) {
+        showToast('info', '「收藏」为常驻专辑，不可删除')
         return
+      }
+      if (
+        !confirm(
+          `确定删除专辑「${album.title}」吗？\n\n专辑内的书籍不会被删除，只是移出该专辑。`
+        )
+      ) {
+        return
+      }
       if (await deleteAlbum(album.id)) {
-        showToast('success', '专辑已删除')
+        showToast('success', `已删除专辑「${album.title}」`)
       } else {
         showToast('error', '删除专辑失败')
       }
@@ -602,11 +670,11 @@ export default function BookShelf({
   const openAlbum = useCallback(
     (id: string | null) => {
       setActiveAlbumId(id)
-      setSelectedIds(new Set())
+      exitSelection()
       if (id) setSortBy('custom')
       else setSortBy('recent')
     },
-    [setActiveAlbumId]
+    [setActiveAlbumId, exitSelection]
   )
 
   const hasFiles = (dt: DataTransfer | null) => !!dt && Array.from(dt.types || []).includes('Files')
@@ -661,21 +729,15 @@ export default function BookShelf({
         else unsupported.push(path.split(/[\\/]/).pop() || path)
       }
 
-      // 逐个导入（importFile 内部会弹加载层并处理失败）
-      for (const p of supported) {
-        await onImportFile(p)
-      }
-
       if (unsupported.length > 0) {
         showToast(
           'warning',
           `已跳过 ${unsupported.length} 个不支持的文件（仅支持 EPUB / TXT / PDF / DOCX / MD / HTML / MOBI）`
         )
-      } else if (supported.length > 1) {
-        showToast('info', `正在导入 ${supported.length} 个文件…`)
       }
+      await importPaths(supported)
     },
-    [onImportFile, showToast]
+    [importPaths, showToast]
   )
 
   const handleContextMenu = (e: React.MouseEvent<HTMLElement>, book: BookData) => {
@@ -729,6 +791,7 @@ export default function BookShelf({
       showToast('error', `更换封面失败: ${String(error)}`)
     }
   }
+  uploadCoverRef.current = handleUploadCover
 
   const handleRegenerateCover = async (book: BookData) => {
     setContextMenu(null)
@@ -828,8 +891,14 @@ export default function BookShelf({
               : []),
             {
               id: 'favorite',
-              label: favorites.has(contextMenu.book.id) ? '取消收藏' : '收藏',
-              icon: <Star className={`h-4 w-4 ${favorites.has(contextMenu.book.id) ? 'fill-current text-amber-400' : ''}`} />,
+              label: favoriteIds.has(contextMenu.book.id) ? '取消收藏' : '收藏',
+              icon: (
+                <Star
+                  className={`h-4 w-4 ${
+                    favoriteIds.has(contextMenu.book.id) ? 'fill-current text-amber-400' : ''
+                  }`}
+                />
+              ),
               onSelect: () => toggleFavorite(contextMenu.book.id)
             }
           ]
@@ -972,77 +1041,91 @@ export default function BookShelf({
         </div>
       )}
 
-      {/* Album tabs */}
+      {/* Album tabs：全部 + 收藏(常驻最前) + 其它专辑；仅顶栏展示 */}
       <div className="flex items-center gap-1.5 px-4 pt-3.5 overflow-x-auto flex-shrink-0">
         <button
+          type="button"
           onClick={() => openAlbum(null)}
           className={`chip whitespace-nowrap ${!activeAlbumId ? 'chip-active' : 'chip-idle'}`}
         >
           全部书籍
         </button>
-        {topLevelAlbums.map((album) => {
-          const isActive = albumPath.some((entry) => entry.id === album.id)
+        {shelfAlbums.map((album) => {
+          const isActive = activeAlbumId === album.id
+          const isFav = isFavoritesAlbum(album)
+          const count = album.items.filter((i) => i.resourceType === 'book').length
           return (
-            <button
+            <div
               key={album.id}
-              onClick={() => openAlbum(album.id)}
-              className={`chip whitespace-nowrap ${isActive ? 'chip-active' : 'chip-idle'}`}
-              title={album.title}
+              className={`chip whitespace-nowrap inline-flex items-center gap-1 pr-1 ${
+                isActive ? 'chip-active' : 'chip-idle'
+              }`}
             >
-              <Folder className="w-3.5 h-3.5 opacity-80" />
-              <span className="max-w-32 truncate">{album.title}</span>
-            </button>
+              <button
+                type="button"
+                onClick={() => openAlbum(album.id)}
+                className="inline-flex items-center gap-1 min-w-0 max-w-[9rem]"
+                title={isFav ? '常驻专辑：收藏' : album.title}
+              >
+                {isFav ? (
+                  <Star className="w-3.5 h-3.5 opacity-90 fill-amber-400 text-amber-400 flex-shrink-0" />
+                ) : (
+                  <Folder className="w-3.5 h-3.5 opacity-80 flex-shrink-0" />
+                )}
+                <span className="truncate">{album.title}</span>
+                <span className="text-[10px] opacity-60 flex-shrink-0">{count}</span>
+              </button>
+              {!isFav && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void handleDeleteAlbum(album)
+                  }}
+                  className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-gray-400 hover:text-red-500 flex-shrink-0"
+                  title="删除专辑"
+                  aria-label={`删除专辑 ${album.title}`}
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
           )
         })}
-        <button
-          onClick={handleCreateAlbum}
-          className="icon-btn-sm"
-          title={activeAlbum ? '新建子专辑' : '新建专辑'}
-        >
+        <button type="button" onClick={handleCreateAlbum} className="icon-btn-sm" title="新建专辑">
           <Plus className="w-4 h-4" />
         </button>
       </div>
 
       {activeAlbum && (
         <div className="flex items-center gap-2 px-4 pt-2 text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">
-          <button onClick={() => openAlbum(null)} className="hover:text-primary">
+          <button type="button" onClick={() => openAlbum(null)} className="hover:text-primary">
             全部书籍
           </button>
-          {albumPath.map((album, index) => (
-            <span key={album.id} className="inline-flex items-center gap-2">
-              <ChevronRight className="w-3 h-3" />
-              <button
-                onClick={() => openAlbum(album.id)}
-                className="hover:text-primary max-w-40 truncate"
-                title={album.title}
-              >
-                {album.title}
-              </button>
-              {index === albumPath.length - 1 && (
-                <>
-                  <button
-                    onClick={() => handleRenameAlbum(album)}
-                    className="p-1 hover:text-primary"
-                    title="编辑专辑标题"
-                  >
-                    <Pencil className="w-3 h-3" />
-                  </button>
-                  <button
-                    onClick={() => handleDeleteAlbum(album)}
-                    className="p-1 hover:text-red-600"
-                    title="删除专辑"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </>
-              )}
+          <ChevronRight className="w-3 h-3" />
+          <span className="inline-flex items-center gap-1.5 max-w-xs">
+            <span className="truncate font-medium text-gray-600 dark:text-gray-300" title={activeAlbum.title}>
+              {activeAlbum.title}
             </span>
-          ))}
+            {!isFavoritesAlbum(activeAlbum) && (
+              <button
+                type="button"
+                onClick={() => handleRenameAlbum(activeAlbum)}
+                className="p-1 hover:text-primary"
+                title="编辑专辑标题"
+              >
+                <Pencil className="w-3 h-3" />
+              </button>
+            )}
+            {isFavoritesAlbum(activeAlbum) && (
+              <span className="text-[10px] text-amber-500/80">常驻</span>
+            )}
+          </span>
         </div>
       )}
 
       {/* Top toolbar */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200/60 dark:border-dark-border flex-shrink-0">
+      <div className="panel-chrome flex items-center gap-3 px-4 py-3 border-b border-gray-200/60 dark:border-dark-border flex-shrink-0">
         <div className="flex-1 relative max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
           <input
@@ -1144,16 +1227,20 @@ export default function BookShelf({
       <BatchActionBar
         selectedCount={selectedCount}
         allSelected={allSelected}
+        multiSelectMode={multiSelectMode}
         reprocessProgress={reprocessProgress}
-        reparseProgress={reparseProgress}
+        albums={albums}
+        activeAlbumId={activeAlbumId}
         onSelectAll={selectAll}
         onClearSelection={clearSelection}
+        onExitSelection={exitSelection}
         onBatchReprocess={handleBatchReprocess}
-        onBatchReparse={handleBatchReparse}
-        onMigrateAllChapters={handleMigrateAllChapters}
         onBatchExportBookmarks={handleBatchExportBookmarks}
         onBatchExportAudio={handleBatchExportAudio}
         onBatchDelete={handleBatchDelete}
+        onAddToAlbum={handleBatchAddToAlbum}
+        onCreateAlbumWithSelected={handleCreateAlbumWithSelected}
+        onRemoveFromCurrentAlbum={activeAlbum ? handleBatchRemoveFromAlbum : undefined}
       />
 
       {/* Book list / Empty state — 书多时虚拟滚动，避免一次挂载上百张卡片 */}
@@ -1167,53 +1254,6 @@ export default function BookShelf({
               onCoverError={ensureCover}
             />
           )}
-
-          {childAlbums.length > 0 && (
-            <div className="mb-5">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">子专辑</h3>
-                <span className="text-xs text-gray-400">{childAlbums.length} 个</span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {childAlbums.map((album) => (
-                  <div
-                    key={album.id}
-                    className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900"
-                  >
-                    <button
-                      onClick={() => openAlbum(album.id)}
-                      className="flex items-center gap-3 flex-1 min-w-0 text-left"
-                    >
-                      <Folder className="w-5 h-5 flex-shrink-0 text-primary" />
-                      <span
-                        className="truncate text-sm text-gray-700 dark:text-gray-200"
-                        title={album.title}
-                      >
-                        {album.title}
-                      </span>
-                      <span className="text-xs text-gray-400 flex-shrink-0">
-                        {album.items.filter((item) => item.resourceType === 'book').length}
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => handleRenameAlbum(album)}
-                      className="p-1 text-gray-400 hover:text-primary"
-                      title="编辑专辑标题"
-                    >
-                      <Pencil className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => handleDeleteAlbum(album)}
-                      className="p-1 text-gray-400 hover:text-red-600"
-                      title="删除专辑"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="flex-1 min-h-0 px-4 pb-4">
@@ -1222,7 +1262,7 @@ export default function BookShelf({
               className={`h-full flex flex-col items-center justify-center border-2 border-dashed rounded-3xl transition-all mx-1 ${
                 isDragOver
                   ? 'border-primary bg-primary/5'
-                  : 'border-gray-200 dark:border-dark-border bg-white/40 dark:bg-dark-surface/40'
+                  : 'panel-empty border-gray-200 dark:border-dark-border bg-white/40 dark:bg-dark-surface/40'
               }`}
             >
               <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
@@ -1250,16 +1290,19 @@ export default function BookShelf({
                     shelfScale={shelfScale}
                     coverUrl={resolveCoverSrc(book)}
                     selected={selectedIds.has(book.id)}
-                    favorited={favorites.has(book.id)}
-                    multiSelectMode={selectedCount > 0}
+                    favorited={favoriteIds.has(book.id)}
+                    multiSelectMode={multiSelectMode}
                     onToggleSelect={toggleSelect}
                     onToggleFavorite={toggleFavorite}
-                    onOpen={onOpenBook}
-                    onUploadCover={handleUploadCover}
+                    onOpen={openBookSafe}
+                    onUploadCover={handleCoverClick}
                     onContextMenu={handleContextMenu}
                     onMenuButtonClick={handleMenuButtonClick}
                     onKeyDown={handleBookCardKeyDown}
                     onCoverError={ensureCover}
+                    onSelectPointerDown={handleSelectPointerDown}
+                    onSelectPointerEnter={handleSelectPointerEnter}
+                    onSelectPointerUp={handleSelectPointerUp}
                   />
                 )}
               />
@@ -1272,16 +1315,19 @@ export default function BookShelf({
                     shelfScale={shelfScale}
                     coverUrl={resolveCoverSrc(book)}
                     selected={selectedIds.has(book.id)}
-                    favorited={favorites.has(book.id)}
-                    multiSelectMode={selectedCount > 0}
+                    favorited={favoriteIds.has(book.id)}
+                    multiSelectMode={multiSelectMode}
                     onToggleSelect={toggleSelect}
                     onToggleFavorite={toggleFavorite}
-                    onOpen={onOpenBook}
-                    onUploadCover={handleUploadCover}
+                    onOpen={openBookSafe}
+                    onUploadCover={handleCoverClick}
                     onContextMenu={handleContextMenu}
                     onMenuButtonClick={handleMenuButtonClick}
                     onKeyDown={handleBookCardKeyDown}
                     onCoverError={ensureCover}
+                    onSelectPointerDown={handleSelectPointerDown}
+                    onSelectPointerEnter={handleSelectPointerEnter}
+                    onSelectPointerUp={handleSelectPointerUp}
                   />
                 ))}
               </div>
@@ -1295,16 +1341,19 @@ export default function BookShelf({
                   book={book}
                   coverUrl={resolveCoverSrc(book)}
                   selected={selectedIds.has(book.id)}
-                  favorited={favorites.has(book.id)}
-                  multiSelectMode={selectedCount > 0}
+                  favorited={favoriteIds.has(book.id)}
+                  multiSelectMode={multiSelectMode}
                   onToggleSelect={toggleSelect}
                   onToggleFavorite={toggleFavorite}
-                  onOpen={onOpenBook}
-                  onUploadCover={handleUploadCover}
+                  onOpen={openBookSafe}
+                  onUploadCover={handleCoverClick}
                   onContextMenu={handleContextMenu}
                   onMenuButtonClick={handleMenuButtonClick}
                   onKeyDown={handleBookCardKeyDown}
                   onCoverError={ensureCover}
+                  onSelectPointerDown={handleSelectPointerDown}
+                  onSelectPointerEnter={handleSelectPointerEnter}
+                  onSelectPointerUp={handleSelectPointerUp}
                 />
               )}
             />
@@ -1316,16 +1365,19 @@ export default function BookShelf({
                   book={book}
                   coverUrl={resolveCoverSrc(book)}
                   selected={selectedIds.has(book.id)}
-                  favorited={favorites.has(book.id)}
-                  multiSelectMode={selectedCount > 0}
+                  favorited={favoriteIds.has(book.id)}
+                  multiSelectMode={multiSelectMode}
                   onToggleSelect={toggleSelect}
                   onToggleFavorite={toggleFavorite}
-                  onOpen={onOpenBook}
-                  onUploadCover={handleUploadCover}
+                  onOpen={openBookSafe}
+                  onUploadCover={handleCoverClick}
                   onContextMenu={handleContextMenu}
                   onMenuButtonClick={handleMenuButtonClick}
                   onKeyDown={handleBookCardKeyDown}
                   onCoverError={ensureCover}
+                  onSelectPointerDown={handleSelectPointerDown}
+                  onSelectPointerEnter={handleSelectPointerEnter}
+                  onSelectPointerUp={handleSelectPointerUp}
                 />
               ))}
             </div>
@@ -1387,7 +1439,7 @@ export default function BookShelf({
               </button>
               <button
                 type="submit"
-                className="px-3 py-1.5 text-sm rounded-lg bg-primary text-white hover:bg-primary/90"
+                className="px-3 py-1.5 text-sm rounded-lg bg-primary text-[rgb(var(--on-primary-rgb))] hover:bg-primary/90"
               >
                 保存
               </button>
@@ -1443,7 +1495,7 @@ export default function BookShelf({
               </button>
               <button
                 type="submit"
-                className="px-3 py-1.5 text-sm rounded-lg bg-primary text-white hover:bg-primary/90"
+                className="px-3 py-1.5 text-sm rounded-lg bg-primary text-[rgb(var(--on-primary-rgb))] hover:bg-primary/90"
               >
                 保存
               </button>
@@ -1509,7 +1561,7 @@ export default function BookShelf({
             <div className="flex justify-end px-5 py-3 border-t border-gray-100 dark:border-gray-700">
               <button
                 onClick={() => setIsAddContentOpen(false)}
-                className="px-4 py-1.5 text-sm rounded-lg bg-primary text-white hover:bg-primary/90"
+                className="px-4 py-1.5 text-sm rounded-lg bg-primary text-[rgb(var(--on-primary-rgb))] hover:bg-primary/90"
               >
                 完成
               </button>

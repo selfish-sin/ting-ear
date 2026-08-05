@@ -69,9 +69,9 @@ export default function QuickTextPanel({ showToast, onRead }: QuickTextPanelProp
   }
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-dark-bg">
+    <div className="flex-1 flex flex-col overflow-hidden bg-transparent">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-dark-surface flex-shrink-0">
+      <div className="panel-chrome flex items-center gap-2 px-4 py-2 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-dark-surface flex-shrink-0">
         <button
           onClick={handlePaste}
           disabled={pasting}
@@ -91,7 +91,7 @@ export default function QuickTextPanel({ showToast, onRead }: QuickTextPanelProp
         </button>
         <button
           onClick={handleRead}
-          className="flex items-center gap-1 px-3 py-1.5 text-xs bg-primary text-white rounded hover:bg-primary/90"
+          className="flex items-center gap-1 px-3 py-1.5 text-xs bg-primary text-[rgb(var(--on-primary-rgb))] rounded hover:bg-primary/90"
           title="朗读文本框内容"
         >
           <Play className="w-3.5 h-3.5" />
@@ -111,15 +111,17 @@ export default function QuickTextPanel({ showToast, onRead }: QuickTextPanelProp
         </span>
       </div>
 
-      {/* Text area */}
+      {/* Text area：半透明面板叠在真背景上 */}
       <div className="flex-1 overflow-hidden p-4">
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="OCR 识别结果将自动填入此处...&#10;也可点击「粘贴」从剪贴板导入"
-          className="w-full h-full resize-none bg-transparent text-gray-800 dark:text-gray-200 text-sm leading-relaxed focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-600"
-          style={{ fontSize: '16px', lineHeight: '1.8' }}
-        />
+        <div className="panel-surface h-full overflow-hidden rounded-xl border border-gray-200/60 dark:border-dark-border bg-white/80 dark:bg-dark-surface/80">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="OCR 识别结果将自动填入此处...&#10;也可点击「粘贴」从剪贴板导入"
+            className="w-full h-full resize-none bg-transparent px-3 py-3 text-gray-800 dark:text-gray-200 text-sm leading-relaxed focus:outline-none placeholder:text-gray-300 dark:placeholder:text-gray-600"
+            style={{ fontSize: '16px', lineHeight: '1.8' }}
+          />
+        </div>
       </div>
     </div>
   )

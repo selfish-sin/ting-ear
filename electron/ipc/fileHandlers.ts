@@ -350,7 +350,10 @@ export function registerFileHandlers(
   ipcMain.handle('ai:nmem:dedupe', async () => {
     try {
       const result = await ingestScheduler.dedupeSources()
-      logService.info('AI', `知识库去重: 删除 ${result.removed} 个重复源，保留 ${result.kept} 本`)
+      logService.info(
+        'AI',
+        `知识库去重: 扫描 ${result.scanned} 个源，${result.groups} 本，删除 ${result.removed} 个重复，保留 ${result.kept} 本`
+      )
       return { success: true, ...result }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

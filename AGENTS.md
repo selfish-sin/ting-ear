@@ -35,6 +35,7 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - 章节大纲 UI 只挂载 `ChapterOutlinePanel`；`ChapterOutline.tsx` / `SectionNav.tsx` 为未使用遗留。
 - AI 阅读模式播放控件是 `AiPlaybackCapsule`；听书模式才显示完整 ProgressBar + ControlBar。
 - 数据目录默认 `%APPDATA%/ting-ear/听伴/`，含 `outlines/`、`ingest-status.json` 等（见 README/CONTEXT）。
+- 设置 tabs：常规 / **背景** / 朗读 / AI / 清洗；主题色固定「太古蓝」`#4F6EF7`（主题色设置已删，纯 CSS 变量）。
 
 ## CONTEXT.md 维护（强制）
 

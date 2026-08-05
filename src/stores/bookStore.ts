@@ -146,9 +146,10 @@ export const useBookStore = create<BookState>((set, get) => ({
   setBooks: (books) => set({ books: normalizeBookCollection(books) }),
 
   addBook: (book) => {
-    // 导入返回的书已被主进程 normalizeBookData 规范化过，跳过重复规范化
+    // 导入返回的书已被主进程 normalizeBookData 规范化过，跳过重复规范化。
+    // 主进程 file:import 已 saveSingleBook 落盘，这里只更新内存，禁止再整库 IPC 写盘
+    //（批量导入时每本都 persistBooks 会把已导入全文反复过 IPC，遮罩久不消失）。
     set((s) => ({ books: [...s.books.filter((item) => item.id !== book.id), book] }))
-    void get().persistBooks()
   },
 
   updateBook: (book) => {

@@ -87,7 +87,10 @@ const api = {
   aiConvList: (bookId: string) => ipcRenderer.invoke('ai:conv:list', bookId),
   aiConvLoad: (bookId: string, convId: string) => ipcRenderer.invoke('ai:conv:load', bookId, convId),
   aiConvCreate: (bookId: string, title?: string) => ipcRenderer.invoke('ai:conv:create', bookId, title),
+  aiConvEnsure: (bookId: string) => ipcRenderer.invoke('ai:conv:ensure', bookId),
   aiConvSave: (bookId: string, convId: string, messages: unknown[]) => ipcRenderer.invoke('ai:conv:save', bookId, convId, messages),
+  aiMcpListTools: () => ipcRenderer.invoke('ai:mcp:list-tools'),
+  aiMcpProbe: (server: unknown) => ipcRenderer.invoke('ai:mcp:probe', server),
   aiConvDelete: (bookId: string, convId: string) => ipcRenderer.invoke('ai:conv:delete', bookId, convId),
   aiConvRename: (bookId: string, convId: string, title: string) =>
     ipcRenderer.invoke('ai:conv:rename', bookId, convId, title),
@@ -98,6 +101,17 @@ const api = {
   aiNmemIngest: (book: unknown) => ipcRenderer.invoke('ai:nmem:ingest', book),
   aiNmemSyncAll: (force = false) => ipcRenderer.invoke('ai:nmem:sync-all', force),
   aiNmemDedupe: () => ipcRenderer.invoke('ai:nmem:dedupe'),
+  aiVecStatus: (bookId: string) => ipcRenderer.invoke('ai:vec:status', bookId),
+  aiVecIngest: (book: unknown) => ipcRenderer.invoke('ai:vec:ingest', book),
+  aiVecDelete: (bookId: string) => ipcRenderer.invoke('ai:vec:delete', bookId),
+  aiVecCancel: (bookId: string) => ipcRenderer.invoke('ai:vec:cancel', bookId),
+  aiVecSearch: (bookId: string, query: string, topK?: number, maxChars?: number) =>
+    ipcRenderer.invoke('ai:vec:search', bookId, query, topK, maxChars),
+  onVecProgress: (callback: (progress: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
+    ipcRenderer.on('ai:vec:progress', handler)
+    return () => ipcRenderer.removeListener('ai:vec:progress', handler)
+  },
   aiListModels: (config: unknown) => ipcRenderer.invoke('ai:models:list', config),
   aiTestModel: (config: unknown) => ipcRenderer.invoke('ai:model:test', config),
   aiOutlineGenerate: (request: unknown) => ipcRenderer.invoke('ai:outline:generate', request),

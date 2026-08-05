@@ -77,7 +77,9 @@ async function main(): Promise<void> {
     },
     before
   )
-  console.log('  ok preserves playback state and progress while switching modes')
+  // setReaderMode 本身不得改 playState；App 也不再在切到 AI 阅读时 tts.pause()
+  assert.equal(usePlayerStore.getState().playState, 'playing')
+  console.log('  ok preserves playback state and progress while switching modes (no auto-pause)')
 
   usePlayerStore.getState().setRawSpeechActive(true)
   assert.equal(usePlayerStore.getState().rawSpeechActive, true)

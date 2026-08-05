@@ -7,12 +7,13 @@ interface ModeSwitchProps {
 }
 
 export default function ModeSwitch({ className }: ModeSwitchProps) {
-  const { readerMode, setReaderMode } = useBookStore()
+  const readerMode = useBookStore((s) => s.readerMode)
+  const setReaderMode = useBookStore((s) => s.setReaderMode)
 
   return (
     <div
       className={cn(
-        'flex h-8 items-center rounded-lg border border-gray-200 bg-gray-100 p-0.5 dark:border-dark-border dark:bg-dark-muted',
+        'flex h-8 items-center rounded-lg border border-black/5 bg-black/[0.04] p-0.5 dark:border-white/10 dark:bg-white/[0.06]',
         className
       )}
       role="group"
@@ -25,8 +26,8 @@ export default function ModeSwitch({ className }: ModeSwitchProps) {
         className={cn(
           'flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors',
           readerMode === 'ai-reading'
-            ? 'bg-white text-primary shadow-sm dark:bg-dark-raised'
-            : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100'
+            ? 'bg-primary text-[rgb(var(--on-primary-rgb))] shadow-sm'
+            : 'text-gray-500 hover:bg-primary/10 hover:text-primary dark:text-gray-400'
         )}
       >
         <BookOpenText className="h-3.5 w-3.5" />
@@ -39,8 +40,8 @@ export default function ModeSwitch({ className }: ModeSwitchProps) {
         className={cn(
           'flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors',
           readerMode === 'listening'
-            ? 'bg-white text-primary shadow-sm dark:bg-dark-raised'
-            : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100'
+            ? 'bg-primary text-[rgb(var(--on-primary-rgb))] shadow-sm'
+            : 'text-gray-500 hover:bg-primary/10 hover:text-primary dark:text-gray-400'
         )}
       >
         <Headphones className="h-3.5 w-3.5" />

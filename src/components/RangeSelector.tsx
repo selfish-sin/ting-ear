@@ -307,7 +307,7 @@ export default function RangeSelector({
             </button>
             <button
               onClick={goToChapters}
-              className="flex items-center gap-1 px-4 py-1.5 text-sm bg-primary text-white rounded-lg hover:bg-primary/90"
+              className="flex items-center gap-1 px-4 py-1.5 text-sm bg-primary text-[rgb(var(--on-primary-rgb))] rounded-lg hover:bg-primary/90"
             >
               下一页 <ChevronRight className="w-4 h-4" />
             </button>
@@ -353,7 +353,7 @@ export default function RangeSelector({
                   onClick={() => switchMode('original')}
                   className={`px-2 py-0.5 ${
                     mode === 'original'
-                      ? 'bg-primary text-white'
+                      ? 'bg-primary text-[rgb(var(--on-primary-rgb))]'
                       : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-700'
                   }`}
                 >
@@ -364,7 +364,7 @@ export default function RangeSelector({
                   onClick={() => switchMode('merged')}
                   className={`px-2 py-0.5 flex items-center gap-0.5 ${
                     mode === 'merged'
-                      ? 'bg-primary text-white'
+                      ? 'bg-primary text-[rgb(var(--on-primary-rgb))]'
                       : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-700'
                   }`}
                 >
@@ -433,7 +433,7 @@ export default function RangeSelector({
           <button
             onClick={handleConfirm}
             disabled={selectedChapters.size === 0}
-            className={`px-4 py-1.5 text-sm rounded-lg ${selectedChapters.size === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-primary text-white hover:bg-primary/90'}`}
+            className={`px-4 py-1.5 text-sm rounded-lg ${selectedChapters.size === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-primary text-[rgb(var(--on-primary-rgb))] hover:bg-primary/90'}`}
           >
             开始阅读
           </button>

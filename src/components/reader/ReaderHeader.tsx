@@ -18,7 +18,7 @@ export default function ReaderHeader({ left, right, immersive = false }: ReaderH
   if (immersive) return null
 
   return (
-    <header className="flex h-9 flex-shrink-0 items-center gap-2 border-b border-gray-200 bg-white px-2 sm:px-3 dark:border-dark-border dark:bg-dark-surface">
+    <header className="panel-chrome flex h-9 flex-shrink-0 items-center gap-2 border-b border-black/5 bg-white/50 px-2 backdrop-blur-sm dark:border-white/10 dark:bg-dark-surface/45 sm:px-3">
       {/* 左：章节选择等 */}
       <div className="flex min-w-0 flex-1 items-center gap-1">
         {left}

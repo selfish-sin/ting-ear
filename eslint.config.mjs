@@ -31,7 +31,9 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
       'no-console': 'off',
-      'react-hooks/exhaustive-deps': 'off'
+      // 捕获 useEffect/useMemo/useCallback 闭包旧值与无限重渲染风险。
+      // 现存代码可能触发告警，按文件逐步修复；先开 warn 暴露问题。
+      'react-hooks/exhaustive-deps': 'warn'
     }
   }
 )

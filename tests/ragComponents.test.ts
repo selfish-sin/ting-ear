@@ -6,7 +6,7 @@ import type { AiSourceRef, BookData } from '../src/global'
 async function run(): Promise<void> {
   console.log('\nRAG components')
   const { default: NmemBanner } = await import('../src/components/ai/NmemBanner')
-  const { default: RetrievalCard } = await import('../src/components/ai/RetrievalCard')
+  const { default: EvidencePanel } = await import('../src/components/ai/EvidencePanel')
   const { default: CitationPopover } = await import('../src/components/ai/CitationPopover')
   const chatPanelModule = await import('../src/components/ai/AiChatPanel')
   const findSourceBlockId = (
@@ -34,16 +34,42 @@ async function run(): Promise<void> {
     })
   )
   assert.match(banner, /知识库未连接/)
-  assert.match(banner, /重新连接/)
+  assert.match(banner, /重试/)
 
   const searching = renderToStaticMarkup(
-    createElement(RetrievalCard, { status: 'searching', sources: [] })
+    createElement(EvidencePanel, { status: 'searching', sources: [] })
   )
-  assert.match(searching, /正在检索/)
+  assert.match(searching, /本轮引用/)
+  assert.match(searching, /检索中|书内/)
   const done = renderToStaticMarkup(
-    createElement(RetrievalCard, { status: 'done', sources: [source] })
+    createElement(EvidencePanel, {
+      status: 'done',
+      sources: [source],
+      webSearchUsed: true,
+      webSources: [
+        {
+          index: 1,
+          title: '示例网页',
+          url: 'https://example.com/a',
+          snippet: '摘要',
+          provider: 'ollama',
+          sourceType: '网页',
+          fetchedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ],
+      toolTraces: [
+        { name: 'search_book', ok: true, summary: '命中 1 条' },
+        { name: 'mcp_zotero_search_items', ok: true, summary: '命中 2 条' }
+      ]
+    })
   )
-  assert.match(done, /找到 1 条/)
+  assert.match(done, /本轮引用/)
+  assert.match(done, /书内 1/)
+  assert.match(done, /联网 1/)
+  assert.match(done, /MCP/)
+  assert.match(done, /工具 2/)
+  assert.match(done, /第二章/)
+  assert.match(done, /书内记忆/)
 
   const citation = renderToStaticMarkup(
     createElement(CitationPopover, { source, onNavigate: () => undefined })

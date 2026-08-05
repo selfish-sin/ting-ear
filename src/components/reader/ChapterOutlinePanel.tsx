@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDown, Check, Loader2, PanelLeftClose, PanelLeftOpen, Pencil, RotateCcw, RotateCw } from 'lucide-react'
-import type { ChapterOutlineRecord, ChapterOutlineSection } from '../../global'
+import { Check, Loader2, PanelLeftClose, PanelLeftOpen, Pencil, RotateCcw, RotateCw, Sparkles } from 'lucide-react'
+import type { ChapterOutlineRecord, ChapterOutlineSection, ChapterHinge } from '../../global'
 import type { StructuredChapter } from '../../global'
 import { chapterDisplayTitle } from '../../utils/bookData'
 import { cn } from '../../utils/cn'
@@ -16,7 +16,8 @@ interface ChapterOutlinePanelProps {
   error?: string | null
   collapsed?: boolean
   onCollapsedChange?: (collapsed: boolean) => void
-  onGenerate: () => void
+  /** 生成大纲；force=true 覆盖已有缓存（重新生成/升级） */
+  onGenerate: (force: boolean) => void
   onSelectSection: (startOffset: number) => void
   onUpdateRecord: (record: ChapterOutlineRecord) => void
   onRenameChapter: (title: string) => void
@@ -24,8 +25,6 @@ interface ChapterOutlinePanelProps {
   chapterOriginalTitle?: string
   chapterCustomTitle?: string
 }
-
-type OutlineViewMode = 'outline' | 'relation'
 
 function displaySectionTitle(section: ChapterOutlineSection): string {
   return section.customTitle?.trim() || section.originalTitle
@@ -79,7 +78,6 @@ export default function ChapterOutlinePanel({
   const [editingChapter, setEditingChapter] = useState(false)
   const [editingSectionId, setEditingSectionId] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
-  const [viewMode, setViewMode] = useState<OutlineViewMode>('outline')
   const timerRef = useRef<ReturnType<typeof setInterval>>()
 
   useEffect(() => {
@@ -96,7 +94,7 @@ export default function ChapterOutlinePanel({
 
   if (collapsed) {
     return (
-      <aside className="flex h-full w-7 flex-shrink-0 flex-col items-center border-r border-gray-200 bg-white pt-2 dark:border-dark-border dark:bg-dark-surface">
+      <aside className="panel-surface flex h-full w-7 flex-shrink-0 flex-col items-center border-r border-gray-200 bg-white/80 pt-2 dark:border-dark-border dark:bg-dark-surface/80">
         <button type="button" className="icon-btn h-6 w-6" title="展开本章大纲" onClick={() => onCollapsedChange?.(false)}>
           <PanelLeftOpen className="h-3.5 w-3.5" />
         </button>
@@ -110,45 +108,22 @@ export default function ChapterOutlinePanel({
   const activeSectionIndex = record?.sections.reduce((active, section, index) => {
     return currentSentenceIndex >= chapter.sentenceRange[0] + section.startOffset ? index : active
   }, 0) ?? 0
+  const hasRecord = Boolean(record && (record.status === 'generated' || record.status === 'short_chapter') && record.sections.length > 0)
   const regenerate = () => {
     if (generating) return
     if (hasCustomSectionTitle && !window.confirm('重新生成会覆盖本章的小节标题，是否继续？')) return
-    onGenerate()
+    // 有缓存 → force=true（重新生成/升级）；无缓存 → force=false（缓存 miss 才生成，不浪费）
+    onGenerate(hasRecord)
   }
 
   const progressPct = Math.max(0, Math.min(100, progress ?? (generating ? 8 : 0)))
   const busy = generating
 
-  const panelWidth = viewMode === 'relation' ? 'w-72' : 'w-56'
-
   return (
-    <aside className={`flex h-full ${panelWidth} flex-shrink-0 flex-col border-r border-gray-200 bg-white dark:border-dark-border dark:bg-dark-surface`}>
-      {/* Tab bar */}
-      <div className="flex min-h-9 items-center gap-0 border-b border-gray-200 dark:border-dark-border">
-        <button
-          type="button"
-          className={cn(
-            'flex-1 py-2 text-[11px] font-medium transition-colors',
-            viewMode === 'outline'
-              ? 'border-b-2 border-primary text-primary'
-              : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-          )}
-          onClick={() => setViewMode('outline')}
-        >
-          大纲
-        </button>
-        <button
-          type="button"
-          className={cn(
-            'flex-1 py-2 text-[11px] font-medium transition-colors',
-            viewMode === 'relation'
-              ? 'border-b-2 border-primary text-primary'
-              : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-          )}
-          onClick={() => setViewMode('relation')}
-        >
-          关系纵览
-        </button>
+    <aside className="panel-surface flex h-full w-56 flex-shrink-0 flex-col border-r border-gray-200 bg-white/80 dark:border-dark-border dark:bg-dark-surface/80 sm:w-60">
+      {/* Header */}
+      <div className="flex min-h-9 items-center justify-between border-b border-gray-200 dark:border-dark-border">
+        <span className="px-3 text-[11px] font-medium text-gray-500 dark:text-gray-400">本章大纲</span>
         <button type="button" className="icon-btn h-7 w-7 mx-0.5" title="收起本章大纲" onClick={() => onCollapsedChange?.(true)}><PanelLeftClose className="h-3 w-3" /></button>
       </div>
 
@@ -202,8 +177,22 @@ export default function ChapterOutlinePanel({
           </div>
         )}
         {record?.sections.length ? (
-          viewMode === 'outline' ? (
-            <nav className="min-h-0 flex-1 overflow-y-auto py-1.5" aria-label="本章小节大纲">
+          <nav className="min-h-0 flex-1 overflow-y-auto" aria-label="本章大纲">
+            {/* schema=2 ChapterBrief：章级主张 + 为何重要 */}
+            {record.schemaVersion === 2 && record.thesis && (
+              <div className="border-b border-gray-100 px-3 py-2 dark:border-dark-border">
+                <p className="text-[11px] font-semibold leading-snug text-gray-800 dark:text-gray-100">
+                  {record.thesis}
+                </p>
+                {record.whyItMatters && (
+                  <p className="mt-1 text-[10px] leading-relaxed text-gray-500 dark:text-gray-400">
+                    {record.whyItMatters}
+                  </p>
+                )}
+              </div>
+            )}
+            {/* 论证脊骨：可点跳的小节列表（schema=1/2 共用） */}
+            <div className="py-1.5">
               {record.sections.map((section, index) => (
                 <div key={section.id} className="group flex items-start gap-1 px-2 py-0.5">
                   {editingSectionId === section.id ? (
@@ -234,7 +223,12 @@ export default function ChapterOutlinePanel({
                       onClick={() => onSelectSection(section.startOffset)}
                     >
                       <span className="block truncate text-[11px] leading-tight">{displaySectionTitle(section)}</span>
-                      {section.point && (
+                      {section.summary && (
+                        <span className="mt-0.5 block line-clamp-2 text-[9px] leading-snug text-gray-400">
+                          {section.summary}
+                        </span>
+                      )}
+                      {!section.summary && section.point && (
                         <span className="mt-0.5 block line-clamp-2 text-[9px] leading-snug text-gray-400">
                           {section.point}
                         </span>
@@ -270,56 +264,45 @@ export default function ChapterOutlinePanel({
                   )}
                 </div>
               ))}
-            </nav>
-          ) : (
-            /* 关系纵览：小节卡片 + 箭头连线 */
-            <nav className="min-h-0 flex-1 overflow-y-auto px-3 py-2" aria-label="本章小节关系纵览">
-              {record.sections.map((section, index) => (
-                <div key={section.id}>
+            </div>
+            {/* schema=2 阿基米德支点：可点跳的关键句 */}
+            {record.schemaVersion === 2 && record.hinges && record.hinges.length > 0 && (
+              <div className="border-t border-gray-100 px-3 py-2 dark:border-dark-border">
+                <p className="mb-1 text-[9px] font-medium uppercase tracking-wide text-gray-400">支点</p>
+                {record.hinges.map((hinge, hi) => (
                   <button
+                    key={hi}
                     type="button"
-                    className={cn(
-                      'w-full rounded-lg border px-3 py-2.5 text-left transition-colors',
-                      index === activeSectionIndex
-                        ? 'border-primary/40 bg-primary/5'
-                        : 'border-gray-200 bg-gray-50/50 dark:border-dark-border dark:bg-white/3'
-                    )}
-                    onClick={() => onSelectSection(section.startOffset)}
+                    className="mb-1 block w-full rounded bg-amber-50/60 px-2 py-1 text-left transition-colors hover:bg-amber-100/70 dark:bg-amber-900/10 dark:hover:bg-amber-900/20"
+                    onClick={() => onSelectSection(hinge.at)}
+                    title="跳转到该句"
                   >
-                    <div className="flex items-center gap-1.5">
-                      <span className={cn(
-                        'flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-[9px] font-semibold',
-                        index === activeSectionIndex ? 'bg-primary text-white' : 'bg-gray-300 text-gray-600 dark:bg-gray-600 dark:text-gray-300'
-                      )}>
-                        {index + 1}
-                      </span>
-                      <span className={cn(
-                        'text-xs font-medium leading-snug',
-                        index === activeSectionIndex ? 'text-primary' : 'text-gray-700 dark:text-gray-200'
-                      )}>
-                        {displaySectionTitle(section)}
-                      </span>
-                    </div>
-                    {section.summary && (
-                      <p className="mt-1.5 text-[10px] leading-relaxed text-gray-500 dark:text-gray-400">
-                        {section.summary}
-                      </p>
-                    )}
-                    {!section.summary && section.point && (
-                      <p className="mt-1 text-[9px] leading-snug text-gray-400">
-                        {section.point}
-                      </p>
-                    )}
+                    <span className="block text-[10px] font-medium leading-snug text-amber-700 dark:text-amber-400">
+                      第 {hinge.at} 句
+                    </span>
+                    <span className="mt-0.5 block text-[10px] leading-relaxed text-gray-600 dark:text-gray-300">
+                      {hinge.insight}
+                    </span>
                   </button>
-                  {index < record.sections.length - 1 && (
-                    <div className="flex justify-center py-0.5">
-                      <ArrowDown className="h-3.5 w-3.5 text-gray-300 dark:text-gray-600" />
-                    </div>
-                  )}
-                </div>
-              ))}
-            </nav>
-          )
+                ))}
+              </div>
+            )}
+            {/* schema=1 legacy：提示可升级 */}
+            {record.schemaVersion !== 2 && record.status === 'generated' && (
+              <div className="border-t border-gray-100 px-3 py-2 dark:border-dark-border">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline disabled:opacity-50"
+                  onClick={() => onGenerate(true)}
+                  disabled={busy}
+                  title="用新格式重新生成（含主张/支点）"
+                >
+                  <Sparkles className="h-3 w-3" />
+                  升级为阅读简报
+                </button>
+              </div>
+            )}
+          </nav>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-[10px] text-gray-400">
             {loading ? (

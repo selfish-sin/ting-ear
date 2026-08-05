@@ -5,17 +5,18 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        // 主色：偏靛紫蓝，阅读场景更沉稳，少一点「系统默认蓝」感
+        // 主色：由 CSS 变量驱动（设置 → 主题色，默认太古蓝 #4F6EF7）
+        // --primary-rgb 等在 :root / App 里写入
         primary: {
-          DEFAULT: '#4F6EF7',
-          50: '#F0F3FF',
-          100: '#E0E7FF',
-          200: '#C7D2FE',
-          300: '#A5B4FC',
-          400: '#818CF8',
-          500: '#4F6EF7',
-          600: '#3B5BDB',
-          700: '#364FC7'
+          DEFAULT: 'rgb(var(--primary-rgb) / <alpha-value>)',
+          50: 'rgb(var(--primary-rgb) / 0.06)',
+          100: 'rgb(var(--primary-rgb) / 0.12)',
+          200: 'rgb(var(--primary-rgb) / 0.25)',
+          300: 'rgb(var(--primary-300-rgb) / <alpha-value>)',
+          400: 'rgb(var(--primary-rgb) / 0.75)',
+          500: 'rgb(var(--primary-rgb) / <alpha-value>)',
+          600: 'rgb(var(--primary-600-rgb) / <alpha-value>)',
+          700: 'rgb(var(--primary-700-rgb) / <alpha-value>)'
         },
         highlight: '#FEF3C7',
         'sentence-hover': '#F3F4F6',
@@ -45,7 +46,7 @@ module.exports = {
       boxShadow: {
         soft: '0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.04)',
         card: '0 1px 3px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.06)',
-        glow: '0 0 0 1px rgba(79, 110, 247, 0.12), 0 8px 24px rgba(79, 110, 247, 0.18)',
+        glow: '0 0 0 1px rgb(var(--primary-rgb) / 0.12), 0 8px 24px rgb(var(--primary-rgb) / 0.18)',
         nav: '1px 0 0 rgba(15, 23, 42, 0.04)'
       },
       borderRadius: {
@@ -54,8 +55,8 @@ module.exports = {
       },
       keyframes: {
         'capture-pulse': {
-          '0%, 100%': { boxShadow: '0 0 0 0 rgba(79,110,247,0.45)' },
-          '50%': { boxShadow: '0 0 0 7px rgba(79,110,247,0)' }
+          '0%, 100%': { boxShadow: '0 0 0 0 rgb(var(--primary-rgb) / 0.45)' },
+          '50%': { boxShadow: '0 0 0 7px rgb(var(--primary-rgb) / 0)' }
         },
         'fade-up': {
           from: { opacity: '0', transform: 'translateY(6px)' },

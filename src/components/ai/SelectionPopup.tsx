@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { useAiStore } from '../../stores/aiStore'
 import { useBookStore } from '../../stores/bookStore'
+import { useSafeTimeout } from '../../hooks/useSafeTimeout'
 import { cn } from '../../utils/cn'
 
 interface SelectionRect {
@@ -173,7 +174,7 @@ function ToolbarButton({ label, icon, onClick, disabled, primary, title }: Toolb
         'flex h-8 items-center gap-1 rounded-md px-2 text-[11px] font-medium transition-colors',
         'disabled:cursor-not-allowed disabled:opacity-35',
         primary
-          ? 'bg-primary text-white hover:opacity-90'
+          ? 'bg-primary text-[rgb(var(--on-primary-rgb))] hover:opacity-90'
           : 'text-white/90 hover:bg-white/12'
       )}
     >
@@ -194,6 +195,8 @@ export default function SelectionPopup({
   const requestChatFocus = useAiStore((state) => state.requestChatFocus)
   const setReaderMode = useBookStore((state) => state.setReaderMode)
   const popupRef = useRef<HTMLDivElement>(null)
+  // 卸载安全的 setTimeout：组件卸载后跳过回调，避免对已卸载组件 setState
+  const safeTimeout = useSafeTimeout()
   const [selection, setSelection] = useState<{
     text: string
     rect: SelectionRect
@@ -239,10 +242,10 @@ export default function SelectionPopup({
     const handleMouseUp = (event: MouseEvent) => {
       if (popupRef.current?.contains(event.target as Node)) return
       // 等浏览器完成选区
-      window.setTimeout(captureSelection, 0)
+      safeTimeout(captureSelection, 0)
     }
     const handleTouchEnd = () => {
-      window.setTimeout(captureSelection, 50)
+      safeTimeout(captureSelection, 50)
     }
 
     container.addEventListener('mouseup', handleMouseUp)
@@ -251,7 +254,7 @@ export default function SelectionPopup({
       container.removeEventListener('mouseup', handleMouseUp)
       container.removeEventListener('touchend', handleTouchEnd)
     }
-  }, [containerRef, captureSelection])
+  }, [containerRef, captureSelection, safeTimeout])
 
   // 键盘选区（Shift+方向键）结束后也更新
   useEffect(() => {
@@ -262,11 +265,11 @@ export default function SelectionPopup({
       if (!container.contains(document.activeElement) && !container.contains(event.target as Node)) {
         return
       }
-      window.setTimeout(captureSelection, 0)
+      safeTimeout(captureSelection, 0)
     }
     container.addEventListener('keyup', onKeyUp)
     return () => container.removeEventListener('keyup', onKeyUp)
-  }, [containerRef, captureSelection])
+  }, [containerRef, captureSelection, safeTimeout])
 
   useEffect(() => {
     if (!selection) return
@@ -315,7 +318,7 @@ export default function SelectionPopup({
         event.preventDefault()
         addQuote(live.text)
         setFlash('已引用')
-        window.setTimeout(() => {
+        safeTimeout(() => {
           dismiss()
           window.getSelection()?.removeAllRanges()
         }, 400)
@@ -329,13 +332,13 @@ export default function SelectionPopup({
         void navigator.clipboard.writeText(live.text).then(() => {
           onCopied?.()
           setFlash('已复制')
-          window.setTimeout(dismiss, 400)
+          safeTimeout(dismiss, 400)
         })
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [addQuote, containerRef, dismiss, onCopied, requestChatFocus, setReaderMode])
+  }, [addQuote, containerRef, dismiss, onCopied, requestChatFocus, setReaderMode, safeTimeout])
 
   if (!selection || typeof document === 'undefined') return null
 
@@ -372,7 +375,7 @@ export default function SelectionPopup({
               void navigator.clipboard.writeText(selection.text).then(() => {
                 onCopied?.()
                 setFlash('已复制')
-                window.setTimeout(clearSelection, 350)
+                safeTimeout(clearSelection, 350)
               })
             }}
           />
@@ -383,7 +386,7 @@ export default function SelectionPopup({
             onClick={() => {
               addQuote(selection.text)
               setFlash('已加入引用')
-              window.setTimeout(clearSelection, 350)
+              safeTimeout(clearSelection, 350)
             }}
           />
           <ToolbarButton

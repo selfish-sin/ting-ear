@@ -11,7 +11,11 @@ import {
   contentHash,
   isLegacyChapterState
 } from '../electron/services/ai/ingest-service'
-import { IngestScheduler } from '../electron/services/ai/ingest-scheduler'
+import {
+  IngestScheduler,
+  parseBookIdFromSourceName,
+  pickPreferredSource
+} from '../electron/services/ai/ingest-scheduler'
 import type { NmemBridge, NmemIngestResult, NmemSourceInfo } from '../electron/services/ai/nmem-bridge'
 
 function makeBook(overrides: Partial<BookData> = {}): BookData {
@@ -249,7 +253,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // 去重：同 bookId 的多个历史遗留 source 只保留 1 个
+  // 去重：同 bookId 的多个历史遗留 source 只保留 1 个（含 original_name 风格 + version）
   {
     const root = mkdtempSync(join(tmpdir(), 'ting-ear-ingest-dedupe-'))
     try {
@@ -262,21 +266,45 @@ async function main(): Promise<void> {
         () => [book],
         () => undefined
       )
-      // 模拟历史遗留：同 bookId 3 个重复 source
-      nmem.sources.set('dup-1', { id: 'dup-1', name: '[bookId=book-1] 测试之书', status: 'ready' })
-      nmem.sources.set('dup-2', { id: 'dup-2', name: '[bookId=book-1] 测试之书', status: 'ready' })
-      nmem.sources.set('dup-3', { id: 'dup-3', name: '[bookId=book-1] 测试之书', status: 'ready' })
+      // 模拟 nmem 真实命名：`书名 [bookId=…].md` + version 字段
+      nmem.sources.set('dup-1', {
+        id: 'dup-1',
+        name: '测试之书 [bookId=book-1].md',
+        status: 'ready',
+        version: 1
+      })
+      nmem.sources.set('dup-2', {
+        id: 'dup-2',
+        name: '测试之书 [bookId=book-1].md',
+        status: 'ready',
+        version: 2
+      })
+      nmem.sources.set('dup-3', {
+        id: 'dup-3',
+        name: '测试之书 [bookId=book-1].md',
+        status: 'processing',
+        version: 1
+      })
+      nmem.sources.set('other', {
+        id: 'other',
+        name: '别人的笔记.txt',
+        status: 'ready'
+      })
       const result = await scheduler.dedupeSources()
       assert.equal(result.removed, 2)
       assert.equal(result.kept, 1)
-      assert.equal(nmem.sources.size, 1, 'only one source remains after dedupe')
-      console.log('  ok dedupe keeps one source per bookId and removes duplicates')
+      assert.equal(result.groups, 1)
+      assert.equal(result.scanned, 4)
+      assert.equal(nmem.sources.size, 2, 'one ting-ear source + one unrelated kept')
+      assert.ok(nmem.sources.has('dup-2'), 'must keep highest version (v2)')
+      assert.ok(nmem.sources.has('other'), 'must not touch non-ting-ear sources')
+      console.log('  ok dedupe keeps highest-version source per bookId and skips others')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
   }
 
-  // 内容变化重传时先删除旧 source，确保知识库只有一份
+  // 内容变化重传后删除旧 source（含同 bookId 孤儿），确保知识库只有一份
   {
     const root = mkdtempSync(join(tmpdir(), 'ting-ear-ingest-replace-'))
     try {
@@ -292,19 +320,83 @@ async function main(): Promise<void> {
       // 首次导入
       assert.equal(await scheduler.tryIngest(book), true)
       assert.equal(nmem.deleted.length, 0, 'no deletion on first ingest')
+      assert.equal(nmem.sources.size, 1)
 
-      // 内容变化后重传：应先删旧源再上传新源
+      // 内容变化后重传：上传成功后清理同 bookId 旧源
       const bookV2 = makeBook({ sentences: ['全新的第一句内容。', '全新的第二句内容。'] })
       assert.equal(await scheduler.tryIngest(bookV2), true)
-      assert.ok(nmem.deleted.length >= 1, 'old source must be deleted before re-upload')
+      assert.ok(nmem.deleted.length >= 1, 'old source must be deleted after re-upload')
       assert.equal(nmem.calls.length, 2, 're-upload happens once for changed content')
-      console.log('  ok re-upload deletes old source first, keeping only one copy')
+      assert.equal(nmem.sources.size, 1, 'only one source remains after replace')
+      console.log('  ok re-upload cleans sibling sources, keeping only one copy')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
   }
 
-  console.log('Whole-book MDM ingest result: 9 passed')
+  // 多书并行 tryIngest：状态文件不得互相覆盖（曾导致探针再传升 v2）
+  {
+    const root = mkdtempSync(join(tmpdir(), 'ting-ear-ingest-multibook-'))
+    try {
+      const books = [
+        makeBook({ id: 'book-a', title: '书A', sentences: ['A1', 'A2'] }),
+        makeBook({ id: 'book-b', title: '书B', sentences: ['B1', 'B2'] }),
+        makeBook({ id: 'book-c', title: '书C', sentences: ['C1', 'C2'] })
+      ]
+      const nmem = new FakeNmem()
+      // 人为放慢，放大并发写状态窗口
+      let releaseGate: () => void = () => {}
+      nmem.blockIngest = new Promise<void>((resolve) => {
+        releaseGate = resolve
+      })
+      const ingest = new IngestService(nmem as unknown as NmemBridge)
+      const scheduler = new IngestScheduler(
+        () => root,
+        nmem as unknown as NmemBridge,
+        ingest,
+        () => books,
+        () => undefined
+      )
+      const pending = books.map((b) => scheduler.tryIngest(b))
+      releaseGate()
+      const results = await Promise.all(pending)
+      assert.deepEqual(results, [true, true, true])
+      assert.equal(nmem.calls.length, 3)
+
+      const saved = JSON.parse(readFileSync(join(root, 'ingest-status.json'), 'utf-8'))
+      assert.ok(saved['book-a']?.sourceId, 'book-a status must survive concurrent writes')
+      assert.ok(saved['book-b']?.sourceId, 'book-b status must survive concurrent writes')
+      assert.ok(saved['book-c']?.sourceId, 'book-c status must survive concurrent writes')
+
+      // 状态齐全后再次 tryIngest 全部跳过，不再上传
+      nmem.blockIngest = null
+      for (const b of books) {
+        assert.equal(await scheduler.tryIngest(b), true)
+      }
+      assert.equal(nmem.calls.length, 3, 'no re-upload after concurrent status writes')
+      console.log('  ok concurrent multi-book tryIngest does not lose status rows')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  // 辅助：bookId 解析 + 保留策略
+  {
+    assert.equal(parseBookIdFromSourceName('测试 [bookId=abc-1].md'), 'abc-1')
+    assert.equal(parseBookIdFromSourceName('无关文件.txt'), null)
+    const prefer = pickPreferredSource(
+      [
+        { id: 'old', name: 'x [bookId=b]', status: 'ready', version: 1 },
+        { id: 'new', name: 'x [bookId=b]', status: 'ready', version: 3 },
+        { id: 'mid', name: 'x [bookId=b]', status: 'processing', version: 9 }
+      ],
+      'old'
+    )
+    assert.equal(prefer.id, 'new', 'ready + higher version beats preferId and high-version processing')
+    console.log('  ok bookId parse and preferred-source ranking')
+  }
+
+  console.log('Whole-book MDM ingest result: 11 passed')
 }
 
 void main()

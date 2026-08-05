@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Database, Globe, Settings2, Sparkles, Trash2 } from 'lucide-react'
+import {
+  ChevronLeft,
+  ChevronRight,
+  Database,
+  Globe,
+  GraduationCap,
+  MessageSquarePlus,
+  Plug,
+  Settings2,
+  Sparkles,
+  Trash2
+} from 'lucide-react'
 import type { AiChatMessage, AiSourceRef, BookData } from '../../global'
 import { useAiStore } from '../../stores/aiStore'
 import { useBookStore } from '../../stores/bookStore'
@@ -10,39 +21,9 @@ import ChatMessages from './ChatMessages'
 import ConversationHistory from './ConversationHistory'
 import KnowledgeBaseButton from './KnowledgeBaseButton'
 import NmemBanner from './NmemBanner'
+import TurnNav from './TurnNav'
 
 import { mergeAiSettings } from '../../aiSettings'
-
-/** 输入框上方的快捷开关栏：nmem 外部知识库 + 网络搜索 */
-function ChatToggles() {
-  const ai = useSettingsStore((s) => s.settings.ai)
-  const setSettings = useSettingsStore((s) => s.setSettings)
-  const merged = mergeAiSettings(ai)
-
-  const toggleNmem = () => {
-    setSettings({ ai: { ...merged, nmem: { ...merged.nmem, enabled: !merged.nmem.enabled } } })
-  }
-  const toggleWebSearch = () => {
-    setSettings({ ai: { ...merged, webSearch: { ...merged.webSearch, enabled: !merged.webSearch.enabled } } })
-  }
-
-  const btnBase = 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors'
-  const onCls = 'bg-primary/10 text-primary'
-  const offCls = 'bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-500'
-
-  return (
-    <div className="flex items-center gap-1.5 border-t border-gray-100 px-3 py-1 dark:border-gray-700/50">
-      <button type="button" onClick={toggleNmem} className={`${btnBase} ${merged.nmem.enabled ? onCls : offCls}`} title="nmem 外部知识库">
-        <Database className="h-3 w-3" />
-        外部知识库
-      </button>
-      <button type="button" onClick={toggleWebSearch} className={`${btnBase} ${merged.webSearch.enabled ? onCls : offCls}`} title="联网搜索">
-        <Globe className="h-3 w-3" />
-        联网搜索
-      </button>
-    </div>
-  )
-}
 
 interface AiChatPanelContentProps {
   messages: AiChatMessage[]
@@ -55,7 +36,6 @@ interface AiChatPanelContentProps {
   nmemError?: string | null
   bookIngestStatus?: import('../../global').AiBookIngestStatus['status'] | 'checking'
   bookIngestError?: string | null
-  /** 是否正在主动同步本书到 nmem（仅主动同步显示远程进度条，自动后台 ingest 不显示） */
   nmemManualSyncing?: boolean
   onRetryNmem?: () => Promise<void>
   onSyncBookToNmem?: () => Promise<boolean>
@@ -73,33 +53,178 @@ interface AiChatPanelContentProps {
   onFocusRequestConsumed?: (requestId: number) => void
 }
 
-function WebSearchToggle() {
-  const { settings, setSettings } = useSettingsStore()
-  const enabled = settings.ai?.webSearch?.enabled ?? false
+const headerIconBtn =
+  'flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-primary/70 transition-colors hover:bg-primary/10 hover:text-primary disabled:opacity-40 dark:text-primary-300/80 dark:hover:bg-primary/15'
+
+const pillBase =
+  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors'
+
+/** 顶栏能力开关：书内(nmem) / 联网 / 学术 / MCP，窄栏可换行完整显示 */
+function TopCapabilityPills() {
+  const ai = useSettingsStore((s) => s.settings.ai)
+  const setSettings = useSettingsStore((s) => s.setSettings)
+  const merged = mergeAiSettings(ai)
+
+  const onCls = 'bg-primary/10 text-primary'
+  const offCls = 'bg-primary/8 text-primary/55 dark:bg-primary/10 dark:text-primary-300/50'
+  const academicOn = 'bg-amber-100 text-amber-900 dark:bg-amber-950/50 dark:text-amber-300'
+  const skyOn = 'bg-sky-100 text-sky-700 dark:bg-sky-950/50 dark:text-sky-300'
+  const mcpOn = 'bg-violet-100 text-violet-800 dark:bg-violet-950/50 dark:text-violet-300'
+
+  const backendLabel =
+    merged.webSearch.backend === 'ollama'
+      ? 'Ollama'
+      : merged.webSearch.backend === 'zhipu' || merged.webSearch.backend === 'zhipu-native'
+        ? '智谱'
+        : merged.webSearch.backend === 'ddg'
+          ? 'DDG'
+          : merged.webSearch.backend === 'none'
+            ? '仅提示'
+            : '自动'
+
+  const academicActive =
+    merged.webSearch.academicEnabled || merged.webSearch.sciverseEnabled
+  const mcpActive = Boolean(merged.mcp?.enabled)
+  const mcpServerCount = (merged.mcp?.servers || []).filter((s) => s.enabled).length
+  const bookActive = merged.nmem.enabled || merged.retrieval.enabled
+
+  return (
+    <div
+      className="flex w-full min-w-0 flex-shrink-0 flex-wrap content-start items-center gap-1"
+      role="group"
+      aria-label="本轮能力"
+    >
+      <button
+        type="button"
+        className={cn(pillBase, bookActive ? onCls : offCls)}
+        title={
+          bookActive
+            ? `书内检索开（nmem ${merged.nmem.enabled ? '开' : '关'} · 检索总闸 ${merged.retrieval.enabled ? '开' : '关'}）`
+            : '书内检索关（点此开启 nmem + 检索）'
+        }
+        onClick={() => {
+          const next = !bookActive
+          setSettings({
+            ai: {
+              ...merged,
+              nmem: { ...merged.nmem, enabled: next },
+              retrieval: { ...merged.retrieval, enabled: next }
+            }
+          })
+        }}
+      >
+        <Database className="h-3 w-3 flex-shrink-0" />
+        <span className="whitespace-nowrap">书内·nmem</span>
+      </button>
+      <button
+        type="button"
+        className={cn(pillBase, merged.webSearch.enabled ? skyOn : offCls)}
+        title={
+          merged.webSearch.enabled
+            ? `联网开 · ${backendLabel} · 每次最多 ${merged.webSearch.maxResults ?? 5} 条`
+            : '联网已关'
+        }
+        onClick={() =>
+          setSettings({
+            ai: {
+              ...merged,
+              webSearch: { ...merged.webSearch, enabled: !merged.webSearch.enabled }
+            }
+          })
+        }
+      >
+        <Globe className="h-3 w-3 flex-shrink-0" />
+        <span className="whitespace-nowrap">联网</span>
+        {merged.webSearch.enabled && (
+          <span className="whitespace-nowrap rounded bg-white/70 px-1 text-[9px] dark:bg-black/20">
+            {backendLabel}·{merged.webSearch.maxResults ?? 5}条
+          </span>
+        )}
+      </button>
+      <button
+        type="button"
+        className={cn(pillBase, academicActive ? academicOn : offCls)}
+        title={
+          academicActive
+            ? [
+                merged.webSearch.academicEnabled ? 'Semantic Scholar' : null,
+                merged.webSearch.sciverseEnabled ? 'SciVerse' : null
+              ]
+                .filter(Boolean)
+                .join(' + ')
+            : '学术检索（设置→工具服务可细配）'
+        }
+        onClick={() => {
+          const next = !academicActive
+          setSettings({
+            ai: {
+              ...merged,
+              webSearch: {
+                ...merged.webSearch,
+                academicEnabled: next,
+                sciverseEnabled: next
+                  ? Boolean(merged.webSearch.sciverseApiKey?.trim()) ||
+                    merged.webSearch.sciverseEnabled
+                  : false
+              }
+            }
+          })
+        }}
+      >
+        <GraduationCap className="h-3 w-3 flex-shrink-0" />
+        <span className="whitespace-nowrap">学术</span>
+        {academicActive && (
+          <span className="whitespace-nowrap rounded bg-white/70 px-1 text-[9px] dark:bg-black/20">
+            {[
+              merged.webSearch.academicEnabled ? 'S2' : null,
+              merged.webSearch.sciverseEnabled ? 'SV' : null
+            ]
+              .filter(Boolean)
+              .join('+')}
+          </span>
+        )}
+      </button>
+      <button
+        type="button"
+        className={cn(pillBase, mcpActive ? mcpOn : offCls)}
+        title={
+          mcpActive
+            ? `MCP 总开关已开 · 已启用服务 ${mcpServerCount} 个（细节在设置→工具服务）`
+            : 'MCP 总开关关 · 点此开启（仍需在设置里启用具体服务如 Zotero）'
+        }
+        onClick={() =>
+          setSettings({
+            ai: {
+              ...merged,
+              mcp: { ...merged.mcp, enabled: !mcpActive, servers: merged.mcp?.servers || [] }
+            }
+          })
+        }
+      >
+        <Plug className="h-3 w-3 flex-shrink-0" />
+        <span className="whitespace-nowrap">MCP</span>
+        {mcpActive && (
+          <span className="whitespace-nowrap rounded bg-white/70 px-1 text-[9px] dark:bg-black/20">
+            {mcpServerCount > 0 ? `${mcpServerCount}服` : '无服务'}
+          </span>
+        )}
+      </button>
+    </div>
+  )
+}
+
+function NewConversationButton() {
+  const newConversation = useAiStore((s) => s.newConversation)
+  const isStreaming = useAiStore((s) => s.isStreaming)
   return (
     <button
       type="button"
-      onClick={() =>
-        setSettings({
-          ai: {
-            ...settings.ai!,
-            webSearch: {
-              ...settings.ai!.webSearch,
-              enabled: !enabled,
-              prompt: settings.ai!.webSearch?.prompt || ''
-            }
-          }
-        })
-      }
-      className={cn(
-        'flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-        enabled
-          ? 'bg-primary/10 text-primary'
-          : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/5 dark:hover:text-gray-200'
-      )}
-      title={enabled ? '联网搜索已开启' : '联网搜索已关闭'}
+      onClick={() => void newConversation()}
+      disabled={isStreaming}
+      className={headerIconBtn}
+      title="新建对话"
     >
-      <Globe className="h-3.5 w-3.5" />
+      <MessageSquarePlus className="h-3.5 w-3.5" />
     </button>
   )
 }
@@ -240,13 +365,17 @@ export function AiChatPanelContent({
   return (
     <aside
       className={cn(
-        'relative hidden flex-shrink-0 flex-col border-l border-gray-200 bg-white transition-[width] dark:border-dark-border dark:bg-dark-surface md:flex',
+        'panel-surface relative hidden flex-shrink-0 flex-col border-l border-gray-200 bg-white transition-[width] dark:border-dark-border dark:bg-dark-surface md:flex',
         collapsed && 'w-11'
       )}
-      style={collapsed ? undefined : {
-        width: `${panelWidth}px`,
-        maxWidth: 'clamp(280px, calc(100vw - 744px), 560px)'
-      }}
+      style={
+        collapsed
+          ? undefined
+          : {
+              width: `${panelWidth}px`,
+              maxWidth: 'clamp(280px, calc(100vw - 744px), 560px)'
+            }
+      }
     >
       {!collapsed && (
         <div
@@ -260,39 +389,52 @@ export function AiChatPanelContent({
           className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none"
         />
       )}
-      <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-gray-200 px-2 dark:border-dark-border">
-        {!collapsed && (
-          <>
-            <Sparkles className="h-4 w-4 flex-shrink-0 text-emerald-600" />
-            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-gray-700 dark:text-gray-200">
-              AI 助手
-            </span>
-            <WebSearchToggle />
-            <ConversationHistory />
-            <KnowledgeBaseButton />
-            <button
-              type="button"
-              onClick={() => void onClear()}
-              disabled={messages.length === 0 || isStreaming}
-              className="icon-btn h-8 w-8"
-              title="清空本书对话"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-          </>
-        )}
-        <button
-          type="button"
-          onClick={() => setCollapsed((value) => !value)}
-          className="icon-btn h-8 w-8 flex-shrink-0"
-          title={collapsed ? '展开 AI 助手' : '收起 AI 助手'}
-        >
-          {collapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        </button>
-      </div>
 
-      {!collapsed && (
+      {collapsed ? (
+        <div className="flex h-full flex-col items-center gap-2 py-2">
+          <button
+            type="button"
+            onClick={() => setCollapsed(false)}
+            className={headerIconBtn}
+            title="展开 AI 对话"
+          >
+            <ChevronLeft className="h-4 w-4" />
+          </button>
+          <Sparkles className="h-4 w-4 text-emerald-600" />
+        </div>
+      ) : (
         <>
+          {/* 顶栏：能力 + 会话工具（会话列表仍是原来的展开菜单） */}
+          <div className="flex flex-shrink-0 flex-col gap-1.5 border-b border-gray-200 px-2 py-1.5 dark:border-dark-border">
+            <div className="flex items-center gap-1">
+              <Sparkles className="h-4 w-4 flex-shrink-0 text-emerald-600" />
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold text-gray-700 dark:text-gray-200">
+                AI 对话
+              </span>
+              <NewConversationButton />
+              <ConversationHistory />
+              <KnowledgeBaseButton />
+              <button
+                type="button"
+                onClick={() => void onClear()}
+                disabled={messages.length === 0 || isStreaming}
+                className={cn(headerIconBtn, 'hover:text-red-500 dark:hover:text-red-400')}
+                title="清空本书全部对话"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setCollapsed(true)}
+                className={headerIconBtn}
+                title="收起 AI 对话"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+            <TopCapabilityPills />
+          </div>
+
           {!isConfigured && (
             <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-300">
               <Settings2 className="h-3.5 w-3.5 flex-shrink-0" />
@@ -308,6 +450,10 @@ export function AiChatPanelContent({
             onRetry={onRetryNmem}
             onSyncBook={onSyncBookToNmem}
           />
+
+          {/* 单对话内多轮导航（≥2 问才显示） */}
+          <TurnNav messages={messages} />
+
           <ChatMessages
             messages={messages}
             isStreaming={isStreaming}
@@ -320,7 +466,6 @@ export function AiChatPanelContent({
             onRegenerate={onRegenerate}
             onRetry={onRetryMessage}
           />
-          <ChatToggles />
           <ChatInput
             isStreaming={isStreaming}
             isConfigured={isConfigured}
@@ -386,7 +531,6 @@ export default function AiChatPanel({
     return () => window.clearInterval(interval)
   }, [aiSettings?.nmem.baseUrl, aiSettings?.nmem.statusCacheMs, refreshNmemStatus])
 
-  // 与后端 resolveEngine 一致：空 baseUrl 的引擎不算已配置
   const assigned =
     aiSettings?.engines?.find((e) => e.id === aiSettings.taskAssignment?.chat) ||
     aiSettings?.engines?.[0]

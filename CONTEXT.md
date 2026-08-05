@@ -1,6 +1,6 @@
 # 听伴 (TingEar) CONTEXT
 
-> 最近核对：2026-07-30 | 严格对照当前源码；设置 4Tab 定高、healBookLayout 打开热路径、大纲 repository v4、原子写/日志批量、openExternal 白名单、设置导入导出
+> 最近核对：2026-08-05 | 主题色设置移除（固定太古蓝，纯 CSS 变量；`themeColors.ts` 已删）
 
 ## 一分钟速览
 
@@ -15,14 +15,12 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `src/components/PlayerView.tsx` | 听书模式选章、句子列表、顶栏工具；沉浸时顶栏上移 | 改听书正文 UI |
 | `src/components/BookShelf.tsx` | 书架编排：状态/批量/专辑/右键；卡片 UI 在 `bookshelf/` | 改书架流程 |
 | `src/components/bookshelf/*` | 缩放常量、网格/列表卡、继续阅读、批量栏 | 改书架卡片 UI |
-| `src/components/SettingsModal.tsx` | 设置弹窗壳（4 tabs：常规/朗读/AI/清洗），`h-[80vh]` 定高 | 改设置入口 |
-| `src/components/settings/*` | General/TTS/Ai 分面板（Appearance/Shortcuts/About 已删） | 改各设置页 |
-| `src/backgroundPresets.ts` | 内置背景图预设元数据（id/name/file，6 张） | 改预设列表 |
-| `src/components/AppBackground.tsx` | 根层背景图+遮罩组件（z-0、pointer-events-none、disabled 返回 null） | 改背景渲染 |
+| `src/components/SettingsModal.tsx` | 设置弹窗壳（5 tabs：常规/背景/朗读/AI/清洗），`h-[80vh]` 定高 | 改设置入口 |
+| `src/components/settings/*` | General/Background/TTS/Ai 分面板 | 改各设置页 |
 | `src/components/ui/ContextMenu.tsx` | Portal 右键菜单（视口钳制、键盘、焦点恢复） | 改任何右键/溢出菜单 |
 | `src/components/reader/AiReaderView.tsx` | AI 阅读三栏；大纲面板、连续正文、AI 侧栏；旧书伪结构 | 改 AI 阅读布局/生命周期 |
 | `src/components/reader/ContentCards.tsx` / `ContentCard.tsx` | 章节标题去重、正文右键、连续排版、当前句/raw 高亮 | 改正文/高亮/滚动 |
-| `src/components/reader/ChapterOutlinePanel.tsx` | **唯一挂载**的当前章大纲 UI（生成/重试/改名） | 改大纲面板 |
+| `src/components/reader/ChapterOutlinePanel.tsx` | **唯一挂载**的当前章大纲 UI（Brief 渲染/升级/重试/改名）；关系纵览 tab 已删 | 改大纲面板 |
 | `src/components/reader/ChapterOutline.tsx` / `SectionNav.tsx` | **已删除**（曾未挂载） | — |
 | `src/components/reader/ModeSwitch.tsx` / `ReaderHeader.tsx` | AI 阅读/听书切换；阅读页顶栏 | 改模式控件/页头 |
 | `src/components/ai/*` | 侧栏、消息、引用、选区、检索、nmem 横幅、`KnowledgeBaseButton`（每书本地知识库入口：未建/建中/已建+重建·删除） | 改 AI 对话交互 |
@@ -32,14 +30,18 @@ Windows Electron 应用：导入 EPUB/TXT/PDF/DOCX/MD/HTML/MOBI(需 Calibre)，�
 | `src/utils/bookData.ts` | 分句/章节/structure 校验/pseudo 重建/PlayPref/`healBookLayoutForReading`/`normalizeAndHealBook` | 改文本数据或结构一致性 |
 | `src/stores/playerStore.ts` / `bookStore.ts` / `settingsStore.ts` / `aiStore.ts` | 播放（`prepareForBook`）、书籍（`enterPlayerSession`）、`readerMode`、AI 流状态 | 改状态默认值 |
 | `src/cleanRules.ts` / `src/shortcuts.ts` | 默认清洗规则；快捷键定义 | 改规则或键位 |
+| `src/backgroundPresets.ts` / `src/panelSurface.ts` / `src/components/AppBackground.tsx` | 底图预设；组件不透明度+毛玻璃；根层=纯色+图（`useIsDark` 在 `src/hooks/useIsDark.ts`） | 改背景三层 |
+| `src/utils/extractImageColor.ts` | 从底图取样；底层色 resolve | 改底层纯色 |
+| `src/components/settings/BackgroundSettingsPanel.tsx` | 背景 Tab 4 段：①底图（无背景/预设/上传+模糊+压暗）②底层色 ③组件浓度+毛玻璃 ④正文浓度 | 改背景设置 UI |
+| `src/styles/globals.css` | 全局样式 + `data-panel-on` 统一半透明面板（fx 仅 `plain|frost`）；主题色固定太古蓝，`--on-primary-rgb` 纯 CSS 深浅切换 | 改背景叠层样式/主色 |
 | `electron/main.ts` / `preload.ts` | 启动、托盘、`window.api` | 改主进程或桥接 |
 | `electron/ipc/aiHandlers.ts` | `ai:chat/*`、`ai:nmem:*`、`ai:outline:*` | 改 AI/大纲 IPC |
-| `electron/ipc/fileHandlers.ts` | 导入/导出、JSON 读写、`getDataDir`、启动 ingest、背景图 IPC（list/add/resolve/remove） | 改导入/持久化 |
+| `electron/ipc/fileHandlers.ts` | 导入/导出、JSON 读写、`getDataDir`、启动 ingest | 改导入/持久化 |
 | `electron/services/ai/llm-caller.ts` / `ai-service.ts` | SSE、错误分类、路由、RAG 编排、代理走 axios、智谱别名 | 改模型请求/检索编排 |
 | `electron/services/ai/nmem-bridge.ts` | nmem health/search/ingest HTTP | 改知识库协议 |
 | `electron/services/ai/local-ingest.ts` / `vector-store.ts` / `embedding-caller.ts` | **本地向量知识库**：按章分块(≤800字+2句重叠+章名拼进 embedding)→OpenAI 兼容 embedding→`vectors/{bookId}.json`(base64 Float32)；检索=进程内缓存(mtime 失效)+cosine+章节过滤+相对分数阈值 | 改本地索引/分块/检索 |
 | `electron/services/ai/ingest-service.ts` / `ingest-scheduler.ts` | **整本**一书一源同步、`ingest-status.json`、排队重试 | 改知识库导入 |
-| `electron/services/ai/outline-*.ts` | 生成规则、输入校验、FIFO 队列、v3 缓存 | 改大纲流水线 |
+| `electron/services/ai/outline-*.ts` | 生成规则、输入校验、FIFO 队列、v4 缓存（可读 v3～当前） | 改大纲流水线 |
 | `electron/services/ai/ai-history.ts` / `ai-config.ts` | `ai-history.json`；主进程 AI 配置入口 | 改历史或配置读取 |
 | `electron/ipc/ttsHandlers.ts` + `tts-engines/*` | 合成/引擎 CRUD；Edge/千问/HTTP | 改 TTS |
 | `electron/services/parsers/*` | 各格式解析、`structureBuilder`、`textPreprocessor`、mobi→Calibre | 改导入解析/清洗 |
@@ -99,16 +101,20 @@ useTTS.playSentence
 - 兜底标题 `第N部分`（`toChineseNumber` 支持到千）；无标题 MD 文集走伪分章，不造 `第N章`
 - `structureMeta.contentHash`：句子换行拼接后 UTF-8 SHA-256 **前 16 位**（`contentHash.ts`）
 
-## AI 对话 / RAG / 引用 / raw 朗读
+## AI 对话 / RAG / 引用 / raw 朗读 / 工具调用 / MCP
 
 ```text
 aiStore.sendMessage
  -> ai:chat → AiService.chat
- -> classifyQuestion(selection→greeting→book_wide→chapter→current_sentence→general)
- -> combinedRetrieve：nmem.search ‖ 本地向量(searchBookVectors) 并行
-    -> chapter 类问题：本地向量只在该章算 cosine（下推过滤，避免 topK 槽位被别章占满）
-    -> 双源 RRF 倒数排名融合 + 前 100 字去重（nmem Rust 分数与本地 cosine 0..1 尺度不可比，不比绝对分数只比排名）
- -> buildSourceRefs（按 bookId/路由/当前章硬过滤）→ sources 事件 → streamChat SSE chunks → done/error
+ -> classifyQuestion(...)
+ -> agent.mode=auto|tools 且有可用工具：
+      注册内置 tools（search_book / web_search / semantic_scholar / sciverse）
+      + MCP 宿主 tools/list（stdio/HTTP，如 Zotero）
+      → streamChat(tools) → tool_calls → 执行 → 再 stream（最多 maxToolRounds）
+ -> agent.mode=prefetch 或无工具：旧预检索路径
+      combinedRetrieve（nmem ‖ 本地向量 RRF）+ 并行联网/学术 → 注入 prompt → stream
+ -> sources 事件 → chunk → done/error
+会话：ai:conv:ensure 恢复 active；清理重复空「新对话」
 ```
 
 - 200 响应中的 error envelope 或空正文算失败；主模型失败可试一次备用模型
@@ -130,19 +136,25 @@ aiStore.sendMessage
 - 历史：`ai-history.json` 每书最多 200 条；损坏文件整体抛错，禁止静默覆盖
 - `speakRaw`：卡片/回答朗读，不写 `currentSentenceIndex`/历史/字幕；`rawSpeechActive` 隔离书籍会话
 
-## 章节大纲（repository v4）
+## 章节大纲（repository v4，ChapterBrief schema=2）
 
 | 模块 | 作用 |
 |---|---|
 | `outline-input.ts` | 从分片库重载当前章，校验 chapterKey，不信任 renderer 正文；`sentences: string[]` |
-| `outline-generator.ts` | 纯 LLM 生成（短章策略、分块、偏移校验）；**不落盘** |
+| `outline-generator.ts` | 纯 LLM 生成（短章策略、分块、偏移校验）；**不落盘**。产出 ChapterBrief（thesis/whyItMatters/hinges + sections） |
 | `outline-queue.ts` | 进程级 FIFO 单飞行 |
-| `outline-batch.ts` | 单章/批量生成编排，`generateChapterOutlineRecord` 写 repository |
-| `outline-repository.ts` | `outlines/<bookId>.json`，`OUTLINE_CACHE_VERSION=4`，原子写 |
+| `outline-batch.ts` | 单章/批量生成编排，`generateChapterOutlineRecord` 写 repository；新写入 `schemaVersion=2` |
+| `outline-repository.ts` | `outlines/<bookId>.json`，写入 `OUTLINE_CACHE_VERSION=4`，**可读 v3～当前**；`schemaVersion` 软标记 |
 | IPC | `ai:outline:get/generate/update`（另有 legacy-generate 兼容） |
 
 切章只读缓存，不自动生成。缓存键：`bookId + chapterKey + sentenceContentHash`。  
+**命中规则（性价比）**：hash 匹配且 status∈{generated,short_chapter} → 跳过 LLM；`schemaVersion` 旧（legacy=1）也算命中（软失效），绝不因缺 thesis/hinges 而重烧。  
+**禁止**再因文件 version 严格等于 N 而整库作废（v3 曾因此全 miss）。日志：`[outline-cache] hit|miss|force|write`。  
 旧 generator 内整书 CACHE_VERSION=2 已移除，避免双缓存。
+
+**产物形态**：schema=2（ChapterBrief）= `thesis`(一句话主张) + `whyItMatters`(为何重要) + `hinges`(0～3 阿基米德支点) + `sections`(2～4 论证脊骨)。schema=1（legacy）= 旧目录式 title/point/summary。新字段全可选，legacy 记录零迁移。  
+**生成策略**：单 JSON 对象（非数组）一次产出完整 Brief；`CHUNK_SIZE=8000` 让多数中短章单次调用，长章才分块（块间 1.5s）。旧默认 prompt 已 persist 时自动迁移到新默认（识别旧全文，不破坏自定义）。  
+**UI**：`ChapterOutlinePanel` 单面板（关系纵览 tab 已删）；schema=2 显示 thesis→为何重要→脊骨→支点，schema=1 兼容显示 title/point + 「升级为阅读简报」按钮。单章按钮：无缓存 `force=false`，有缓存 `force=true`（重新生成/升级）。
 
 ## 音量注意
 
@@ -194,13 +206,13 @@ TTS：`ttsSkip`、`ttsSession`、`engineImport`
 
 - 在线 Edge/千问/HTTP + 系统 Web Speech 临时兜底；引擎管理与导入导出可用
 - 清洗纯规则；音量 0~200%；封面 `COVER_STYLE_VERSION=v2-light`
-- 应用背景图：`AppSettings.background`（默认关）；内置 6 预设在 `resources/backgrounds/`（打包到 `resourcesPath/backgrounds/`），上传图存 `{dataDir}/backgrounds/`；图源经 `background:resolve` 转 data URL；大块容器透明、卡片留底
 - AI 阅读 A–F、共享右键菜单、连续阅读排版、章节标题去重、全局 focus-visible 已完成
-- 大纲按当前章按需生成，缓存 **v4**；`ChapterOutlinePanel` 为唯一大纲 UI（旧 `ChapterOutline`/`SectionNav` 已删）
+- 大纲按当前章按需生成，缓存 **v4**（可读 v3～当前），产物 schema=2 ChapterBrief（thesis/hinges）；`ChapterOutlinePanel` 为唯一大纲 UI（旧 `ChapterOutline`/`SectionNav`/关系纵览 tab 已删）
 - TTS 内存预取缓存 LRU 上限 50 句；听书大章仅渲染当前句附近窗口
 - 知识库 **整本**同步（非按章）；源名 `书名 [bookId=id]`（`parseSourceMetadata` 同时兼容旧前缀格式）；nmem 默认 `127.0.0.1:14242`
 - 本地向量检索：双源 nmem‖local 并行 → **RRF 融合**（不比绝对分数，只比排名）；本地有进程内缓存、章节过滤、相对分数阈值；embedding 模型/维度变更须重建知识库（`VectorCompatError`）
 - Electron 主进程 `fetch` 不读代理环境变量；检测到代理时模型请求走 axios（见 `llm-caller.ts`）
 - 智谱旧别名 `GLM-4.7-Flash` → 请求层映射 `glm-4.7`
+- 背景设置 4 段：选「无背景」即关（无启用复选框）；删除自定义图落到无背景有效态（`presetId:null`+`enabled:false`）；「取自底图」在无背景时禁用并提示。旧 `fit/overlayColor/panelColor` 读入时静默丢弃，`panelEffect` 仅兼容 frost
+- 主题色设置已移除：固定太古蓝 `#4F6EF7`（`globals.css` 静态变量；旧 `settings.themeColor` 读入即丢弃）。实心 `bg-primary` 按钮图标/文字用 `text-[rgb(var(--on-primary-rgb))]`（纯 CSS：浅色=深变体、深色=白）；侧栏选中态 `nav-item-active` 本身是 `text-primary`，图标随 `currentColor`
 - MOBI 依赖本机 Calibre；**PDF 仅文字层**（扫描版需 OCR，导入会提示）；不要把书籍/API Key/日志/缓存提交 Git
-
