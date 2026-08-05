@@ -43,6 +43,7 @@ test.pdf
 .superpowers/
 .codegraph/
 openspec/
+.zcode/
 
 # 编辑器
 .vscode/
